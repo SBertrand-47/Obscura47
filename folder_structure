@@ -24,3 +24,10 @@ OBSCURA47/
 │── .gitignore
 │── folder_structure
 │── README.md
+
+
+Component	Discovery Port	Listening Port	Computer
+Proxy (Computer 1)	50000	9050	Computer 1
+Client (Computer 2)	50000 (for Proxy) + 50002 (for Nodes)	None	Computer 2
+Node (Computer 2)	50002	5001	Computer 2
+Exit Node (Computer 3)	50003	6000+	Computer 3

@@ -2,7 +2,12 @@ import socket
 import json
 import requests
 import threading
+import time
 from src.core.router import decrypt_message, encrypt_message
+from src.core.discover import broadcast_discovery, listen_for_discovery
+
+EXIT_NODE_MULTICAST_PORT = 50003  # Discovery port for exit nodes
+DISCOVERY_INTERVAL = 5  # Broadcast every 5 seconds
 
 class ExitNode:
     def __init__(self, host='0.0.0.0', port=6000):
@@ -12,6 +17,24 @@ class ExitNode:
         self.host = host
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.running = True
+        self.peers = []  # Stores discovered nodes
+
+        # Start peer discovery
+        threading.Thread(target=self.listen_for_proxies, daemon=True).start()
+        threading.Thread(target=self.continuous_discovery, daemon=True).start()
+
+    def listen_for_proxies(self):
+        """Continuously listen for proxy/node discovery requests."""
+        print(f"👂 Listening for discovery on port {EXIT_NODE_MULTICAST_PORT}...")
+        listen_for_discovery(self.peers, self.port, EXIT_NODE_MULTICAST_PORT)
+
+    def continuous_discovery(self):
+        """Continuously broadcasts discovery requests so proxies/nodes can find the Exit Node."""
+        while self.running:
+            print("🔍 Broadcasting Exit Node discovery request...")
+            broadcast_discovery(EXIT_NODE_MULTICAST_PORT)
+            time.sleep(DISCOVERY_INTERVAL)
 
     def start_server(self):
         """Start listening for incoming relay requests."""
@@ -19,7 +42,7 @@ class ExitNode:
         self.server_socket.listen(5)
         print(f"🚪 Exit Node started at {self.host}:{self.port}, waiting for requests...")
 
-        while True:
+        while self.running:
             client_socket, addr = self.server_socket.accept()
             print(f"🔗 Connection from {addr}")
             threading.Thread(target=self.handle_request, args=(client_socket,)).start()
@@ -79,15 +102,15 @@ class ExitNode:
 
     def send_response_back(self, return_path, response_data):
         """Sends the fetched response **directly back** to the proxy."""
-        if not return_path:
-            print("⚠️ No return path provided, response lost.")
+        if not return_path or "host" not in return_path or "port" not in return_path:
+            print("⚠️ Invalid return path provided, response lost.")
             return
 
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect((return_path['host'], return_path['port'] + 1))  # Proxy listens on +1 port
+                sock.connect((return_path['host'], return_path['port']))  # Corrected proxy port handling
                 packet = {
-                    "request_id": return_path["request_id"],
+                    "request_id": return_path.get("request_id", ""),
                     "data": response_data
                 }
                 sock.send(json.dumps(packet).encode())
