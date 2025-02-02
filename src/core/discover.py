@@ -4,26 +4,27 @@ import struct
 import time
 
 MULTICAST_GROUP = "239.255.255.250"  # Multicast address for LAN
-MULTICAST_PORT = 50000  # Port for discovery
+DEFAULT_MULTICAST_PORT = 50000  # Default discovery port for clients
+NODE_MULTICAST_PORT = 50001  # Separate discovery port for nodes
 
-def broadcast_discovery():
+def broadcast_discovery(multicast_port=DEFAULT_MULTICAST_PORT):
     """Sends a multicast message to discover other nodes."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
         message = json.dumps({"type": "discovery_request"}).encode()
-        sock.sendto(message, (MULTICAST_GROUP, MULTICAST_PORT))
-        print("🔍 Sent multicast discovery request...")
+        sock.sendto(message, (MULTICAST_GROUP, multicast_port))
+        print(f"🔍 Sent multicast discovery request on port {multicast_port}...")
 
-def listen_for_discovery(peers):
+def listen_for_discovery(peers, multicast_port=DEFAULT_MULTICAST_PORT):
     """Listens for multicast discovery requests and responds with node info."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", MULTICAST_PORT))
+        sock.bind(("", multicast_port))
 
         mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-        print(f"👂 Listening for discovery requests on multicast {MULTICAST_GROUP}:{MULTICAST_PORT}...")
+        print(f"👂 Listening for discovery requests on multicast {MULTICAST_GROUP}:{multicast_port}...")
 
         while True:
             try:
