@@ -5,7 +5,7 @@ from core.router import decrypt_message, encrypt_message
 import threading
 
 class ExitNode:
-    def __init__(self, host='127.0.0.1', port=6000):
+    def __init__(self, host='0.0.0.0', port=6000):
         """
         The ExitNode listens for final relay messages, fetches external URLs,
         and sends the response back through the route.
