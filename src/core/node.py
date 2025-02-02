@@ -44,7 +44,7 @@ class ObscuraNode:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
             print(f"🔹 Node started at {self.host}:{self.port}, waiting for connections...")
-        except OSError as e:
+        except OSError:
             print(f"❌ Port {self.port} is already in use! Trying another port...")
             self.port += 1  
             self.start_server()  
