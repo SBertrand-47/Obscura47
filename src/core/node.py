@@ -3,13 +3,12 @@ import threading
 import json
 import time
 from src.core.router import Router, decrypt_message
-from src.client.obscura_client import ObscuraClient  # Import discovery
-from src.core.discover import listen_for_discovery, broadcast_discovery  # Use correct discovery
+from src.core.discover import listen_for_discovery, broadcast_discovery  # Import discovery
 
-NODE_DISCOVERY_PORT = 50001  # Separate multicast port for nodes
+DISCOVERY_PORT = 50000  # Use the same port as clients
 
 class ObscuraNode:
-    def __init__(self, host='0.0.0.0', port=5001, enable_discovery=True):
+    def __init__(self, host='0.0.0.0', port=5001):
         """
         Initialize a relay node that listens for encrypted messages.
         """
@@ -21,19 +20,18 @@ class ObscuraNode:
         # Fix: Set SO_REUSEADDR to prevent "Address already in use" errors
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Start peer discovery if enabled
+        # Start peer discovery
         self.peers = []
-        if enable_discovery:
-            threading.Thread(target=listen_for_discovery, args=(self.peers, NODE_DISCOVERY_PORT), daemon=True).start()
-            print(f"🚀 Node Discovery started on port {NODE_DISCOVERY_PORT}...")
+        threading.Thread(target=listen_for_discovery, args=(self.peers,), daemon=True).start()
+        print(f"🚀 Node Discovery started on port {DISCOVERY_PORT}...")
 
-            # Send discovery requests
-            for _ in range(3):  # Try 3 times
-                broadcast_discovery(NODE_DISCOVERY_PORT)
-                time.sleep(2)
+        # Send discovery requests
+        for _ in range(3):  # Try 3 times
+            broadcast_discovery()
+            time.sleep(2)
 
-            print(f"⏳ Waiting for peers to be discovered...")
-            time.sleep(5)  # Give time for discovery to populate peers
+        print(f"⏳ Waiting for peers to be discovered...")
+        time.sleep(5)  # Give time for discovery to populate peers
 
         # Create the router with updated peers
         self.router = Router(self, self.peers)
@@ -104,7 +102,7 @@ class ObscuraNode:
 
 # Start the node
 if __name__ == "__main__":
-    node = ObscuraNode(port=5001, enable_discovery=True)
+    node = ObscuraNode(port=5001)
     node.run()
 
     # Allow some time for discovery
