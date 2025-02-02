@@ -3,7 +3,10 @@ import threading
 import json
 import time
 from src.core.router import Router, decrypt_message
-from src.core.discover import listen_for_discovery, broadcast_discovery, NODE_MULTICAST_PORT
+from src.core.discover import listen_for_discovery, broadcast_discovery
+
+NODE_MULTICAST_PORT = 50002  # Node discovery
+DISCOVERY_INTERVAL = 5  # Broadcast every 5 seconds
 
 class ObscuraNode:
     def __init__(self, host='0.0.0.0', port=5001):
@@ -14,29 +17,41 @@ class ObscuraNode:
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
+        self.peers = []
 
-        # Fix: Set SO_REUSEADDR to prevent "Address already in use" errors
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Start peer discovery on NODE_MULTICAST_PORT
-        self.peers = []
+        # 🔥 Start discovery listener continuously
         threading.Thread(
-            target=listen_for_discovery, 
-            args=(self.peers, self.port, NODE_MULTICAST_PORT), 
+            target=self.listen_for_nodes,
             daemon=True
         ).start()
+
+        # 🔥 Continuously broadcast discovery requests
+        threading.Thread(
+            target=self.continuous_discovery,
+            daemon=True
+        ).start()
+
         print(f"🚀 Node Discovery started on port {NODE_MULTICAST_PORT}...")
 
-        # Send discovery requests on NODE_MULTICAST_PORT
-        for _ in range(3):  
-            broadcast_discovery(NODE_MULTICAST_PORT)
-            time.sleep(2)
-
-        print(f"⏳ Waiting for peers to be discovered...")
-        time.sleep(5)  # Give time for discovery to populate peers
+        # Allow time for initial discovery
+        time.sleep(5)
 
         # Create the router with updated peers
         self.router = Router(self, self.peers)
+
+    def listen_for_nodes(self):
+        """Continuously listen for other nodes' discovery responses."""
+        print("👂 Listening for discovery on 50002...")
+        listen_for_discovery(self.peers, self.port, NODE_MULTICAST_PORT)
+
+    def continuous_discovery(self):
+        """Continuously broadcast discovery requests every few seconds."""
+        while self.running:
+            print("🔍 Broadcasting discovery request...")
+            broadcast_discovery(NODE_MULTICAST_PORT)
+            time.sleep(DISCOVERY_INTERVAL)
 
     def start_server(self):
         """Start the node server to listen for incoming encrypted messages."""
@@ -105,12 +120,6 @@ if __name__ == "__main__":
     node = ObscuraNode(port=5001)
     node.run()
 
-    # Allow some time for discovery
-    time.sleep(5)
-
-    # Relay a test message through the network
-    if node.peers:
-        destination = node.peers[0]  
-        node.router.relay_message("Hello, Obscura47!", destination)
-    else:
-        print("⚠️ No peers discovered yet!")
+    # Allow discovery to happen continuously
+    while True:
+        time.sleep(1)

@@ -4,8 +4,9 @@ import struct
 import time
 
 MULTICAST_GROUP = "239.255.255.250"
-DISCOVERY_PORT = 50000  # Clients use this
-NODE_MULTICAST_PORT = 50001  # Nodes use this
+DISCOVERY_PORT = 50000  # Clients/Proxy discovery
+NODE_MULTICAST_PORT = 50002  # Nodes should be using this!
+EXIT_NODE_MULTICAST_PORT = 50003  # Exit node discovery
 
 def get_local_ip():
     """Returns the machine's LAN IP (avoids 127.0.0.1)."""
@@ -45,6 +46,8 @@ def listen_for_discovery(peers, local_port=5001, multicast_port=DISCOVERY_PORT):
                 try:
                     data, addr = sock.recvfrom(1024)
                     message = json.loads(data.decode())
+
+                    print(f"📩 Received discovery message from {addr}: {message}")
 
                     if message.get("type") == "discovery_request":
                         response = json.dumps({
