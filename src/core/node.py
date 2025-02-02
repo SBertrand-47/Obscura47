@@ -3,9 +3,7 @@ import threading
 import json
 import time
 from src.core.router import Router, decrypt_message
-from src.core.discover import listen_for_discovery, broadcast_discovery  # Import discovery
-
-DISCOVERY_PORT = 50000  # Use the same port as clients
+from src.core.discover import listen_for_discovery, broadcast_discovery, NODE_MULTICAST_PORT
 
 class ObscuraNode:
     def __init__(self, host='0.0.0.0', port=5001):
@@ -20,14 +18,18 @@ class ObscuraNode:
         # Fix: Set SO_REUSEADDR to prevent "Address already in use" errors
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Start peer discovery
+        # Start peer discovery on NODE_MULTICAST_PORT
         self.peers = []
-        threading.Thread(target=listen_for_discovery, args=(self.peers,), daemon=True).start()
-        print(f"🚀 Node Discovery started on port {DISCOVERY_PORT}...")
+        threading.Thread(
+            target=listen_for_discovery, 
+            args=(self.peers, self.port, NODE_MULTICAST_PORT), 
+            daemon=True
+        ).start()
+        print(f"🚀 Node Discovery started on port {NODE_MULTICAST_PORT}...")
 
-        # Send discovery requests
-        for _ in range(3):  # Try 3 times
-            broadcast_discovery()
+        # Send discovery requests on NODE_MULTICAST_PORT
+        for _ in range(3):  
+            broadcast_discovery(NODE_MULTICAST_PORT)
             time.sleep(2)
 
         print(f"⏳ Waiting for peers to be discovered...")
@@ -44,8 +46,8 @@ class ObscuraNode:
             print(f"🔹 Node started at {self.host}:{self.port}, waiting for connections...")
         except OSError as e:
             print(f"❌ Port {self.port} is already in use! Trying another port...")
-            self.port += 1  # Try the next available port
-            self.start_server()  # Retry with new port
+            self.port += 1  
+            self.start_server()  
             return
 
         while self.running:
@@ -65,7 +67,6 @@ class ObscuraNode:
                 if not data:
                     break
 
-                # Parse the JSON packet
                 incoming_packet = json.loads(data)
                 encrypted_data = incoming_packet.get("encrypted_data", None)
                 if not encrypted_data:
@@ -100,7 +101,6 @@ class ObscuraNode:
         server_thread = threading.Thread(target=self.start_server)
         server_thread.start()
 
-# Start the node
 if __name__ == "__main__":
     node = ObscuraNode(port=5001)
     node.run()
@@ -110,7 +110,7 @@ if __name__ == "__main__":
 
     # Relay a test message through the network
     if node.peers:
-        destination = node.peers[0]  # Pick first discovered peer
+        destination = node.peers[0]  
         node.router.relay_message("Hello, Obscura47!", destination)
     else:
         print("⚠️ No peers discovered yet!")

@@ -1,13 +1,12 @@
 import socket
 import json
 import requests
-from core.router import decrypt_message, encrypt_message
 import threading
+from src.core.router import decrypt_message, encrypt_message
 
 class ExitNode:
     def __init__(self, host='0.0.0.0', port=6000):
-        """
-        The ExitNode listens for final relay messages, fetches external URLs,
+        """The ExitNode listens for final relay messages, fetches external URLs,
         and sends the response back through the route.
         """
         self.host = host
@@ -48,7 +47,7 @@ class ExitNode:
             print(f"🌍 Received Exit Request: {request_data}")
 
             url = request_data.get("data")
-            return_path = request_data.get("return_path")  # This tells us where to send the response
+            return_path = request_data.get("return_path")  # Where to send response
 
             if not url:
                 print("⚠️ No URL found in request_data.")
@@ -79,10 +78,7 @@ class ExitNode:
             return f"Error fetching {url}: {e}"
 
     def send_response_back(self, return_path, response_data):
-        """
-        Sends the fetched response **directly back** to the proxy using the provided return path.
-        This avoids unnecessary relays and speeds up response delivery.
-        """
+        """Sends the fetched response **directly back** to the proxy."""
         if not return_path:
             print("⚠️ No return path provided, response lost.")
             return
@@ -91,7 +87,7 @@ class ExitNode:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect((return_path['host'], return_path['port'] + 1))  # Proxy listens on +1 port
                 packet = {
-                    "request_id": return_path["request_id"],  # Identifies which request this response is for
+                    "request_id": return_path["request_id"],
                     "data": response_data
                 }
                 sock.send(json.dumps(packet).encode())
