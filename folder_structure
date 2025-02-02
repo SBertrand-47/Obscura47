@@ -1,0 +1,26 @@
+OBSCURA47/
+│── docs/
+│── src/
+│   │── client/
+│   │   │── __init__.py
+│   │   │── obscura_client.py
+│   │── core/
+│   │   │── __pycache__/
+│   │   │── __init__.py
+│   │   │── discover.py
+│   │   │── encryptions.py
+│   │   │── exit_node.py
+│   │   │── node.py
+│   │   │── proxy.py
+│   │   │── router.py
+│   │   │── testing_obscura.py
+│   │── utils/
+│   │   │── __init__.py
+│   │   │── config.py
+│   │   │── logger.py
+│   │── main.py
+│── tests/
+│── venv/
+│── .gitignore
+│── folder_structure
+│── README.md
