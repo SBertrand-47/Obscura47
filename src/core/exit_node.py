@@ -1,13 +1,16 @@
 import socket
 import json
 import requests
+import ipaddress
 import threading
 import time
-from src.core.router import decrypt_message, encrypt_message
+import base64
+from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
 from src.core.discover import broadcast_discovery, listen_for_discovery
+from src.utils.config import EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT, DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL, EXIT_DOH_ENDPOINT, EXIT_DOH_TIMEOUT, EXIT_DENY_PRIVATE_IPS, EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS, EXIT_KEY_PATH
 
-EXIT_NODE_MULTICAST_PORT = 50003  # Discovery port for exit nodes
-DISCOVERY_INTERVAL = 5  # Broadcast every 5 seconds
+EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
+DISCOVERY_INTERVAL = CFG_DISCOVERY_INTERVAL  # Broadcast interval
 
 class ExitNode:
     def __init__(self, host='0.0.0.0', port=6000):
@@ -19,6 +22,8 @@ class ExitNode:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
         self.peers = []  # Stores discovered nodes
+        self.tunnels = {}  # request_id -> { 'sock': socket, 'return_path': dict }
+        self.priv_key, self.pub_pem = ecc_load_or_create_keypair(EXIT_KEY_PATH)
 
         # Start peer discovery
         threading.Thread(target=self.listen_for_proxies, daemon=True).start()
@@ -27,7 +32,7 @@ class ExitNode:
     def listen_for_proxies(self):
         """Continuously listen for proxy/node discovery requests."""
         print(f"👂 Listening for discovery on port {EXIT_NODE_MULTICAST_PORT}...")
-        listen_for_discovery(self.peers, self.port, EXIT_NODE_MULTICAST_PORT)
+        listen_for_discovery(self.peers, self.port, EXIT_NODE_MULTICAST_PORT, extra_fields={'pub': self.pub_pem})
 
     def continuous_discovery(self):
         """Continuously broadcasts discovery requests so proxies/nodes can find the Exit Node."""
@@ -50,36 +55,65 @@ class ExitNode:
     def handle_request(self, client_socket):
         """Handle requests forwarded through the network."""
         try:
-            data = client_socket.recv(4096).decode()
-            if not data:
-                return
-
-            packet = json.loads(data)
-            encrypted_data = packet.get("encrypted_data")
-            if not encrypted_data:
-                print("⚠️ No encrypted data found in request.")
-                return
-
-            # Decrypt the request (should contain 'data' and 'return_path')
-            decrypted_message = decrypt_message(encrypted_data)
-            if decrypted_message is None:
-                print("⚠️ Failed to decrypt incoming exit request.")
-                return
-
-            request_data = json.loads(decrypted_message)
-            print(f"🌍 Received Exit Request: {request_data}")
-
-            url = request_data.get("data")
-            return_path = request_data.get("return_path")  # Where to send response
-
-            if not url:
-                print("⚠️ No URL found in request_data.")
-                return
-
-            response_content = self.fetch_page(url)
-
-            # Send response back to the proxy via return path
-            self.send_response_back(return_path, response_content)
+            buffer = ""
+            while True:
+                chunk = client_socket.recv(4096).decode()
+                if not chunk:
+                    break
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    if not line:
+                        continue
+                    packet = json.loads(line)
+                    encrypted_data = packet.get("encrypted_data")
+                    if not encrypted_data:
+                        continue
+                    # Try onion layer first
+                    decrypted_message = onion_decrypt_with_priv(self.priv_key, encrypted_data)
+                    if decrypted_message is None:
+                        decrypted_message = decrypt_message(encrypted_data)
+                    if decrypted_message is None:
+                        continue
+                    request_data = json.loads(decrypted_message)
+                    req_id = request_data.get("request_id", "")
+                    msg_type = request_data.get("type")
+                    if msg_type == "connect":
+                        # Initialize outbound TCP to target
+                        host = request_data.get("host")
+                        port = int(request_data.get("port", 443))
+                        return_path = request_data.get("return_path")
+                        threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
+                        print(f"🔌 Exit CONNECT init to {host}:{port} | request_id={req_id}")
+                    elif msg_type == "data":
+                        # Data for an existing tunnel
+                        chunk_b64 = request_data.get("chunk")
+                        if not chunk_b64:
+                            continue
+                        info = self.tunnels.get(req_id)
+                        if not info:
+                            continue
+                        try:
+                            info['sock'].sendall(base64.b64decode(chunk_b64))
+                        except Exception as e:
+                            print(f"❌ Exit write error | request_id={req_id} | {e}")
+                    elif msg_type == "close":
+                        info = self.tunnels.pop(req_id, None)
+                        if info:
+                            try:
+                                info['sock'].close()
+                            except Exception:
+                                pass
+                    else:
+                        # Backward-compatible: treat 'data' field as URL fetch request
+                        try:
+                            url = request_data.get("data")
+                            return_path = request_data.get("return_path")
+                            if isinstance(url, str) and return_path:
+                                body = self.fetch_page(url)
+                                self.send_response_back(return_path, body)
+                        except Exception:
+                            pass
 
         except Exception as e:
             print(f"❌ Error in Exit Node: {e}")
@@ -94,11 +128,57 @@ class ExitNode:
                 "Referer": "",
                 "X-Forwarded-For": "",
             }
-            resp = requests.get(url, headers=headers, timeout=5)
+            # DoH resolution
+            host = self._extract_host(url)
+            if not self._domain_allowed(host):
+                return "Domain not allowed"
+            ip_list = self._resolve_doh(host)
+            if not ip_list:
+                return "Unable to resolve host"
+            # Choose first IP and connect using it, preserve Host header
+            target_ip = ip_list[0]
+            if EXIT_DENY_PRIVATE_IPS and self._is_private_ip(target_ip):
+                return "Blocked private/bogon IP"
+            resp = requests.get(url, headers={**headers, 'Host': host}, timeout=5)
             return resp.text
         except Exception as e:
             print(f"❌ Error fetching page: {e}")
             return f"Error fetching {url}: {e}"
+
+    def _extract_host(self, url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            return urlparse(url).hostname or ""
+        except Exception:
+            return ""
+
+    def _resolve_doh(self, host: str):
+        try:
+            ips = []
+            for rrtype, typcode in (("A", 1), ("AAAA", 28)):
+                params = {"name": host, "type": rrtype}
+                r = requests.get(EXIT_DOH_ENDPOINT, params=params, headers={'accept': 'application/dns-json'}, timeout=EXIT_DOH_TIMEOUT)
+                if r.ok:
+                    data = r.json()
+                    for ans in data.get('Answer', []) or []:
+                        if ans.get('type') == typcode and ans.get('data'):
+                            ips.append(ans['data'])
+            return ips
+        except Exception:
+            return []
+
+    def _is_private_ip(self, ip: str) -> bool:
+        try:
+            return ipaddress.ip_address(ip).is_private
+        except Exception:
+            return True
+
+    def _domain_allowed(self, host: str) -> bool:
+        if EXIT_ALLOW_DOMAINS and not any(host.endswith(d) for d in EXIT_ALLOW_DOMAINS):
+            return False
+        if EXIT_DENY_DOMAINS and any(host.endswith(d) for d in EXIT_DENY_DOMAINS):
+            return False
+        return True
 
     def send_response_back(self, return_path, response_data):
         """Sends the fetched response **directly back** to the proxy."""
@@ -117,6 +197,59 @@ class ExitNode:
                 print(f"📤 Sent response back to proxy.")
         except Exception as e:
             print(f"❌ Error sending response to proxy: {e}")
+
+    def send_stream_chunk(self, return_path, request_id: str, data_bytes: bytes):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((return_path['host'], return_path['port']))
+                packet = {
+                    "type": "data",
+                    "request_id": request_id,
+                    "chunk": base64.b64encode(data_bytes).decode(),
+                }
+                sock.send(json.dumps(packet).encode())
+        except Exception as e:
+            print(f"❌ Error sending stream chunk: {e}")
+
+    def send_stream_close(self, return_path, request_id: str):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((return_path['host'], return_path['port']))
+                packet = {
+                    "type": "close",
+                    "request_id": request_id,
+                }
+                sock.send(json.dumps(packet).encode())
+        except Exception as e:
+            print(f"❌ Error sending stream close: {e}")
+
+    def _serve_connect(self, host: str, port: int, return_path: dict, request_id: str):
+        try:
+            out = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            out.connect((host, port))
+            self.tunnels[request_id] = { 'sock': out, 'return_path': return_path }
+
+            # Start reader thread: pump origin->proxy
+            def reader():
+                try:
+                    while True:
+                        data = out.recv(8192)
+                        if not data:
+                            break
+                        self.send_stream_chunk(return_path, request_id, data)
+                except Exception as e:
+                    print(f"❌ Exit reader error | request_id={request_id} | {e}")
+                finally:
+                    self.send_stream_close(return_path, request_id)
+                    try:
+                        out.close()
+                    except Exception:
+                        pass
+                    self.tunnels.pop(request_id, None)
+
+            threading.Thread(target=reader, daemon=True).start()
+        except Exception as e:
+            print(f"❌ CONNECT error to {host}:{port} | {e}")
 
 if __name__ == "__main__":
     exit_node = ExitNode(port=6000)
