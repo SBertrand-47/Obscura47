@@ -80,3 +80,8 @@ NODE_KEY_PATH = getenv_str("OBSCURA_NODE_KEY_PATH", os.path.join(os.path.expandu
 EXIT_KEY_PATH = getenv_str("OBSCURA_EXIT_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "exit_key.pem"))
 
 
+# Back-compat aliases used by some modules
+NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
+EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT
+
+
