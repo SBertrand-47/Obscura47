@@ -1,6 +1,7 @@
 import argparse
 import threading
 import time
+import sys
 
 from src.core.proxy import start_proxy
 from src.core.node import ObscuraNode
@@ -25,6 +26,12 @@ def run_exit(port: int):
 
 
 def main():
+    # Ensure UTF-8 console to avoid UnicodeEncodeError on Windows terminals
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(description="Obscura47 runner")
     parser.add_argument("role", choices=["proxy", "node", "exit"], help="Component to run")
     parser.add_argument("--port", type=int, default=None, help="Listening port for node/exit")
