@@ -80,6 +80,13 @@ NODE_KEY_PATH = getenv_str("OBSCURA_NODE_KEY_PATH", os.path.join(os.path.expandu
 EXIT_KEY_PATH = getenv_str("OBSCURA_EXIT_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "exit_key.pem"))
 
 
+# Bootstrap registry (internet discovery)
+REGISTRY_HOST = getenv_str("OBSCURA_REGISTRY_HOST", "0.0.0.0")
+REGISTRY_PORT = getenv_int("OBSCURA_REGISTRY_PORT", 8470)
+REGISTRY_URL = getenv_str("OBSCURA_REGISTRY_URL", "http://localhost:8470")
+REGISTRY_PEER_TTL = getenv_int("OBSCURA_REGISTRY_PEER_TTL", 120)  # seconds before a peer expires
+REGISTRY_HEARTBEAT_INTERVAL = getenv_int("OBSCURA_REGISTRY_HEARTBEAT_INTERVAL", 30)
+
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
 EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT
