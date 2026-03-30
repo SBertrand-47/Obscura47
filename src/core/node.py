@@ -5,6 +5,7 @@ import time
 from src.core.router import Router
 from src.core.encryptions import decrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
 from src.core.discover import listen_for_discovery, broadcast_discovery
+from src.core.internet_discovery import start_heartbeat
 from src.utils.config import NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT, DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL, ONION_ONLY, NODE_KEY_PATH
 
 NODE_MULTICAST_PORT = CFG_NODE_MULTICAST_PORT  # Node discovery
@@ -36,6 +37,9 @@ class ObscuraNode:
             target=self.continuous_discovery,
             daemon=True
         ).start()
+
+        # Register with internet bootstrap registry
+        start_heartbeat("node", self.port, self.pub_pem)
 
         print(f"🚀 Node Discovery started on port {NODE_MULTICAST_PORT}...")
 

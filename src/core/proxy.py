@@ -8,6 +8,7 @@ import sys
 import base64
 from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
+from src.core.internet_discovery import start_internet_discovery
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
@@ -396,6 +397,9 @@ def start_proxy():
 
     # Passively observe relay and exit announcements
     observe_relays_and_exits()
+
+    # Internet-wide peer discovery via bootstrap registry
+    start_internet_discovery(relay_peers, exit_peers)
 
     # Start response listener for exit node callbacks
     threading.Thread(target=response_listener, daemon=True).start()

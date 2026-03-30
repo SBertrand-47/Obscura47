@@ -6,7 +6,8 @@ import sys
 from src.core.proxy import start_proxy
 from src.core.node import ObscuraNode
 from src.core.exit_node import ExitNode
-from src.utils.config import NODE_LISTEN_PORT, EXIT_LISTEN_PORT
+from src.core.registry import run_registry
+from src.utils.config import NODE_LISTEN_PORT, EXIT_LISTEN_PORT, REGISTRY_PORT
 
 
 def run_proxy():
@@ -25,6 +26,10 @@ def run_exit(port: int):
     exit_node.start_server()
 
 
+def run_registry_server(port: int):
+    run_registry(port=port)
+
+
 def main():
     # Ensure UTF-8 console to avoid UnicodeEncodeError on Windows terminals
     try:
@@ -33,8 +38,8 @@ def main():
     except Exception:
         pass
     parser = argparse.ArgumentParser(description="Obscura47 runner")
-    parser.add_argument("role", choices=["proxy", "node", "exit"], help="Component to run")
-    parser.add_argument("--port", type=int, default=None, help="Listening port for node/exit")
+    parser.add_argument("role", choices=["proxy", "node", "exit", "registry"], help="Component to run")
+    parser.add_argument("--port", type=int, default=None, help="Listening port for node/exit/registry")
     args = parser.parse_args()
 
     if args.role == "proxy":
@@ -43,6 +48,8 @@ def main():
         run_node(args.port or NODE_LISTEN_PORT)
     elif args.role == "exit":
         run_exit(args.port or EXIT_LISTEN_PORT)
+    elif args.role == "registry":
+        run_registry_server(args.port or REGISTRY_PORT)
 
 
 if __name__ == "__main__":

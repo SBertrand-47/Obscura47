@@ -40,11 +40,11 @@ class ObscuraApp(tk.Tk):
         self.title("Obscura47")
         self.configure(bg=BG)
         self.resizable(False, False)
-        self.geometry("520x720")
+        self.geometry("520x780")
 
         # ── State ─────────────────────────────────────────────────
         self._threads: dict[str, threading.Thread] = {}
-        self._running: dict[str, bool] = {"proxy": False, "node": False, "exit": False}
+        self._running: dict[str, bool] = {"registry": False, "proxy": False, "node": False, "exit": False}
         self._status_labels: dict[str, tk.Label] = {}
         self._toggle_btns: dict[str, tk.Button] = {}
         self._log_lines: list[str] = []
@@ -130,6 +130,7 @@ class ObscuraApp(tk.Tk):
         cards_frame.pack(fill="x", padx=24, pady=(14, 0))
 
         descriptions = {
+            "registry": ("Registry", "Bootstrap server for internet discovery"),
             "proxy": ("Proxy", "Local SOCKS proxy on port 9047"),
             "node":  ("Relay Node", "Forward encrypted traffic"),
             "exit":  ("Exit Node", "Egress to the internet"),
@@ -212,7 +213,10 @@ class ObscuraApp(tk.Tk):
 
     def _run_component(self, role: str):
         try:
-            if role == "proxy":
+            if role == "registry":
+                from src.core.registry import run_registry
+                run_registry()
+            elif role == "proxy":
                 from src.core.proxy import start_proxy
                 start_proxy()
             elif role == "node":
@@ -254,20 +258,13 @@ class ObscuraApp(tk.Tk):
     # ── Status polling ────────────────────────────────────────────
 
     def _get_peer_counts(self) -> dict:
-        """Read live peer lists from the proxy module (if loaded)."""
+        """Read live peer lists from the proxy module (includes both LAN and internet peers)."""
         counts = {"clients": 0, "relays": 0, "exits": 0}
         try:
             import src.core.proxy as proxy_mod
             counts["clients"] = len(getattr(proxy_mod, "client_peers", []))
             counts["relays"]  = len(getattr(proxy_mod, "relay_peers", []))
             counts["exits"]   = len(getattr(proxy_mod, "exit_peers", []))
-        except Exception:
-            pass
-        # Also count peers from the node module if running
-        try:
-            import src.core.node as node_mod
-            # node instances store peers on their object, but the module-level
-            # discovery list is the same relay_peers list — already counted above
         except Exception:
             pass
         return counts

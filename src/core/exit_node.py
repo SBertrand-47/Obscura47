@@ -7,6 +7,7 @@ import time
 import base64
 from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
 from src.core.discover import broadcast_discovery, listen_for_discovery
+from src.core.internet_discovery import start_heartbeat
 from src.utils.config import EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT, DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL, EXIT_DOH_ENDPOINT, EXIT_DOH_TIMEOUT, EXIT_DENY_PRIVATE_IPS, EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS, EXIT_KEY_PATH
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -28,6 +29,9 @@ class ExitNode:
         # Start peer discovery
         threading.Thread(target=self.listen_for_proxies, daemon=True).start()
         threading.Thread(target=self.continuous_discovery, daemon=True).start()
+
+        # Register with internet bootstrap registry
+        start_heartbeat("exit", self.port, self.pub_pem)
 
     def listen_for_proxies(self):
         """Continuously listen for proxy/node discovery requests."""
