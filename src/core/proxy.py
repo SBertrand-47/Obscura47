@@ -385,7 +385,8 @@ def handle_exit_response(conn):
 def start_proxy():
     """Starts the proxy server and continuously listens for clients."""
     global running
-    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
     # Start the discovery listener
     threading.Thread(target=listen_for_clients, daemon=True).start()
