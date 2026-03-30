@@ -1,6 +1,28 @@
 import os
 
 
+def _load_dotenv():
+    """Load .env file from the project root into os.environ (no dependencies)."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Don't overwrite vars already set in the real environment
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
+
+
 def getenv_str(name: str, default: str) -> str:
     return os.getenv(name, default)
 
