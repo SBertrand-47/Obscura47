@@ -1,0 +1,333 @@
+"""
+Obscura47 — WebSocket Transport Layer
+
+Provides WSServer and WSClient for authenticated, persistent WebSocket
+connections between nodes. Replaces raw TCP for node-to-node communication
+while keeping the same frame format: {"encrypted_data": "<onion-sealed>"}
+
+Each connection performs an ECDSA challenge-response handshake before
+accepting frames.
+"""
+
+import asyncio
+import json
+import os
+import secrets
+import threading
+import time
+from typing import Callable
+
+import websockets
+from websockets.asyncio.server import serve as ws_serve
+from websockets.asyncio.client import connect as ws_connect
+
+from src.core.encryptions import ecdsa_sign, ecdsa_verify
+
+
+# ── WSServer ─────────────────────────────────────────────────────
+
+class WSServer:
+    """
+    Async WebSocket server that authenticates connecting peers via ECDSA
+    and dispatches received frames to a callback.
+    """
+
+    def __init__(self, host: str, port: int, priv_key, pub_pem: str,
+                 on_frame: Callable[[str], None]):
+        """
+        Args:
+            host: Bind address
+            port: WebSocket port
+            priv_key: This node's ECC private key (for identity)
+            pub_pem: This node's public key PEM
+            on_frame: Callback invoked with each received frame (JSON string)
+        """
+        self.host = host
+        self.port = port
+        self.priv_key = priv_key
+        self.pub_pem = pub_pem
+        self.on_frame = on_frame
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._server = None
+
+    async def _authenticate(self, websocket) -> bool:
+        """Run ECDSA challenge-response handshake with connecting peer."""
+        try:
+            # Wait for auth message from connector
+            raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            msg = json.loads(raw)
+
+            if msg.get("type") != "auth" or not msg.get("pub"):
+                await websocket.close(4001, "Expected auth message")
+                return False
+
+            peer_pub = msg["pub"]
+
+            # Send challenge nonce
+            nonce = secrets.token_hex(32)
+            await websocket.send(json.dumps({
+                "type": "challenge",
+                "nonce": nonce,
+            }))
+
+            # Wait for proof
+            raw = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+            proof = json.loads(raw)
+
+            if proof.get("type") != "proof" or not proof.get("sig"):
+                await websocket.close(4002, "Expected proof message")
+                return False
+
+            # Verify ECDSA signature
+            if not ecdsa_verify(peer_pub, nonce.encode(), proof["sig"]):
+                await websocket.close(4003, "Invalid signature")
+                return False
+
+            # Auth OK
+            await websocket.send(json.dumps({"type": "auth_ok"}))
+            return True
+
+        except (asyncio.TimeoutError, Exception) as e:
+            try:
+                await websocket.close(4000, f"Auth failed: {e}")
+            except Exception:
+                pass
+            return False
+
+    async def _handler(self, websocket):
+        """Handle a single WebSocket connection after authentication."""
+        if not await self._authenticate(websocket):
+            return
+
+        try:
+            async for message in websocket:
+                try:
+                    self.on_frame(message)
+                except Exception as e:
+                    print(f"[ws-server] Frame handler error: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    async def _serve(self):
+        """Start the WebSocket server."""
+        self._server = await ws_serve(
+            self._handler,
+            self.host,
+            self.port,
+        )
+        print(f"[ws-server] WebSocket server listening on {self.host}:{self.port}")
+        await self._server.serve_forever()
+
+    def start(self):
+        """Start the WebSocket server in a dedicated background thread."""
+        def _run():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._loop.run_until_complete(self._serve())
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        return t
+
+    def stop(self):
+        """Stop the WebSocket server."""
+        if self._server:
+            self._server.close()
+
+
+# ── WSClient ─────────────────────────────────────────────────────
+
+class WSClient:
+    """
+    Persistent WebSocket connection pool with ECDSA authentication.
+    Manages connections to remote nodes, auto-reconnects on failure.
+    """
+
+    def __init__(self, priv_key, pub_pem: str,
+                 queue_max: int = 100, idle_close_seconds: float = 60.0):
+        """
+        Args:
+            priv_key: This node's ECC private key (for signing challenges)
+            pub_pem: This node's public key PEM
+            queue_max: Max queued frames per connection before backpressure
+            idle_close_seconds: Close connections idle longer than this
+        """
+        self.priv_key = priv_key
+        self.pub_pem = pub_pem
+        self.queue_max = queue_max
+        self.idle_close_seconds = idle_close_seconds
+
+        # Connection pool: (host, port) -> {"ws": websocket, "last": timestamp, "lock": Lock}
+        self._connections: dict[tuple[str, int], dict] = {}
+        self._conn_lock = threading.Lock()
+
+        # Dedicated event loop for async WebSocket operations
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._loop_thread.start()
+
+        # Start idle sweeper
+        threading.Thread(target=self._idle_sweeper, daemon=True).start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    async def _authenticate_to_server(self, ws) -> bool:
+        """Perform ECDSA auth handshake as the connecting client."""
+        # Send auth with our public key
+        await ws.send(json.dumps({
+            "type": "auth",
+            "pub": self.pub_pem,
+        }))
+
+        # Receive challenge
+        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        msg = json.loads(raw)
+        if msg.get("type") != "challenge" or not msg.get("nonce"):
+            return False
+
+        # Sign the nonce
+        sig = ecdsa_sign(self.priv_key, msg["nonce"].encode())
+        await ws.send(json.dumps({
+            "type": "proof",
+            "sig": sig,
+        }))
+
+        # Wait for auth_ok
+        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        result = json.loads(raw)
+        return result.get("type") == "auth_ok"
+
+    async def _connect(self, host: str, port: int):
+        """Establish and authenticate a WebSocket connection."""
+        uri = f"ws://{host}:{port}"
+        ws = await ws_connect(uri)
+        if not await self._authenticate_to_server(ws):
+            await ws.close()
+            raise ConnectionRefusedError(f"Auth failed to {host}:{port}")
+        return ws
+
+    async def _get_or_create(self, host: str, port: int):
+        """Get existing connection or create a new one."""
+        key = (host, port)
+        with self._conn_lock:
+            entry = self._connections.get(key)
+            if entry and entry.get("ws") and entry["ws"].open:
+                entry["last"] = time.time()
+                return entry["ws"]
+
+        # Create new connection (outside lock to avoid blocking)
+        ws = await self._connect(host, port)
+        with self._conn_lock:
+            self._connections[key] = {
+                "ws": ws,
+                "last": time.time(),
+            }
+        print(f"[ws-client] Connected to {host}:{port}")
+        return ws
+
+    async def _send_frame_async(self, host: str, port: int, frame_json: str) -> bool:
+        """Send a frame over WebSocket, with auto-reconnect on failure."""
+        try:
+            ws = await self._get_or_create(host, port)
+            await ws.send(frame_json)
+            with self._conn_lock:
+                key = (host, port)
+                if key in self._connections:
+                    self._connections[key]["last"] = time.time()
+            return True
+        except Exception as e:
+            # Drop stale connection and retry once
+            with self._conn_lock:
+                old = self._connections.pop((host, port), None)
+                if old and old.get("ws"):
+                    try:
+                        asyncio.ensure_future(old["ws"].close())
+                    except Exception:
+                        pass
+
+            try:
+                ws = await self._connect(host, port)
+                with self._conn_lock:
+                    self._connections[(host, port)] = {
+                        "ws": ws,
+                        "last": time.time(),
+                    }
+                await ws.send(frame_json)
+                return True
+            except Exception as e2:
+                print(f"[ws-client] Failed to send to {host}:{port}: {e2}")
+                return False
+
+    def send_frame(self, host: str, port: int, frame_json: str) -> bool:
+        """
+        Send a frame to a remote node via WebSocket. Thread-safe.
+        Returns True on success, False on failure.
+        """
+        future = asyncio.run_coroutine_threadsafe(
+            self._send_frame_async(host, port, frame_json),
+            self._loop,
+        )
+        try:
+            return future.result(timeout=5.0)
+        except Exception as e:
+            print(f"[ws-client] Send timeout/error to {host}:{port}: {e}")
+            return False
+
+    def close_connection(self, host: str, port: int):
+        """Close a specific connection."""
+        with self._conn_lock:
+            entry = self._connections.pop((host, port), None)
+        if entry and entry.get("ws"):
+            asyncio.run_coroutine_threadsafe(entry["ws"].close(), self._loop)
+
+    def close_all(self):
+        """Close all connections."""
+        with self._conn_lock:
+            entries = list(self._connections.values())
+            self._connections.clear()
+        for entry in entries:
+            if entry.get("ws"):
+                try:
+                    asyncio.run_coroutine_threadsafe(entry["ws"].close(), self._loop)
+                except Exception:
+                    pass
+
+    def _idle_sweeper(self):
+        """Background thread to close idle WebSocket connections."""
+        while True:
+            time.sleep(5)
+            now = time.time()
+            to_close = []
+            with self._conn_lock:
+                for key, entry in list(self._connections.items()):
+                    if now - entry.get("last", now) > self.idle_close_seconds:
+                        to_close.append((key, self._connections.pop(key)))
+            for key, entry in to_close:
+                if entry.get("ws"):
+                    try:
+                        asyncio.run_coroutine_threadsafe(entry["ws"].close(), self._loop)
+                    except Exception:
+                        pass
+                    print(f"[ws-client] Closed idle connection to {key[0]}:{key[1]}")
+
+
+# ── Singleton client instance (lazily initialized per node) ──────
+
+_global_client: WSClient | None = None
+_client_lock = threading.Lock()
+
+
+def get_ws_client(priv_key=None, pub_pem: str = "") -> WSClient | None:
+    """Get or create the global WSClient instance."""
+    global _global_client
+    with _client_lock:
+        if _global_client is None and priv_key is not None:
+            from src.utils.config import CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS
+            _global_client = WSClient(
+                priv_key, pub_pem,
+                queue_max=CHANNEL_QUEUE_MAX,
+                idle_close_seconds=CHANNEL_IDLE_CLOSE_SECONDS,
+            )
+        return _global_client

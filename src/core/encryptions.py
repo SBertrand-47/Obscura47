@@ -4,6 +4,7 @@ from Crypto.Cipher import AES
 from Crypto.PublicKey import ECC
 from Crypto.Protocol.KDF import HKDF
 from Crypto.Hash import SHA256
+from Crypto.Signature import DSS
 
 
 # NOTE: Demo-only symmetric key. For production, use per-hop ephemeral keys.
@@ -103,6 +104,28 @@ def onion_decrypt_with_priv(priv: ECC.EccKey, sealed_json: str) -> str | None:
     except Exception:
         return None
 
+
+
+# --- ECDSA signing (used for registry auth & WebSocket handshake) ---
+
+def ecdsa_sign(priv_key: ECC.EccKey, message: bytes) -> str:
+    """Sign a message with ECDSA (P-256 + SHA-256). Returns base64-encoded signature."""
+    h = SHA256.new(message)
+    signer = DSS.new(priv_key, 'fips-186-3')
+    sig = signer.sign(h)
+    return base64.b64encode(sig).decode()
+
+
+def ecdsa_verify(pub_pem: str, message: bytes, signature_b64: str) -> bool:
+    """Verify an ECDSA signature against a public key PEM. Returns True if valid."""
+    try:
+        pub = ECC.import_key(pub_pem)
+        h = SHA256.new(message)
+        verifier = DSS.new(pub, 'fips-186-3')
+        verifier.verify(h, base64.b64decode(signature_b64))
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 # --- Persistent ECC key utilities for roles ---
