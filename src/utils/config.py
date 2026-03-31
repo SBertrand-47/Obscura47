@@ -109,6 +109,17 @@ REGISTRY_URL = getenv_str("OBSCURA_REGISTRY_URL", "http://localhost:8470")
 REGISTRY_PEER_TTL = getenv_int("OBSCURA_REGISTRY_PEER_TTL", 120)  # seconds before a peer expires
 REGISTRY_HEARTBEAT_INTERVAL = getenv_int("OBSCURA_REGISTRY_HEARTBEAT_INTERVAL", 30)
 
+# WebSocket transport (dual-protocol)
+NODE_WS_PORT = getenv_int("OBSCURA_NODE_WS_PORT", 5002)
+EXIT_WS_PORT = getenv_int("OBSCURA_EXIT_WS_PORT", 6001)
+PROXY_WS_RESPONSE_PORT = getenv_int("OBSCURA_PROXY_WS_RESP_PORT", 9052)
+PREFER_WEBSOCKET = getenv_str("OBSCURA_PREFER_WEBSOCKET", "true").lower() in ("1", "true", "yes")
+
+# Registry persistence & auth
+REGISTRY_DB_PATH = getenv_str("OBSCURA_REGISTRY_DB_PATH", "registry.db")
+REGISTRY_ADMIN_KEY = getenv_str("OBSCURA_REGISTRY_ADMIN_KEY", "")
+REGISTRY_RATE_LIMIT = getenv_int("OBSCURA_REGISTRY_RATE_LIMIT", 60)
+
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
 EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT

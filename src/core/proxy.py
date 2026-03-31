@@ -6,6 +6,7 @@ import time
 import signal
 import sys
 import base64
+import asyncio
 from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery
@@ -13,6 +14,7 @@ from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
     PROXY_RESPONSE_PORT as CFG_PROXY_RESPONSE_PORT,
+    PROXY_WS_RESPONSE_PORT as CFG_PROXY_WS_RESPONSE_PORT,
     DISCOVERY_PORT as CFG_DISCOVERY_PORT,
     NODE_DISCOVERY_PORT as CFG_NODE_DISCOVERY_PORT,
     EXIT_DISCOVERY_PORT as CFG_EXIT_DISCOVERY_PORT,
@@ -36,7 +38,8 @@ from src.utils.config import (
 
 PROXY_HOST = CFG_PROXY_HOST
 PROXY_PORT = CFG_PROXY_PORT
-PROXY_RESPONSE_PORT = CFG_PROXY_RESPONSE_PORT  # Separate inbound port for exit responses
+PROXY_RESPONSE_PORT = CFG_PROXY_RESPONSE_PORT  # Separate inbound port for exit responses (TCP)
+PROXY_WS_RESPONSE_PORT = CFG_PROXY_WS_RESPONSE_PORT  # WebSocket response port
 DISCOVERY_PORT = CFG_DISCOVERY_PORT  # Discovery port for proxies
 NODE_DISCOVERY_PORT = CFG_NODE_DISCOVERY_PORT
 EXIT_DISCOVERY_PORT = CFG_EXIT_DISCOVERY_PORT
@@ -153,6 +156,7 @@ def handle_browser_request(client_socket):
         return_path = {
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
+            "ws_port": PROXY_WS_RESPONSE_PORT,
             "request_id": request_id,
         }
 
@@ -303,85 +307,118 @@ def response_listener():
                 print(f"⚠️ Response listener error: {e}")
 
 def handle_exit_response(conn):
+    """Handle exit response received via legacy TCP. Delegates to shared handler."""
     try:
         data = conn.recv(1024 * 1024)
         if not data:
             return
-        packet = json.loads(data.decode())
-        typ = packet.get("type")
-        request_id = packet.get("request_id", "")
-        if JSON_LOGS:
-            print(json.dumps({"event":"exit_frame","type":typ,"request_id":request_id}))
-        else:
-            print(f"📦 Exit frame | type={typ} | request_id={request_id}")
+        _handle_exit_response_data(data)
+    except Exception as e:
+        print(f"Error handling exit response: {e}")
+    finally:
+        conn.close()
 
-        with pending_lock:
-            client_socket = pending_requests.get(request_id)
-            meta = pending_meta.get(request_id, {'bytes_up': 0, 'bytes_down': 0, 'started': time.time(), 'last_activity': time.time(), 'exit': None})
+def ws_response_listener():
+    """WebSocket server to receive responses from exit nodes (dual-protocol)."""
+    import websockets
+    from websockets.asyncio.server import serve as ws_serve
 
-        if client_socket:
-            try:
-                if typ == "data":
-                    chunk_b64 = packet.get("chunk", "")
-                    if chunk_b64:
-                        decoded = base64.b64decode(chunk_b64)
-                        client_socket.sendall(decoded)
-                        meta['bytes_down'] += len(decoded)
-                        meta['last_activity'] = time.time()
-                        metrics['bytes_down'] += len(decoded)
-                elif typ == "close":
-                    try:
-                        client_socket.shutdown(socket.SHUT_WR)
-                    except Exception:
-                        pass
-                    client_socket.close()
-                    with pending_lock:
-                        summary = pending_meta.pop(request_id, None)
-                        pending_requests.pop(request_id, None)
-                    if summary:
-                        dur = max(0.0, time.time() - summary.get('started', time.time()))
-                        if JSON_LOGS:
-                            print(json.dumps({"event":"tunnel_closed","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
-                        else:
-                            print(f"✅ Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
-                else:
-                    # Backwards-compatible HTTP body delivery (non-tunnel)
-                    payload = packet.get("data", "")
-                    if isinstance(payload, (bytes, bytearray)):
-                        client_socket.send(payload)
-                    else:
-                        body = payload if isinstance(payload, str) else str(payload)
-                        if not body.startswith("HTTP/"):
-                            headers = (
-                                "HTTP/1.1 200 OK\r\n"
-                                f"Content-Length: {len(body.encode())}\r\n"
-                                "Content-Type: text/html; charset=utf-8\r\n"
-                                "Connection: close\r\n\r\n"
-                            )
-                            client_socket.send(headers.encode() + body.encode())
-                        else:
-                            client_socket.send(body.encode())
-            except Exception as e:
-                print(f"❌ Error delivering to client | {e}")
+    async def _handle_ws(websocket):
+        try:
+            async for message in websocket:
                 try:
-                    client_socket.close()
+                    _handle_exit_response_data(message)
+                except Exception as e:
+                    print(f"[ws-response] Error: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            pass
+
+    async def _serve():
+        server = await ws_serve(_handle_ws, PROXY_HOST, PROXY_WS_RESPONSE_PORT)
+        print(f"[ws-response] WebSocket response listener on {PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
+        await server.serve_forever()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_serve())
+
+
+def _handle_exit_response_data(raw_data):
+    """Shared handler for exit response frames (used by both TCP and WS listeners)."""
+    if isinstance(raw_data, bytes):
+        raw_data = raw_data.decode()
+    packet = json.loads(raw_data)
+    typ = packet.get("type")
+    request_id = packet.get("request_id", "")
+    if JSON_LOGS:
+        print(json.dumps({"event":"exit_frame","type":typ,"request_id":request_id}))
+    else:
+        print(f"Exit frame | type={typ} | request_id={request_id}")
+
+    with pending_lock:
+        client_socket = pending_requests.get(request_id)
+        meta = pending_meta.get(request_id, {'bytes_up': 0, 'bytes_down': 0, 'started': time.time(), 'last_activity': time.time(), 'exit': None})
+
+    if client_socket:
+        try:
+            if typ == "data":
+                chunk_b64 = packet.get("chunk", "")
+                if chunk_b64:
+                    decoded = base64.b64decode(chunk_b64)
+                    client_socket.sendall(decoded)
+                    meta['bytes_down'] += len(decoded)
+                    meta['last_activity'] = time.time()
+                    metrics['bytes_down'] += len(decoded)
+            elif typ == "close":
+                try:
+                    client_socket.shutdown(socket.SHUT_WR)
                 except Exception:
                     pass
+                client_socket.close()
                 with pending_lock:
                     summary = pending_meta.pop(request_id, None)
                     pending_requests.pop(request_id, None)
                 if summary:
                     dur = max(0.0, time.time() - summary.get('started', time.time()))
                     if JSON_LOGS:
-                        print(json.dumps({"event":"tunnel_closed_error","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
+                        print(json.dumps({"event":"tunnel_closed","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
                     else:
-                        print(f"✅ Tunnel closed (error) | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
-        else:
-            print(f"⚠️ No pending client for request_id={request_id}")
-    except Exception as e:
-        print(f"❌ Error handling exit response: {e}")
-    finally:
-        conn.close()
+                        print(f"Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+            else:
+                # Backwards-compatible HTTP body delivery (non-tunnel)
+                payload = packet.get("data", "")
+                if isinstance(payload, (bytes, bytearray)):
+                    client_socket.send(payload)
+                else:
+                    body = payload if isinstance(payload, str) else str(payload)
+                    if not body.startswith("HTTP/"):
+                        headers = (
+                            "HTTP/1.1 200 OK\r\n"
+                            f"Content-Length: {len(body.encode())}\r\n"
+                            "Content-Type: text/html; charset=utf-8\r\n"
+                            "Connection: close\r\n\r\n"
+                        )
+                        client_socket.send(headers.encode() + body.encode())
+                    else:
+                        client_socket.send(body.encode())
+        except Exception as e:
+            print(f"Error delivering to client | {e}")
+            try:
+                client_socket.close()
+            except Exception:
+                pass
+            with pending_lock:
+                summary = pending_meta.pop(request_id, None)
+                pending_requests.pop(request_id, None)
+            if summary:
+                dur = max(0.0, time.time() - summary.get('started', time.time()))
+                if JSON_LOGS:
+                    print(json.dumps({"event":"tunnel_closed_error","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
+                else:
+                    print(f"Tunnel closed (error) | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+    else:
+        print(f"No pending client for request_id={request_id}")
+
 
 def start_proxy():
     """Starts the proxy server and continuously listens for clients."""
@@ -401,8 +438,9 @@ def start_proxy():
     # Internet-wide peer discovery via bootstrap registry
     start_internet_discovery(relay_peers, exit_peers)
 
-    # Start response listener for exit node callbacks
+    # Start response listeners for exit node callbacks (TCP + WebSocket)
     threading.Thread(target=response_listener, daemon=True).start()
+    threading.Thread(target=ws_response_listener, daemon=True).start()
     threading.Thread(target=metrics_worker, daemon=True).start()
     threading.Thread(target=cleanup_worker, daemon=True).start()
     # Start channel idle sweeper in router
@@ -513,6 +551,7 @@ def handle_connect(client_socket):
         return_path = {
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
+            "ws_port": PROXY_WS_RESPONSE_PORT,
             "request_id": request_id,
         }
 
