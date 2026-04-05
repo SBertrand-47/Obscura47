@@ -8,15 +8,29 @@ Supports ECDSA challenge-response auth when a node provides its ECC private key.
 """
 
 import json
+import ssl
 import time
 import threading
 import urllib.request
 from typing import List, Dict
-from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS
+from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS, TLS_VERIFY
+
+
+def _ssl_ctx():
+    """Return an SSL context honoring OBSCURA_TLS_VERIFY (None for http:// URLs)."""
+    if not REGISTRY_URL.startswith("https://"):
+        return None
+    if TLS_VERIFY:
+        return ssl.create_default_context()
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def register_with_registry(role: str, port: int, pub: str | None = None,
-                           priv_key=None, ws_port: int | None = None):
+                           priv_key=None, ws_port: int | None = None,
+                           ws_tls: bool | None = None):
     """
     Register this node with the bootstrap registry.
     If pub + priv_key are provided, performs ECDSA challenge-response auth.
@@ -26,6 +40,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         body["pub"] = pub
     if ws_port:
         body["ws_port"] = ws_port
+    if ws_tls is not None:
+        body["ws_tls"] = ws_tls
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -34,8 +50,9 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    ctx = _ssl_ctx()
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
             result = json.loads(resp.read())
 
         if result.get("ok"):
@@ -60,7 +77,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(verify_req, timeout=5) as verify_resp:
+            with urllib.request.urlopen(verify_req, timeout=5, context=ctx) as verify_resp:
                 verify_result = json.loads(verify_resp.read())
 
             if verify_result.get("ok"):
@@ -79,20 +96,23 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
 
 def heartbeat_loop(role: str, port: int, pub: str | None = None,
-                   priv_key=None, ws_port: int | None = None):
+                   priv_key=None, ws_port: int | None = None,
+                   ws_tls: bool | None = None):
     """Periodically re-register to keep this node alive in the registry."""
     while True:
-        register_with_registry(role, port, pub, priv_key=priv_key, ws_port=ws_port)
+        register_with_registry(role, port, pub, priv_key=priv_key,
+                               ws_port=ws_port, ws_tls=ws_tls)
         time.sleep(REGISTRY_HEARTBEAT_INTERVAL)
 
 
 def start_heartbeat(role: str, port: int, pub: str | None = None,
-                    priv_key=None, ws_port: int | None = None):
+                    priv_key=None, ws_port: int | None = None,
+                    ws_tls: bool | None = None):
     """Start the heartbeat in a background daemon thread."""
     t = threading.Thread(
         target=heartbeat_loop,
         args=(role, port, pub),
-        kwargs={"priv_key": priv_key, "ws_port": ws_port},
+        kwargs={"priv_key": priv_key, "ws_port": ws_port, "ws_tls": ws_tls},
         daemon=True,
     )
     t.start()
@@ -106,7 +126,7 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
         url += f"?role={role_filter}"
     req = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx()) as resp:
             peers = json.loads(resp.read())
             return peers if isinstance(peers, list) else []
     except Exception as e:
@@ -136,6 +156,8 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
                 entry["pub"] = p["pub"]
             if p.get("ws_port"):
                 entry["ws_port"] = p["ws_port"]
+            if p.get("ws_tls"):
+                entry["ws_tls"] = True
             target_list.append(entry)
             print(f"[internet] Discovered {p.get('role', '?')} at {p['host']}:{p['port']}"
                   + (f" (ws:{p['ws_port']})" if p.get('ws_port') else ""))
@@ -145,6 +167,8 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
                 if ep["host"] == p["host"] and ep["port"] == p["port"]:
                     if p.get("ws_port") and not ep.get("ws_port"):
                         ep["ws_port"] = p["ws_port"]
+                    if p.get("ws_tls") and not ep.get("ws_tls"):
+                        ep["ws_tls"] = True
                     ep["ts"] = now
                     break
 

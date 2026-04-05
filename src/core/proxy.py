@@ -34,6 +34,7 @@ from src.utils.config import (
     EXIT_HEALTH_DECAY,
     EXIT_HEALTH_RTT_ALPHA,
     JSON_LOGS,
+    WS_TLS_CERT, WS_TLS_KEY,
 )
 
 PROXY_HOST = CFG_PROXY_HOST
@@ -157,6 +158,7 @@ def handle_browser_request(client_socket):
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
             "ws_port": PROXY_WS_RESPONSE_PORT,
+            "ws_tls": bool(WS_TLS_CERT and WS_TLS_KEY),
             "request_id": request_id,
         }
 
@@ -322,6 +324,12 @@ def ws_response_listener():
     """WebSocket server to receive responses from exit nodes (dual-protocol)."""
     import websockets
     from websockets.asyncio.server import serve as ws_serve
+    from src.utils.config import WS_TLS_CERT, WS_TLS_KEY
+    from src.core.ws_transport import _build_server_ssl_context
+
+    ssl_ctx = None
+    if WS_TLS_CERT and WS_TLS_KEY:
+        ssl_ctx = _build_server_ssl_context(WS_TLS_CERT, WS_TLS_KEY)
 
     async def _handle_ws(websocket):
         try:
@@ -334,9 +342,13 @@ def ws_response_listener():
             pass
 
     async def _serve():
-        server = await ws_serve(_handle_ws, PROXY_HOST, PROXY_WS_RESPONSE_PORT)
-        print(f"[ws-response] WebSocket response listener on {PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
-        await server.serve_forever()
+        server = await ws_serve(_handle_ws, PROXY_HOST, PROXY_WS_RESPONSE_PORT, ssl=ssl_ctx)
+        scheme = "wss" if ssl_ctx else "ws"
+        print(f"[ws-response] WebSocket response listener on {scheme}://{PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
+        try:
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -552,6 +564,7 @@ def handle_connect(client_socket):
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
             "ws_port": PROXY_WS_RESPONSE_PORT,
+            "ws_tls": bool(WS_TLS_CERT and WS_TLS_KEY),
             "request_id": request_id,
         }
 

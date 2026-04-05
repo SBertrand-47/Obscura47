@@ -42,6 +42,8 @@ PEER_TTL = int(os.getenv("OBSCURA_REGISTRY_PEER_TTL", "120"))
 DB_PATH = os.getenv("OBSCURA_REGISTRY_DB_PATH", "registry.db")
 ADMIN_KEY = os.getenv("OBSCURA_REGISTRY_ADMIN_KEY", "")
 RATE_LIMIT = int(os.getenv("OBSCURA_REGISTRY_RATE_LIMIT", "60"))  # requests/min/IP
+TLS_CERT = os.getenv("OBSCURA_REGISTRY_TLS_CERT", "")
+TLS_KEY = os.getenv("OBSCURA_REGISTRY_TLS_KEY", "")
 
 # ── ECDSA verification (inline, no project imports needed) ───────
 # This uses pycryptodome which must be installed on the registry server
@@ -49,6 +51,7 @@ try:
     from Crypto.PublicKey import ECC
     from Crypto.Signature import DSS
     from Crypto.Hash import SHA256
+    _ECDSA_AVAILABLE = True
 
     def _ecdsa_verify(pub_pem: str, message: bytes, signature_b64: str) -> bool:
         try:
@@ -60,7 +63,8 @@ try:
         except (ValueError, TypeError):
             return False
 except ImportError:
-    # If pycryptodome is not available, auth is disabled (open registry)
+    _ECDSA_AVAILABLE = False
+
     def _ecdsa_verify(pub_pem: str, message: bytes, signature_b64: str) -> bool:
         print("[registry] WARNING: pycryptodome not installed, ECDSA verification disabled")
         return True
@@ -91,6 +95,7 @@ class PeerRegistration(BaseModel):
     port: int = Field(ge=1, le=65535)
     pub: str | None = None
     ws_port: int | None = Field(default=None, ge=1, le=65535)
+    ws_tls: bool | None = None  # True if ws_port serves wss://
 
 
 class AuthVerification(BaseModel):
@@ -104,6 +109,7 @@ class PeerInfo(BaseModel):
     role: str
     pub: str | None = None
     ws_port: int | None = None
+    ws_tls: bool | None = None
     last_seen: float
 
 
@@ -138,6 +144,11 @@ async def init_db():
             metadata TEXT
         )
     """)
+    # Additive migration — tolerate existing DBs that pre-date ws_tls
+    try:
+        await DB.execute("ALTER TABLE peers ADD COLUMN ws_tls INTEGER")
+    except Exception:
+        pass
     await DB.commit()
     print(f"[registry] SQLite database initialized at {DB_PATH}")
 
@@ -150,18 +161,21 @@ async def close_db():
 
 
 async def upsert_peer(peer_id: str, host: str, port: int, role: str,
-                       pub_pem: str | None = None, ws_port: int | None = None):
+                       pub_pem: str | None = None, ws_port: int | None = None,
+                       ws_tls: bool | None = None):
+    ws_tls_int = None if ws_tls is None else (1 if ws_tls else 0)
     await DB.execute("""
-        INSERT INTO peers (id, host, port, role, pub_pem, ws_port, last_heartbeat)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO peers (id, host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             host=excluded.host,
             port=excluded.port,
             role=excluded.role,
             pub_pem=COALESCE(excluded.pub_pem, peers.pub_pem),
             ws_port=COALESCE(excluded.ws_port, peers.ws_port),
+            ws_tls=COALESCE(excluded.ws_tls, peers.ws_tls),
             last_heartbeat=excluded.last_heartbeat
-    """, (peer_id, host, port, role, pub_pem, ws_port, time.time()))
+    """, (peer_id, host, port, role, pub_pem, ws_port, ws_tls_int, time.time()))
     await DB.commit()
 
 
@@ -169,19 +183,21 @@ async def get_peers(role_filter: str | None = None) -> list[dict]:
     cutoff = time.time() - PEER_TTL
     if role_filter:
         cursor = await DB.execute(
-            "SELECT host, port, role, pub_pem, ws_port, last_heartbeat FROM peers WHERE last_heartbeat > ? AND role = ?",
+            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers WHERE last_heartbeat > ? AND role = ?",
             (cutoff, role_filter)
         )
     else:
         cursor = await DB.execute(
-            "SELECT host, port, role, pub_pem, ws_port, last_heartbeat FROM peers WHERE last_heartbeat > ?",
+            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers WHERE last_heartbeat > ?",
             (cutoff,)
         )
     rows = await cursor.fetchall()
     return [
         {
             "host": r[0], "port": r[1], "role": r[2],
-            "pub": r[3], "ws_port": r[4], "last_seen": r[5],
+            "pub": r[3], "ws_port": r[4],
+            "ws_tls": bool(r[5]) if r[5] is not None else None,
+            "last_seen": r[6],
         }
         for r in rows
     ]
@@ -202,7 +218,7 @@ async def delete_peer(peer_id: str) -> bool:
 
 async def get_peer_by_id(peer_id: str) -> dict | None:
     cursor = await DB.execute(
-        "SELECT host, port, role, pub_pem, ws_port, last_heartbeat FROM peers WHERE id = ?",
+        "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers WHERE id = ?",
         (peer_id,)
     )
     row = await cursor.fetchone()
@@ -210,7 +226,9 @@ async def get_peer_by_id(peer_id: str) -> dict | None:
         return None
     return {
         "host": row[0], "port": row[1], "role": row[2],
-        "pub": row[3], "ws_port": row[4], "last_seen": row[5],
+        "pub": row[3], "ws_port": row[4],
+        "ws_tls": bool(row[5]) if row[5] is not None else None,
+        "last_seen": row[6],
     }
 
 
@@ -269,7 +287,7 @@ async def lifespan(app: FastAPI):
     print(f"  Database: {DB_PATH}")
     print(f"  Rate limit: {RATE_LIMIT} req/min/IP")
     print(f"  Admin key: {'configured' if ADMIN_KEY else 'NOT SET (admin endpoints disabled)'}")
-    print(f"  ECDSA auth: {'enabled' if 'ECC' in dir() else 'disabled (pycryptodome missing)'}")
+    print(f"  ECDSA auth: {'enabled' if _ECDSA_AVAILABLE else 'disabled (pycryptodome missing)'}")
     print(f"=========================================")
     yield
     await close_db()
@@ -314,7 +332,8 @@ async def register_peer(body: PeerRegistration, request: Request):
         existing = await get_peer_by_id(peer_id)
         if existing and existing.get("pub") == body.pub:
             # Known peer heartbeat — update timestamp without re-auth
-            await upsert_peer(peer_id, ip, body.port, body.role, body.pub, body.ws_port)
+            await upsert_peer(peer_id, ip, body.port, body.role, body.pub,
+                              body.ws_port, body.ws_tls)
             return {"ok": True, "your_ip": ip, "peer_id": peer_id}
 
         # New peer or pubkey change — issue challenge
@@ -327,6 +346,7 @@ async def register_peer(body: PeerRegistration, request: Request):
                 "role": body.role,
                 "pub": body.pub,
                 "ws_port": body.ws_port,
+                "ws_tls": body.ws_tls,
             },
             "created_at": time.time(),
             "ip": ip,
@@ -336,7 +356,8 @@ async def register_peer(body: PeerRegistration, request: Request):
 
     # No public key — register immediately (unauthenticated)
     is_new = await get_peer_by_id(peer_id) is None
-    await upsert_peer(peer_id, ip, body.port, body.role, ws_port=body.ws_port)
+    await upsert_peer(peer_id, ip, body.port, body.role,
+                      ws_port=body.ws_port, ws_tls=body.ws_tls)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
     return {"ok": True, "your_ip": ip, "peer_id": peer_id}
@@ -372,7 +393,7 @@ async def verify_registration(body: AuthVerification, request: Request):
     del _pending_challenges[body.peer_id]
 
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
-                       data["pub"], data.get("ws_port"))
+                       data["pub"], data.get("ws_port"), data.get("ws_tls"))
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
     return {"ok": True, "your_ip": ip, "peer_id": body.peer_id}
 
@@ -419,12 +440,18 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address (default 0.0.0.0)")
     args = parser.parse_args()
 
-    print(f"  Listening on {args.host}:{args.port}")
+    use_tls = bool(TLS_CERT and TLS_KEY)
+    scheme = "https" if use_tls else "http"
+    print(f"  Listening on {scheme}://{args.host}:{args.port}")
     print(f"  Clients should set:")
-    print(f"  OBSCURA_REGISTRY_URL=http://<this-server-ip>:{args.port}")
+    print(f"  OBSCURA_REGISTRY_URL={scheme}://<this-server-ip>:{args.port}")
     print()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn_kwargs = {"host": args.host, "port": args.port, "log_level": "warning"}
+    if use_tls:
+        uvicorn_kwargs["ssl_certfile"] = TLS_CERT
+        uvicorn_kwargs["ssl_keyfile"] = TLS_KEY
+    uvicorn.run(app, **uvicorn_kwargs)
 
 
 if __name__ == "__main__":

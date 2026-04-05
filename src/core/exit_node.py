@@ -14,6 +14,7 @@ from src.utils.config import (
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     EXIT_DOH_ENDPOINT, EXIT_DOH_TIMEOUT, EXIT_DENY_PRIVATE_IPS,
     EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS, EXIT_KEY_PATH, EXIT_WS_PORT,
+    WS_TLS_CERT, WS_TLS_KEY,
 )
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -40,15 +41,20 @@ class ExitNode:
         threading.Thread(target=self.listen_for_proxies, daemon=True).start()
         threading.Thread(target=self.continuous_discovery, daemon=True).start()
 
+        self.ws_tls_enabled = bool(WS_TLS_CERT and WS_TLS_KEY)
+
         # Register with internet bootstrap registry (with ws_port and priv_key for auth)
         start_heartbeat("exit", self.port, self.pub_pem,
-                        priv_key=self.priv_key, ws_port=self.ws_port)
+                        priv_key=self.priv_key, ws_port=self.ws_port,
+                        ws_tls=self.ws_tls_enabled or None)
 
-        # Start WebSocket server (dual-protocol)
+        # Start WebSocket server (dual-protocol; wss:// when TLS configured)
         self.ws_server = WSServer(
             self.host, self.ws_port,
             self.priv_key, self.pub_pem,
             on_frame=self._on_ws_frame,
+            tls_cert=WS_TLS_CERT or None,
+            tls_key=WS_TLS_KEY or None,
         )
         self.ws_server.start()
         print(f"WebSocket server on port {self.ws_port}")
