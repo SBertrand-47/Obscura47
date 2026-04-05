@@ -180,7 +180,7 @@ class ObscuraNode:
             try:
                 client_socket, addr = self.server_socket.accept()
                 print(f"Connection from {addr}")
-                threading.Thread(target=self.handle_client, args=(client_socket,)).start()
+                threading.Thread(target=self.handle_client, args=(client_socket,), daemon=True).start()
             except OSError:
                 print("Node shutting down...")
                 break
@@ -208,8 +208,8 @@ class ObscuraNode:
             client_socket.close()
 
     def run(self):
-        """Start the node server in a separate thread."""
-        server_thread = threading.Thread(target=self.start_server)
+        """Start the node server in a separate daemon thread."""
+        server_thread = threading.Thread(target=self.start_server, daemon=True)
         server_thread.start()
 
 if __name__ == "__main__":
