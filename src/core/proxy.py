@@ -438,6 +438,16 @@ def start_proxy():
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 
+    # Initialize guard node set (first-hop pinning). No-op when disabled.
+    from src.core.guards import init_guards
+    guards = init_guards()
+    if guards is not None:
+        snap = guards.snapshot()
+        if snap:
+            print(f"[guards] Loaded {len(snap)} pinned guard(s) from disk")
+        else:
+            print(f"[guards] No persisted guards; will pin from peer pool on first circuit")
+
     # Start the discovery listener
     threading.Thread(target=listen_for_clients, daemon=True).start()
 
