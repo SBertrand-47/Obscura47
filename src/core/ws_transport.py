@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import secrets
+import ssl
 import threading
 import time
 from typing import Callable
@@ -24,6 +25,22 @@ from websockets.asyncio.client import connect as ws_connect
 from src.core.encryptions import ecdsa_sign, ecdsa_verify
 
 
+def _build_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
+    """Build an SSL context for the WSServer (TLS termination)."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_path, key_path)
+    return ctx
+
+
+def _build_client_ssl_context(verify: bool) -> ssl.SSLContext:
+    """Build an SSL context for the WSClient, optionally skipping verification."""
+    ctx = ssl.create_default_context()
+    if not verify:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 # ── WSServer ─────────────────────────────────────────────────────
 
 class WSServer:
@@ -33,7 +50,8 @@ class WSServer:
     """
 
     def __init__(self, host: str, port: int, priv_key, pub_pem: str,
-                 on_frame: Callable[[str], None]):
+                 on_frame: Callable[[str], None],
+                 tls_cert: str | None = None, tls_key: str | None = None):
         """
         Args:
             host: Bind address
@@ -41,12 +59,17 @@ class WSServer:
             priv_key: This node's ECC private key (for identity)
             pub_pem: This node's public key PEM
             on_frame: Callback invoked with each received frame (JSON string)
+            tls_cert: Optional path to TLS certificate (enables wss://)
+            tls_key: Optional path to TLS private key
         """
         self.host = host
         self.port = port
         self.priv_key = priv_key
         self.pub_pem = pub_pem
         self.on_frame = on_frame
+        self.tls_cert = tls_cert
+        self.tls_key = tls_key
+        self.tls_enabled = bool(tls_cert and tls_key)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
 
@@ -110,13 +133,21 @@ class WSServer:
 
     async def _serve(self):
         """Start the WebSocket server."""
+        ssl_ctx = None
+        if self.tls_enabled:
+            ssl_ctx = _build_server_ssl_context(self.tls_cert, self.tls_key)
         self._server = await ws_serve(
             self._handler,
             self.host,
             self.port,
+            ssl=ssl_ctx,
         )
-        print(f"[ws-server] WebSocket server listening on {self.host}:{self.port}")
-        await self._server.serve_forever()
+        scheme = "wss" if self.tls_enabled else "ws"
+        print(f"[ws-server] WebSocket server listening on {scheme}://{self.host}:{self.port}")
+        try:
+            await self._server.serve_forever()
+        except asyncio.CancelledError:
+            pass
 
     def start(self):
         """Start the WebSocket server in a dedicated background thread."""
@@ -144,21 +175,24 @@ class WSClient:
     """
 
     def __init__(self, priv_key, pub_pem: str,
-                 queue_max: int = 100, idle_close_seconds: float = 60.0):
+                 queue_max: int = 100, idle_close_seconds: float = 60.0,
+                 tls_verify: bool = True):
         """
         Args:
             priv_key: This node's ECC private key (for signing challenges)
             pub_pem: This node's public key PEM
             queue_max: Max queued frames per connection before backpressure
             idle_close_seconds: Close connections idle longer than this
+            tls_verify: Verify TLS certs when connecting via wss:// (False for dev)
         """
         self.priv_key = priv_key
         self.pub_pem = pub_pem
         self.queue_max = queue_max
         self.idle_close_seconds = idle_close_seconds
+        self.tls_verify = tls_verify
 
-        # Connection pool: (host, port) -> {"ws": websocket, "last": timestamp, "lock": Lock}
-        self._connections: dict[tuple[str, int], dict] = {}
+        # Connection pool: (host, port, tls) -> {"ws": websocket, "last": timestamp}
+        self._connections: dict[tuple, dict] = {}
         self._conn_lock = threading.Lock()
 
         # Dedicated event loop for async WebSocket operations
@@ -199,18 +233,22 @@ class WSClient:
         result = json.loads(raw)
         return result.get("type") == "auth_ok"
 
-    async def _connect(self, host: str, port: int):
+    async def _connect(self, host: str, port: int, tls: bool):
         """Establish and authenticate a WebSocket connection."""
-        uri = f"ws://{host}:{port}"
-        ws = await ws_connect(uri)
+        scheme = "wss" if tls else "ws"
+        uri = f"{scheme}://{host}:{port}"
+        kwargs = {}
+        if tls:
+            kwargs["ssl"] = _build_client_ssl_context(self.tls_verify)
+        ws = await ws_connect(uri, **kwargs)
         if not await self._authenticate_to_server(ws):
             await ws.close()
             raise ConnectionRefusedError(f"Auth failed to {host}:{port}")
         return ws
 
-    async def _get_or_create(self, host: str, port: int):
+    async def _get_or_create(self, host: str, port: int, tls: bool):
         """Get existing connection or create a new one."""
-        key = (host, port)
+        key = (host, port, tls)
         with self._conn_lock:
             entry = self._connections.get(key)
             if entry and entry.get("ws") and entry["ws"].open:
@@ -218,29 +256,31 @@ class WSClient:
                 return entry["ws"]
 
         # Create new connection (outside lock to avoid blocking)
-        ws = await self._connect(host, port)
+        ws = await self._connect(host, port, tls)
         with self._conn_lock:
             self._connections[key] = {
                 "ws": ws,
                 "last": time.time(),
             }
-        print(f"[ws-client] Connected to {host}:{port}")
+        scheme = "wss" if tls else "ws"
+        print(f"[ws-client] Connected via {scheme}:// to {host}:{port}")
         return ws
 
-    async def _send_frame_async(self, host: str, port: int, frame_json: str) -> bool:
+    async def _send_frame_async(self, host: str, port: int, frame_json: str,
+                                 tls: bool) -> bool:
         """Send a frame over WebSocket, with auto-reconnect on failure."""
+        key = (host, port, tls)
         try:
-            ws = await self._get_or_create(host, port)
+            ws = await self._get_or_create(host, port, tls)
             await ws.send(frame_json)
             with self._conn_lock:
-                key = (host, port)
                 if key in self._connections:
                     self._connections[key]["last"] = time.time()
             return True
         except Exception as e:
             # Drop stale connection and retry once
             with self._conn_lock:
-                old = self._connections.pop((host, port), None)
+                old = self._connections.pop(key, None)
                 if old and old.get("ws"):
                     try:
                         asyncio.ensure_future(old["ws"].close())
@@ -248,9 +288,9 @@ class WSClient:
                         pass
 
             try:
-                ws = await self._connect(host, port)
+                ws = await self._connect(host, port, tls)
                 with self._conn_lock:
-                    self._connections[(host, port)] = {
+                    self._connections[key] = {
                         "ws": ws,
                         "last": time.time(),
                     }
@@ -260,13 +300,14 @@ class WSClient:
                 print(f"[ws-client] Failed to send to {host}:{port}: {e2}")
                 return False
 
-    def send_frame(self, host: str, port: int, frame_json: str) -> bool:
+    def send_frame(self, host: str, port: int, frame_json: str,
+                   tls: bool = False) -> bool:
         """
         Send a frame to a remote node via WebSocket. Thread-safe.
         Returns True on success, False on failure.
         """
         future = asyncio.run_coroutine_threadsafe(
-            self._send_frame_async(host, port, frame_json),
+            self._send_frame_async(host, port, frame_json, tls),
             self._loop,
         )
         try:
@@ -275,10 +316,11 @@ class WSClient:
             print(f"[ws-client] Send timeout/error to {host}:{port}: {e}")
             return False
 
-    def close_connection(self, host: str, port: int):
+    def close_connection(self, host: str, port: int, tls: bool = False):
         """Close a specific connection."""
+        key = (host, port, tls)
         with self._conn_lock:
-            entry = self._connections.pop((host, port), None)
+            entry = self._connections.pop(key, None)
         if entry and entry.get("ws"):
             asyncio.run_coroutine_threadsafe(entry["ws"].close(), self._loop)
 
@@ -310,7 +352,8 @@ class WSClient:
                         asyncio.run_coroutine_threadsafe(entry["ws"].close(), self._loop)
                     except Exception:
                         pass
-                    print(f"[ws-client] Closed idle connection to {key[0]}:{key[1]}")
+                    host, port = key[0], key[1]
+                    print(f"[ws-client] Closed idle connection to {host}:{port}")
 
 
 # ── Singleton client instance (lazily initialized per node) ──────
@@ -324,10 +367,13 @@ def get_ws_client(priv_key=None, pub_pem: str = "") -> WSClient | None:
     global _global_client
     with _client_lock:
         if _global_client is None and priv_key is not None:
-            from src.utils.config import CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS
+            from src.utils.config import (
+                CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS, TLS_VERIFY,
+            )
             _global_client = WSClient(
                 priv_key, pub_pem,
                 queue_max=CHANNEL_QUEUE_MAX,
                 idle_close_seconds=CHANNEL_IDLE_CLOSE_SECONDS,
+                tls_verify=TLS_VERIFY,
             )
         return _global_client

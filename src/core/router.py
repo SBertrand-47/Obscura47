@@ -27,15 +27,18 @@ def _try_ws_send(next_hop: dict, frame_json: str) -> bool:
     """Try sending a frame via WebSocket if the peer supports it and WS is preferred."""
     if not PREFER_WEBSOCKET:
         return False
-    ws_port = next_hop.get('ws_port') if isinstance(next_hop, dict) else None
+    if not isinstance(next_hop, dict):
+        return False
+    ws_port = next_hop.get('ws_port')
     if not ws_port:
         return False
+    ws_tls = bool(next_hop.get('ws_tls'))
     try:
         from src.core.ws_transport import get_ws_client
         client = get_ws_client()
         if client is None:
             return False
-        return client.send_frame(next_hop['host'], ws_port, frame_json)
+        return client.send_frame(next_hop['host'], ws_port, frame_json, tls=ws_tls)
     except Exception:
         return False
 

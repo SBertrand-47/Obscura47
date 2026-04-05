@@ -120,6 +120,16 @@ REGISTRY_DB_PATH = getenv_str("OBSCURA_REGISTRY_DB_PATH", "registry.db")
 REGISTRY_ADMIN_KEY = getenv_str("OBSCURA_REGISTRY_ADMIN_KEY", "")
 REGISTRY_RATE_LIMIT = getenv_int("OBSCURA_REGISTRY_RATE_LIMIT", 60)
 
+# ── TLS ──────────────────────────────────────────────────────────
+# Registry server TLS (serves https:// + wss:// for registry endpoint)
+REGISTRY_TLS_CERT = getenv_str("OBSCURA_REGISTRY_TLS_CERT", "")
+REGISTRY_TLS_KEY = getenv_str("OBSCURA_REGISTRY_TLS_KEY", "")
+# WebSocket transport TLS (serves wss:// on node/exit ws ports)
+WS_TLS_CERT = getenv_str("OBSCURA_WS_TLS_CERT", "")
+WS_TLS_KEY = getenv_str("OBSCURA_WS_TLS_KEY", "")
+# Client-side: set to false to skip TLS cert verification (dev / self-signed)
+TLS_VERIFY = getenv_str("OBSCURA_TLS_VERIFY", "true").lower() in ("1", "true", "yes")
+
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
 EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT
