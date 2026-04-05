@@ -120,6 +120,15 @@ REGISTRY_DB_PATH = getenv_str("OBSCURA_REGISTRY_DB_PATH", "registry.db")
 REGISTRY_ADMIN_KEY = getenv_str("OBSCURA_REGISTRY_ADMIN_KEY", "")
 REGISTRY_RATE_LIMIT = getenv_int("OBSCURA_REGISTRY_RATE_LIMIT", 60)
 
+# ── Guard Nodes (client-side first-hop pinning) ─────────────────
+GUARD_ENABLED = getenv_str("OBSCURA_GUARD_ENABLED", "true").lower() in ("1", "true", "yes")
+GUARD_COUNT = getenv_int("OBSCURA_GUARD_COUNT", 3)
+GUARD_PATH = getenv_str("OBSCURA_GUARD_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "guards.json"))
+# Max age of a guard in days before forced rotation (Tor uses 60-90)
+GUARD_LIFETIME_DAYS = getenv_int("OBSCURA_GUARD_LIFETIME_DAYS", 30)
+# A guard unseen for this long (seconds) is considered unreachable for selection
+GUARD_DOWN_SECONDS = getenv_int("OBSCURA_GUARD_DOWN_SECONDS", 600)
+
 # ── TLS ──────────────────────────────────────────────────────────
 # Registry server TLS (serves https:// + wss:// for registry endpoint)
 REGISTRY_TLS_CERT = getenv_str("OBSCURA_REGISTRY_TLS_CERT", "")
