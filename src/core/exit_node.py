@@ -139,7 +139,7 @@ class ExitNode:
         while self.running:
             client_socket, addr = self.server_socket.accept()
             print(f"Connection from {addr}")
-            threading.Thread(target=self.handle_request, args=(client_socket,)).start()
+            threading.Thread(target=self.handle_request, args=(client_socket,), daemon=True).start()
 
     def handle_request(self, client_socket):
         """Handle requests forwarded through the network (legacy TCP)."""
