@@ -91,50 +91,66 @@ class ObscuraNode:
 
         # Try onion layer first; fall back to legacy frame encryption
         decrypted_message = onion_decrypt_with_priv(self.priv_key, encrypted_data)
-        if decrypted_message is not None:
-            try:
-                layer = json.loads(decrypted_message)
-                if 'payload' in layer:
-                    # Final payload reached this hop
-                    payload = layer['payload']
-                    req_id = payload.get("request_id", "")
-                    print(f"Final destination reached at {self.host}:{self.port} | request_id={req_id}")
-                    return
-                next_hop = layer.get('next_hop')
-                inner = layer.get('inner')
-                if not next_hop or inner is None:
-                    print("Malformed onion layer; dropping")
-                    return
-                if isinstance(next_hop, dict):
-                    encrypted_inner = inner if isinstance(inner, str) else json.dumps(inner)
-                    # Forward onion-encrypted inner to next hop (persist where applicable)
-                    self.router.send_to_next_hop(next_hop, encrypted_inner)
-                    return
-                print("Invalid next_hop format; dropping")
-                return
-            except Exception as e:
-                print(f"Onion decode error: {e}")
-                return
-        else:
+        if decrypted_message is None:
             if ONION_ONLY:
                 print("Onion-only mode: legacy frame rejected")
                 return
-            decrypted_legacy = decrypt_message(encrypted_data)
-            if decrypted_legacy is None:
+            decrypted_message = decrypt_message(encrypted_data)
+            if decrypted_message is None:
                 print("Decryption failed. Dropping message.")
                 return
-            message_content = json.loads(decrypted_legacy)
-            hop_count = len(message_content.get("route", []))
-            req_id = message_content.get("request_id", "")
-            print(f"Received at {self.host}:{self.port} | hops_remaining={hop_count} | request_id={req_id}")
 
-            # If there are more nodes in the route, pop the next hop and forward
-            if message_content["route"]:
-                next_hop = message_content["route"].pop(0)
+        try:
+            layer = json.loads(decrypted_message)
+        except Exception as e:
+            print(f"Frame decode error: {e}")
+            return
+
+        # Nested onion layer: next_hop/inner or terminal payload
+        if isinstance(layer, dict) and ('payload' in layer or 'next_hop' in layer or 'inner' in layer):
+            if 'payload' in layer:
+                payload = layer['payload'] or {}
+                req_id = payload.get("request_id", "") if isinstance(payload, dict) else ""
+                print(f"Final destination reached at {self.host}:{self.port} | request_id={req_id}")
+                return
+            next_hop = layer.get('next_hop')
+            inner = layer.get('inner')
+            if not next_hop or inner is None:
+                print("Malformed onion layer; dropping")
+                return
+            if isinstance(next_hop, dict):
+                encrypted_inner = inner if isinstance(inner, str) else json.dumps(inner)
+                self.router.send_to_next_hop(next_hop, encrypted_inner)
+                return
+            print("Invalid next_hop format; dropping")
+            return
+
+        # Tunnel envelope (type + route) — walk the route and forward
+        if isinstance(layer, dict) and layer.get('type') in ('connect', 'data', 'close') and isinstance(layer.get('route'), list):
+            route = layer['route']
+            req_id = layer.get("request_id", "")
+            if route:
+                next_hop = route.pop(0)
+                print(f"Forwarding tunnel frame ({layer['type']}) to {next_hop['host']}:{next_hop['port']} | request_id={req_id}")
+                self.router.forward_message(next_hop, layer)
+            else:
+                print(f"Tunnel frame with empty route at {self.host}:{self.port} | request_id={req_id}")
+            return
+
+        # Legacy envelope with explicit route
+        if isinstance(layer, dict) and 'route' in layer:
+            hop_count = len(layer.get("route", []))
+            req_id = layer.get("request_id", "")
+            print(f"Received at {self.host}:{self.port} | hops_remaining={hop_count} | request_id={req_id}")
+            if layer["route"]:
+                next_hop = layer["route"].pop(0)
                 print(f"Forwarding to {next_hop['host']}:{next_hop['port']} | request_id={req_id}")
-                self.router.forward_message(next_hop, message_content)
+                self.router.forward_message(next_hop, layer)
             else:
                 print(f"Final destination reached at {self.host}:{self.port} | request_id={req_id}")
+            return
+
+        print("Unrecognized frame shape; dropping")
 
     def listen_for_nodes(self):
         """Continuously listen for other nodes' discovery responses."""

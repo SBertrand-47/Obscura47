@@ -56,11 +56,26 @@ class Router:
         """
         Generates a random path of nodes for relaying messages.
         If there aren't enough peers, use as many as available.
+        First hop is pinned to a guard when GuardSet is installed.
         """
         if len(self.peers) < hops:
             print("Not enough peers for full hop count!")
             hops = len(self.peers)
-        return random.sample(self.peers, hops) if hops > 0 else []
+        if hops <= 0:
+            return []
+
+        from src.core.guards import get_guards
+        guards = get_guards()
+        if guards is not None:
+            first = guards.pick_first_hop(self.peers)
+            if first is not None:
+                first_key = (first.get("host"), first.get("port"))
+                remaining = [p for p in self.peers if (p.get("host"), p.get("port")) != first_key]
+                tail_count = min(max(0, hops - 1), len(remaining))
+                tail = random.sample(remaining, tail_count) if tail_count else []
+                return [first] + tail
+
+        return random.sample(self.peers, hops)
 
     def relay_message(self, data, destination, return_path=None, request_id=None):
         """
@@ -227,13 +242,31 @@ def direct_relay_message(data, destination, peers, return_path=None, request_id=
     r.relay_message(data, destination, return_path=return_path, request_id=request_id)
 
 def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
-    """Build a route with length in the range [4,7] when available."""
+    """
+    Build a route with length in the range [4,7] when available.
+    If a process-wide GuardSet is installed (proxy role), the first hop is
+    pinned to a live guard and remaining hops are sampled from the rest.
+    """
     if not peers:
         return []
     hop_target = random.randint(min_hops, max_hops)
     hop_target = min(hop_target, len(peers))
     if hop_target <= 0:
         return []
+
+    # Guard-pinned first hop, if configured
+    from src.core.guards import get_guards
+    guards = get_guards()
+    if guards is not None:
+        first = guards.pick_first_hop(peers)
+        if first is not None:
+            first_key = (first.get("host"), first.get("port"))
+            remaining_pool = [p for p in peers if (p.get("host"), p.get("port")) != first_key]
+            tail_count = max(0, hop_target - 1)
+            tail_count = min(tail_count, len(remaining_pool))
+            tail = random.sample(remaining_pool, tail_count) if tail_count else []
+            return [first] + tail
+
     return random.sample(peers, hop_target)
 
 def _send_frame_via_route(route, envelope):
@@ -335,36 +368,48 @@ def channel_idle_sweeper():
                 pass
 
 def start_tunnel(destination, peers, request_id: str, host: str, port: int, return_path: dict, route=None):
-    """Start a tunnel by sending a CONNECT_INIT frame along a fixed route."""
+    """Start a tunnel by sending a CONNECT_INIT frame along a fixed route.
+
+    envelope.route holds the hops *after* the first hop — i.e. what the first
+    hop must forward through — so each receiving hop pops route[0] to find
+    its next destination, with no self-loop.
+    """
     if route is None:
         route = build_route47(peers)
-    full_route = list(route) + [destination]
+    if not route:
+        print("start_tunnel: empty route, cannot start")
+        return route
+    remaining = list(route[1:]) + [destination]
     envelope = {
         "type": "connect",
         "host": host,
         "port": port,
         "request_id": request_id,
         "return_path": return_path,
-        "route": full_route,
+        "route": remaining,
     }
-    _send_frame_via_route(full_route, envelope)
+    _send_frame_via_route([route[0]], envelope)
     return route
 
 def send_tunnel_data(destination, route, request_id: str, chunk_b64: str):
-    full_route = list(route) + [destination]
+    if not route:
+        return
+    remaining = list(route[1:]) + [destination]
     envelope = {
         "type": "data",
         "request_id": request_id,
         "chunk": chunk_b64,
-        "route": full_route,
+        "route": remaining,
     }
-    _send_frame_via_route(full_route, envelope)
+    _send_frame_via_route([route[0]], envelope)
 
 def close_tunnel(destination, route, request_id: str):
-    full_route = list(route) + [destination]
+    if not route:
+        return
+    remaining = list(route[1:]) + [destination]
     envelope = {
         "type": "close",
         "request_id": request_id,
-        "route": full_route,
+        "route": remaining,
     }
-    _send_frame_via_route(full_route, envelope)
+    _send_frame_via_route([route[0]], envelope)
