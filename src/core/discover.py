@@ -13,6 +13,28 @@ DISCOVERY_PORT = CFG_DISCOVERY_PORT  # Clients/Proxy discovery
 NODE_MULTICAST_PORT = CFG_NODE_DISCOVERY_PORT  # Nodes discovery
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_DISCOVERY_PORT  # Exit node discovery
 
+# --- TOFU key pinning ---
+# Maps (host, port) -> {"pub": pem, "first_seen": ts}
+# If a peer re-announces with a different public key, it's flagged and rejected.
+_pinned_keys: Dict[tuple, Dict] = {}
+
+
+def _validate_peer_key(host: str, port: int, pub_pem: str | None) -> bool:
+    """Trust-On-First-Use: accept a peer's key on first contact, reject changes."""
+    if pub_pem is None:
+        return True  # no key to pin
+    key = (host, port)
+    if key not in _pinned_keys:
+        _pinned_keys[key] = {"pub": pub_pem, "first_seen": time.time()}
+        return True
+    if _pinned_keys[key]["pub"] == pub_pem:
+        return True
+    log.warning(
+        f"TOFU violation: {host}:{port} changed public key "
+        f"(pinned since {_pinned_keys[key]['first_seen']:.0f}). Rejecting peer."
+    )
+    return False
+
 def get_local_ip():
     """Returns the machine's LAN IP (avoids 127.0.0.1)."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -79,6 +101,9 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                         if "pub" in message:
                             new_peer["pub"] = message["pub"]
                         if new_peer["host"] != advertised_ip:
+                            # TOFU: reject if public key changed
+                            if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
+                                continue
                             # Update or insert
                             for idx, p in enumerate(list(peers)):
                                 if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
@@ -130,6 +155,9 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                         if "pub" in message:
                             new_peer["pub"] = message["pub"]
                         if new_peer["host"] != advertised_ip:
+                            # TOFU: reject if public key changed
+                            if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
+                                continue
                             # Update or insert
                             for idx, p in enumerate(list(peers)):
                                 if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:

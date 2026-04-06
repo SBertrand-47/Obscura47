@@ -6,7 +6,7 @@ import threading
 import time
 import base64
 from src.utils.logger import get_logger
-from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
+from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, onion_decrypt_checked, ecc_load_or_create_keypair
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat
 from src.core.ws_transport import WSServer, get_ws_client
@@ -79,7 +79,7 @@ class ExitNode:
         if not encrypted_data:
             return
         # Try onion layer first
-        decrypted_message = onion_decrypt_with_priv(self.priv_key, encrypted_data)
+        decrypted_message = onion_decrypt_checked(self.priv_key, encrypted_data)
         if decrypted_message is None:
             decrypted_message = decrypt_message(encrypted_data)
         if decrypted_message is None:
