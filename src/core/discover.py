@@ -4,6 +4,9 @@ import struct
 import time
 from typing import List, Dict
 from src.utils.config import DISCOVERY_PORT as CFG_DISCOVERY_PORT, NODE_DISCOVERY_PORT as CFG_NODE_DISCOVERY_PORT, EXIT_DISCOVERY_PORT as CFG_EXIT_DISCOVERY_PORT, PEER_EXPIRY_SECONDS
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 MULTICAST_GROUP = "239.255.255.250"
 DISCOVERY_PORT = CFG_DISCOVERY_PORT  # Clients/Proxy discovery
@@ -26,9 +29,9 @@ def broadcast_discovery(multicast_port=DISCOVERY_PORT):
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
             message = json.dumps({"type": "discovery_request"}).encode()
             sock.sendto(message, (MULTICAST_GROUP, multicast_port))
-            print(f"🔍 Sent multicast discovery request on port {multicast_port}...")
+            log.info(f"Sent multicast discovery request on port {multicast_port}")
     except Exception as e:
-        print(f"❌ Error broadcasting discovery request: {e}")
+        log.error(f"Error broadcasting discovery request: {e}")
 
 def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISCOVERY_PORT, extra_fields: Dict | None = None):
     """Listens for discovery requests and responds with node info."""
@@ -40,7 +43,7 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
             mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-            print(f"👂 Listening for discovery on {MULTICAST_GROUP}:{multicast_port}...")
+            log.info(f"Listening for discovery on {MULTICAST_GROUP}:{multicast_port}")
 
             advertised_ip = get_local_ip()
 
@@ -49,7 +52,7 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                     data, addr = sock.recvfrom(1024)
                     message = json.loads(data.decode())
 
-                    print(f"📩 Received discovery message from {addr}: {message}")
+                    log.info(f"Received discovery message from {addr}: {message}")
 
                     if message.get("type") == "discovery_request":
                         resp = {
@@ -69,7 +72,7 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                             sock.sendto(response, (MULTICAST_GROUP, multicast_port))
                         except Exception:
                             pass
-                        print(f"✅ Responded to discovery from {addr[0]} with {advertised_ip}:{local_port}")
+                        log.info(f"Responded to discovery from {addr[0]} with {advertised_ip}:{local_port}")
 
                     elif message.get("type") == "discovery_response":
                         new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
@@ -83,20 +86,20 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                                     break
                             else:
                                 peers.append(new_peer)
-                                print(f"🔗 Discovered new peer: {{'host': {new_peer['host']}, 'port': {new_peer['port']}}}")
+                                log.info(f"Discovered new peer: host={new_peer['host']}, port={new_peer['port']}")
 
                         # Expire old peers
                         cutoff = time.time() - PEER_EXPIRY_SECONDS
                         peers[:] = [p for p in peers if p.get("ts", 0) >= cutoff]
 
                 except json.JSONDecodeError:
-                    print("⚠️ Received malformed discovery message. Ignoring.")
+                    log.warning("Received malformed discovery message. Ignoring.")
                 except Exception as e:
-                    print(f"⚠️ Error in discovery listener: {e}")
+                    log.warning(f"Error in discovery listener: {e}")
                     time.sleep(1)
 
     except Exception as e:
-        print(f"❌ Error setting up discovery listener: {e}")
+        log.error(f"Error setting up discovery listener: {e}")
 
 def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
     """
@@ -113,7 +116,7 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
             mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-            print(f"👀 Observing discovery on {MULTICAST_GROUP}:{multicast_port}...")
+            log.info(f"Observing discovery on {MULTICAST_GROUP}:{multicast_port}")
 
             advertised_ip = get_local_ip()
 
@@ -134,7 +137,7 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                                     break
                             else:
                                 peers.append(new_peer)
-                                print(f"🔗 Observed peer: {{'host': {new_peer['host']}, 'port': {new_peer['port']}}} (from {addr[0]})")
+                                log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
 
                         # Expire old peers
                         cutoff = time.time() - PEER_EXPIRY_SECONDS
@@ -142,7 +145,7 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                 except json.JSONDecodeError:
                     continue
                 except Exception as e:
-                    print(f"⚠️ Error in observe_discovery: {e}")
+                    log.warning(f"Error in observe_discovery: {e}")
                     time.sleep(1)
     except Exception as e:
-        print(f"❌ Error setting up passive discovery observer: {e}")
+        log.error(f"Error setting up passive discovery observer: {e}")

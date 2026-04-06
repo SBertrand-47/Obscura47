@@ -23,6 +23,9 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
 
 from src.core.encryptions import ecdsa_sign, ecdsa_verify
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 
 def _build_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
@@ -127,7 +130,7 @@ class WSServer:
                 try:
                     self.on_frame(message)
                 except Exception as e:
-                    print(f"[ws-server] Frame handler error: {e}")
+                    log.error(f"Frame handler error: {e}")
         except websockets.exceptions.ConnectionClosed:
             pass
 
@@ -143,7 +146,7 @@ class WSServer:
             ssl=ssl_ctx,
         )
         scheme = "wss" if self.tls_enabled else "ws"
-        print(f"[ws-server] WebSocket server listening on {scheme}://{self.host}:{self.port}")
+        log.info(f"WebSocket server listening on {scheme}://{self.host}:{self.port}")
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
@@ -263,7 +266,7 @@ class WSClient:
                 "last": time.time(),
             }
         scheme = "wss" if tls else "ws"
-        print(f"[ws-client] Connected via {scheme}:// to {host}:{port}")
+        log.info(f"Connected via {scheme}:// to {host}:{port}")
         return ws
 
     async def _send_frame_async(self, host: str, port: int, frame_json: str,
@@ -297,7 +300,7 @@ class WSClient:
                 await ws.send(frame_json)
                 return True
             except Exception as e2:
-                print(f"[ws-client] Failed to send to {host}:{port}: {e2}")
+                log.error(f"Failed to send to {host}:{port}: {e2}")
                 return False
 
     def send_frame(self, host: str, port: int, frame_json: str,
@@ -313,7 +316,7 @@ class WSClient:
         try:
             return future.result(timeout=5.0)
         except Exception as e:
-            print(f"[ws-client] Send timeout/error to {host}:{port}: {e}")
+            log.error(f"Send timeout/error to {host}:{port}: {e}")
             return False
 
     def close_connection(self, host: str, port: int, tls: bool = False):
@@ -353,7 +356,7 @@ class WSClient:
                     except Exception:
                         pass
                     host, port = key[0], key[1]
-                    print(f"[ws-client] Closed idle connection to {host}:{port}")
+                    log.info(f"Closed idle connection to {host}:{port}")
 
 
 # ── Singleton client instance (lazily initialized per node) ──────

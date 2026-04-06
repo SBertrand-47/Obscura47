@@ -14,6 +14,9 @@ import threading
 import urllib.request
 from typing import List, Dict
 from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS, TLS_VERIFY
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 
 def _ssl_ctx():
@@ -57,7 +60,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
         if result.get("ok"):
             # Registered (heartbeat or no-auth)
-            print(f"[internet] Registered as {role} with registry (your_ip={result.get('your_ip')})")
+            log.info(f"Registered as {role} with registry (your_ip={result.get('your_ip')})")
             return result
 
         # Challenge-response flow
@@ -81,17 +84,17 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
                 verify_result = json.loads(verify_resp.read())
 
             if verify_result.get("ok"):
-                print(f"[internet] Verified as {role} with registry (your_ip={verify_result.get('your_ip')})")
+                log.info(f"Verified as {role} with registry (your_ip={verify_result.get('your_ip')})")
                 return verify_result
             else:
-                print(f"[internet] Verification failed: {verify_result}")
+                log.error(f"Verification failed: {verify_result}")
                 return None
         else:
-            print(f"[internet] Challenge received but no private key to sign with")
+            log.warning(f"Challenge received but no private key to sign with")
             return None
 
     except Exception as e:
-        print(f"[internet] Failed to register with registry: {e}")
+        log.error(f"Failed to register with registry: {e}")
         return None
 
 
@@ -130,7 +133,7 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
             peers = json.loads(resp.read())
             return peers if isinstance(peers, list) else []
     except Exception as e:
-        print(f"[internet] Failed to fetch peers from registry: {e}")
+        log.error(f"Failed to fetch peers from registry: {e}")
         return []
 
 
@@ -159,8 +162,8 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
             if p.get("ws_tls"):
                 entry["ws_tls"] = True
             target_list.append(entry)
-            print(f"[internet] Discovered {p.get('role', '?')} at {p['host']}:{p['port']}"
-                  + (f" (ws:{p['ws_port']})" if p.get('ws_port') else ""))
+            log.info(f"Discovered {p.get('role', '?')} at {p['host']}:{p['port']}"
+                     + (f" (ws:{p['ws_port']})" if p.get('ws_port') else ""))
         else:
             # Update ws_port on existing entries if newly available
             for ep in target_list:

@@ -7,12 +7,15 @@ from src.core.encryptions import decrypt_message, onion_decrypt_with_priv, ecc_l
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat
 from src.core.ws_transport import WSServer, get_ws_client
+from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     ONION_ONLY, NODE_KEY_PATH, NODE_WS_PORT,
     WS_TLS_CERT, WS_TLS_KEY,
 )
+
+log = get_logger(__name__)
 
 NODE_MULTICAST_PORT = CFG_NODE_MULTICAST_PORT  # Node discovery
 DISCOVERY_INTERVAL = CFG_DISCOVERY_INTERVAL  # Broadcast interval
@@ -65,8 +68,8 @@ class ObscuraNode:
         )
         self.ws_server.start()
 
-        print(f"Node Discovery started on port {NODE_MULTICAST_PORT}...")
-        print(f"WebSocket server on port {self.ws_port}")
+        log.info("Node Discovery started on port %s", NODE_MULTICAST_PORT)
+        log.info("WebSocket server on port %s", self.ws_port)
 
         # Allow time for initial discovery
         time.sleep(5)
@@ -80,30 +83,30 @@ class ObscuraNode:
             packet = json.loads(message)
             self.process_frame(packet)
         except Exception as e:
-            print(f"[ws] Frame error: {e}")
+            log.error("WS frame error: %s", e)
 
     def process_frame(self, incoming_packet: dict):
         """Process an incoming encrypted frame (shared by TCP and WebSocket handlers)."""
         encrypted_data = incoming_packet.get("encrypted_data", None)
         if not encrypted_data:
-            print("No encrypted data found. Dropping message.")
+            log.warning("No encrypted data found. Dropping message.")
             return
 
         # Try onion layer first; fall back to legacy frame encryption
         decrypted_message = onion_decrypt_with_priv(self.priv_key, encrypted_data)
         if decrypted_message is None:
             if ONION_ONLY:
-                print("Onion-only mode: legacy frame rejected")
+                log.warning("Onion-only mode: legacy frame rejected")
                 return
             decrypted_message = decrypt_message(encrypted_data)
             if decrypted_message is None:
-                print("Decryption failed. Dropping message.")
+                log.error("Decryption failed. Dropping message.")
                 return
 
         try:
             layer = json.loads(decrypted_message)
         except Exception as e:
-            print(f"Frame decode error: {e}")
+            log.error("Frame decode error: %s", e)
             return
 
         # Nested onion layer: next_hop/inner or terminal payload
@@ -111,18 +114,18 @@ class ObscuraNode:
             if 'payload' in layer:
                 payload = layer['payload'] or {}
                 req_id = payload.get("request_id", "") if isinstance(payload, dict) else ""
-                print(f"Final destination reached at {self.host}:{self.port} | request_id={req_id}")
+                log.info("Final destination reached at %s:%s | request_id=%s", self.host, self.port, req_id)
                 return
             next_hop = layer.get('next_hop')
             inner = layer.get('inner')
             if not next_hop or inner is None:
-                print("Malformed onion layer; dropping")
+                log.warning("Malformed onion layer; dropping")
                 return
             if isinstance(next_hop, dict):
                 encrypted_inner = inner if isinstance(inner, str) else json.dumps(inner)
                 self.router.send_to_next_hop(next_hop, encrypted_inner)
                 return
-            print("Invalid next_hop format; dropping")
+            log.warning("Invalid next_hop format; dropping")
             return
 
         # Tunnel envelope (type + route) — walk the route and forward
@@ -131,36 +134,36 @@ class ObscuraNode:
             req_id = layer.get("request_id", "")
             if route:
                 next_hop = route.pop(0)
-                print(f"Forwarding tunnel frame ({layer['type']}) to {next_hop['host']}:{next_hop['port']} | request_id={req_id}")
+                log.info("Forwarding tunnel frame (%s) to %s:%s | request_id=%s", layer['type'], next_hop['host'], next_hop['port'], req_id)
                 self.router.forward_message(next_hop, layer)
             else:
-                print(f"Tunnel frame with empty route at {self.host}:{self.port} | request_id={req_id}")
+                log.info("Tunnel frame with empty route at %s:%s | request_id=%s", self.host, self.port, req_id)
             return
 
         # Legacy envelope with explicit route
         if isinstance(layer, dict) and 'route' in layer:
             hop_count = len(layer.get("route", []))
             req_id = layer.get("request_id", "")
-            print(f"Received at {self.host}:{self.port} | hops_remaining={hop_count} | request_id={req_id}")
+            log.info("Received at %s:%s | hops_remaining=%d | request_id=%s", self.host, self.port, hop_count, req_id)
             if layer["route"]:
                 next_hop = layer["route"].pop(0)
-                print(f"Forwarding to {next_hop['host']}:{next_hop['port']} | request_id={req_id}")
+                log.info("Forwarding to %s:%s | request_id=%s", next_hop['host'], next_hop['port'], req_id)
                 self.router.forward_message(next_hop, layer)
             else:
-                print(f"Final destination reached at {self.host}:{self.port} | request_id={req_id}")
+                log.info("Final destination reached at %s:%s | request_id=%s", self.host, self.port, req_id)
             return
 
-        print("Unrecognized frame shape; dropping")
+        log.warning("Unrecognized frame shape; dropping")
 
     def listen_for_nodes(self):
         """Continuously listen for other nodes' discovery responses."""
-        print("Listening for discovery on 50002...")
+        log.info("Listening for discovery on 50002")
         listen_for_discovery(self.peers, self.port, NODE_MULTICAST_PORT, extra_fields={'pub': self.pub_pem})
 
     def continuous_discovery(self):
         """Continuously broadcast discovery requests every few seconds."""
         while self.running:
-            print("Broadcasting discovery request...")
+            log.info("Broadcasting discovery request")
             broadcast_discovery(NODE_MULTICAST_PORT)
             time.sleep(DISCOVERY_INTERVAL)
 
@@ -170,9 +173,9 @@ class ObscuraNode:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
             self.server_socket.settimeout(1.0)
-            print(f"Node started at {self.host}:{self.port} (TCP), waiting for connections...")
+            log.info("Node started at %s:%s (TCP), waiting for connections", self.host, self.port)
         except OSError:
-            print(f"Port {self.port} is already in use! Trying another port...")
+            log.warning("Port %s is already in use, trying another port", self.port)
             self.port += 1
             self.start_server()
             return
@@ -180,12 +183,12 @@ class ObscuraNode:
         while self.running:
             try:
                 client_socket, addr = self.server_socket.accept()
-                print(f"Connection from {addr}")
+                log.info("Connection from %s", addr)
                 threading.Thread(target=self.handle_client, args=(client_socket,), daemon=True).start()
             except socket.timeout:
                 continue
             except OSError:
-                print("Node shutting down...")
+                log.warning("Node shutting down")
                 break
 
     def shutdown(self):
@@ -200,7 +203,7 @@ class ObscuraNode:
                 self.ws_server.stop()
             except Exception:
                 pass
-        print(f"Node {self.host}:{self.port} shut down.")
+        log.warning("Node %s:%s shut down", self.host, self.port)
 
     def handle_client(self, client_socket):
         """Handles incoming encrypted messages from other nodes (legacy TCP)."""
@@ -219,7 +222,7 @@ class ObscuraNode:
                     self.process_frame(incoming_packet)
 
         except Exception as e:
-            print(f"Error handling client: {e}")
+            log.error("Error handling client: %s", e)
         finally:
             client_socket.close()
 

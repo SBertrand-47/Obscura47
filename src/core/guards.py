@@ -22,6 +22,10 @@ import threading
 import time
 from typing import Iterable
 
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 
 class GuardSet:
     def __init__(self, path: str, count: int,
@@ -46,7 +50,7 @@ class GuardSet:
             if isinstance(data, list):
                 self._guards = [g for g in data if self._is_valid_entry(g)]
         except Exception as e:
-            print(f"[guards] Failed to load {self.path}: {e}")
+            log.error(f"Failed to load {self.path}: {e}")
 
     def _save(self):
         try:
@@ -56,7 +60,7 @@ class GuardSet:
                 json.dump(self._guards, f, indent=2)
             os.replace(tmp, self.path)
         except Exception as e:
-            print(f"[guards] Failed to save {self.path}: {e}")
+            log.error(f"Failed to save {self.path}: {e}")
 
     @staticmethod
     def _is_valid_entry(g) -> bool:
@@ -91,7 +95,7 @@ class GuardSet:
         updated = []
         for g in self._guards:
             if self._is_expired(g, now):
-                print(f"[guards] Retiring expired guard {g['host']}:{g['port']}")
+                log.info(f"Retiring expired guard {g['host']}:{g['port']}")
                 continue
             fresh = cand_by_key.get((g["host"], g["port"]))
             if fresh:
@@ -118,7 +122,7 @@ class GuardSet:
                 if c.get(field) is not None:
                     new_guard[field] = c[field]
             self._guards.append(new_guard)
-            print(f"[guards] Pinned new guard {c['host']}:{c['port']}")
+            log.info(f"Pinned new guard {c['host']}:{c['port']}")
 
     def pick_first_hop(self, candidates: list[dict]) -> dict | None:
         """

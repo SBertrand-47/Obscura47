@@ -66,8 +66,10 @@ except ImportError:
     _ECDSA_AVAILABLE = False
 
     def _ecdsa_verify(pub_pem: str, message: bytes, signature_b64: str) -> bool:
-        print("[registry] WARNING: pycryptodome not installed, ECDSA verification disabled")
-        return True
+        raise RuntimeError(
+            "pycryptodome is not installed — ECDSA verification unavailable. "
+            "Install it with: pip install pycryptodome"
+        )
 
 # ── Rate limiter (in-memory token bucket per IP) ─────────────────
 _rate_buckets: dict[str, list] = {}  # ip -> [timestamps]
