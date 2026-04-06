@@ -3,7 +3,7 @@ import threading
 import json
 import time
 from src.core.router import Router
-from src.core.encryptions import decrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
+from src.core.encryptions import decrypt_message, onion_decrypt_with_priv, onion_decrypt_checked, ecc_load_or_create_keypair
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat
 from src.core.ws_transport import WSServer, get_ws_client
@@ -93,7 +93,7 @@ class ObscuraNode:
             return
 
         # Try onion layer first; fall back to legacy frame encryption
-        decrypted_message = onion_decrypt_with_priv(self.priv_key, encrypted_data)
+        decrypted_message = onion_decrypt_checked(self.priv_key, encrypted_data)
         if decrypted_message is None:
             if ONION_ONLY:
                 log.warning("Onion-only mode: legacy frame rejected")

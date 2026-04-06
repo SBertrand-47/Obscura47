@@ -79,10 +79,34 @@ def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> 
         return None
 
 
+# --- Padding for traffic analysis resistance ---
+
+# Frames are padded to the nearest multiple of this block size before encryption.
+# This prevents packet-length correlation across hops.
+PADDING_BLOCK = 512  # bytes
+
+
+def _pad(plaintext: bytes) -> bytes:
+    """PKCS7-style pad to a multiple of PADDING_BLOCK."""
+    pad_len = PADDING_BLOCK - (len(plaintext) % PADDING_BLOCK)
+    return plaintext + bytes([pad_len]) * pad_len
+
+
+def _unpad(data: bytes) -> bytes:
+    """Remove PKCS7 padding."""
+    pad_len = data[-1]
+    if pad_len < 1 or pad_len > PADDING_BLOCK:
+        raise ValueError("invalid padding")
+    if data[-pad_len:] != bytes([pad_len]) * pad_len:
+        raise ValueError("corrupt padding")
+    return data[:-pad_len]
+
+
 def onion_encrypt_for_peer(peer_pub_pem: str, plaintext: str) -> str:
     eph_priv, eph_pub_pem = ecc_generate_keypair()
     key = _derive_symmetric_key(eph_priv, peer_pub_pem)
-    nonce, ct, tag = aes_gcm_encrypt(key, plaintext.encode())
+    padded = _pad(plaintext.encode())
+    nonce, ct, tag = aes_gcm_encrypt(key, padded)
     sealed = {
         'epub': eph_pub_pem,
         'nonce': base64.b64encode(nonce).decode(),
@@ -104,10 +128,59 @@ def onion_decrypt_with_priv(priv: ECC.EccKey, sealed_json: str) -> str | None:
         tag = base64.b64decode(sealed['tag'])
         ct = base64.b64decode(sealed['ct'])
         pt = aes_gcm_decrypt(key, nonce, ct, tag)
-        return pt.decode() if pt is not None else None
+        if pt is None:
+            return None
+        return _unpad(pt).decode()
     except Exception:
         return None
 
+
+
+# --- Nonce replay detection ---
+
+import threading as _threading
+import time as _time
+
+_REPLAY_WINDOW = 300  # seconds to keep nonces
+_seen_nonces: dict[bytes, float] = {}
+_nonce_lock = _threading.Lock()
+
+
+def check_nonce_fresh(nonce: bytes) -> bool:
+    """Return True if nonce has not been seen in the replay window. Thread-safe."""
+    now = _time.time()
+    with _nonce_lock:
+        # Periodic cleanup of expired entries
+        if len(_seen_nonces) > 10000:
+            cutoff = now - _REPLAY_WINDOW
+            stale = [k for k, ts in _seen_nonces.items() if ts < cutoff]
+            for k in stale:
+                del _seen_nonces[k]
+        if nonce in _seen_nonces:
+            return False  # replay
+        _seen_nonces[nonce] = now
+        return True
+
+
+def onion_decrypt_checked(priv: ECC.EccKey, sealed_json: str) -> str | None:
+    """Decrypt and reject replayed frames (nonce already seen)."""
+    try:
+        import json as _json
+        sealed = _json.loads(sealed_json)
+        nonce = base64.b64decode(sealed['nonce'])
+        if not check_nonce_fresh(nonce):
+            log.warning("Replay detected: duplicate nonce")
+            return None
+        peer_pub_pem = sealed['epub']
+        key = _derive_symmetric_key(priv, peer_pub_pem)
+        tag = base64.b64decode(sealed['tag'])
+        ct = base64.b64decode(sealed['ct'])
+        pt = aes_gcm_decrypt(key, nonce, ct, tag)
+        if pt is None:
+            return None
+        return _unpad(pt).decode()
+    except Exception:
+        return None
 
 
 # --- ECDSA signing (used for registry auth & WebSocket handshake) ---
