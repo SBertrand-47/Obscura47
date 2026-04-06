@@ -118,20 +118,20 @@ class TestOnionRouting:
 
         sent = {}
 
-        def fake_send(route, envelope):
-            sent["route"] = route
+        def fake_raw_send(next_hop, envelope):
+            sent["next_hop"] = next_hop
             sent["envelope"] = envelope
             return True
 
-        monkeypatch.setattr(router_mod, "_send_frame_via_route", fake_send)
+        monkeypatch.setattr(router_mod, "_send_raw_frame", fake_raw_send)
         # Make route deterministic
         monkeypatch.setattr(router_mod.random, "sample", lambda pop, k: pop[:k])
 
         r = Router(node=None, peers=peers)
         r.relay_message("hello", destination, return_path={"host": "back"}, request_id="req-1")
 
-        # First-hop envelope contains an onion sealed for peers[0]
-        assert sent["route"] == [peers[0]]
+        # First-hop envelope is sent directly to peers[0]
+        assert sent["next_hop"] == peers[0]
         envelope = sent["envelope"]
         assert "encrypted_data" in envelope
 

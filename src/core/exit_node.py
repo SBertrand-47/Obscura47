@@ -79,6 +79,9 @@ class ExitNode:
         if decrypted_message is None:
             return
         request_data = json.loads(decrypted_message)
+        # Onion routing wraps the final payload in {"payload": {...}} — unwrap
+        if "payload" in request_data and isinstance(request_data["payload"], dict):
+            request_data = request_data["payload"]
         req_id = request_data.get("request_id", "")
         msg_type = request_data.get("type")
         if msg_type == "connect":

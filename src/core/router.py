@@ -111,9 +111,10 @@ class Router:
                     sealed = onion_encrypt_for_peer(route[i]['pub'], json.dumps(layer_plain))
                     inner = sealed
 
-                first_route = [route[0]]
+                # inner is already sealed for route[0] — send directly
+                # without _send_frame_via_route which would double-encrypt.
                 envelope = {"encrypted_data": inner}
-                if not _send_frame_via_route(first_route, envelope):
+                if not _send_raw_frame(route[0], envelope):
                     print("relay_message (onion) failed to send to first hop")
                 return
             except Exception as e:
@@ -271,6 +272,30 @@ def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
             return [first] + tail
 
     return random.sample(peers, hop_target)
+
+def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
+    """Send a pre-built envelope (already encrypted) to a peer without adding encryption.
+
+    Used by relay_message's onion path where layers are already sealed.
+    """
+    frame_json = json.dumps(envelope)
+
+    # Try WebSocket first
+    if _try_ws_send(next_hop, frame_json):
+        print(f"Sent raw frame to {next_hop['host']}:{next_hop.get('ws_port', '?')} (WS)")
+        return True
+
+    # Fall back to TCP
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.connect((next_hop['host'], next_hop['port']))
+            sock.send((frame_json + "\n").encode())
+        print(f"Sent raw frame to {next_hop['host']}:{next_hop['port']} (TCP)")
+        return True
+    except Exception as e:
+        print(f"Error sending raw frame to {next_hop}: {e}")
+        return False
+
 
 def _send_frame_via_route(route, envelope):
     """Encrypt envelope and send to the first hop of route."""
