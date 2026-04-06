@@ -157,8 +157,6 @@ def handle_browser_request(client_socket):
         return_path = {
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
-            "ws_port": PROXY_WS_RESPONSE_PORT,
-            "ws_tls": bool(WS_TLS_CERT and WS_TLS_KEY),
             "request_id": request_id,
         }
 
@@ -277,6 +275,10 @@ def choose_best_exit():
         success_ratio = (stats['ok'] / total) if total else 0.0
         return (stats['rtt_ms'], -success_ratio)
     best = min(candidates, key=lambda k: score(k))
+    # Return the full peer dict so downstream hops have pub, ws_port, etc.
+    for p in exit_peers:
+        if p['host'] == best[0] and p['port'] == best[1]:
+            return dict(p)
     return {'host': best[0], 'port': best[1]}
 
 def continuous_discovery():
@@ -573,8 +575,6 @@ def handle_connect(client_socket):
         return_path = {
             "host": PROXY_HOST,
             "port": PROXY_RESPONSE_PORT,
-            "ws_port": PROXY_WS_RESPONSE_PORT,
-            "ws_tls": bool(WS_TLS_CERT and WS_TLS_KEY),
             "request_id": request_id,
         }
 

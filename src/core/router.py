@@ -149,15 +149,18 @@ class Router:
         """
         Re-encrypts the updated message_content (already a dict),
         then sends to the next hop in the route.
+        Uses onion (per-peer ECDH) when next_node has a pubkey,
+        since legacy AES key is per-process and cannot be shared.
         """
+        payload = json.dumps(message_content)
+        next_pub = next_node.get('pub') if isinstance(next_node, dict) else None
+        encrypted = onion_encrypt_for_peer(next_pub, payload) if next_pub else encrypt_message(payload)
+
         # Persistent tunnel frames reuse a per-request socket to next hop
         if isinstance(message_content, dict) and message_content.get('type') in ('connect', 'data', 'close') and message_content.get('request_id'):
-            payload = json.dumps(message_content)
-            encrypted = encrypt_message(payload)
             self._send_to_next_hop_persistent(next_node, encrypted, message_content['request_id'], is_close=(message_content.get('type') == 'close'))
             return
-        new_encrypted = encrypt_message(json.dumps(message_content))
-        self.send_to_next_hop(next_node, new_encrypted)
+        self.send_to_next_hop(next_node, encrypted)
 
     def _send_to_next_hop_persistent(self, next_node, encrypted_message, request_id: str, is_close: bool = False):
         # Try WebSocket first

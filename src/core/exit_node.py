@@ -82,29 +82,39 @@ class ExitNode:
         req_id = request_data.get("request_id", "")
         msg_type = request_data.get("type")
         if msg_type == "connect":
-            # Initialize outbound TCP to target
+            # Pre-register the tunnel with a write queue so data frames
+            # arriving before the outbound TCP connect completes are buffered.
             host = request_data.get("host")
             port = int(request_data.get("port", 443))
             return_path = request_data.get("return_path")
+            self.tunnels[req_id] = {
+                'sock': None, 'return_path': return_path,
+                'queue': [], 'ready': threading.Event(),
+            }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
             print(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
         elif msg_type == "data":
-            # Data for an existing tunnel
             chunk_b64 = request_data.get("chunk")
             if not chunk_b64:
                 return
             info = self.tunnels.get(req_id)
             if not info:
                 return
+            raw = base64.b64decode(chunk_b64)
+            if info.get('ready') and not info['ready'].is_set():
+                # Outbound connect still in progress — buffer
+                info.setdefault('queue', []).append(raw)
+                return
             try:
-                info['sock'].sendall(base64.b64decode(chunk_b64))
+                info['sock'].sendall(raw)
             except Exception as e:
                 print(f"Exit write error | request_id={req_id} | {e}")
         elif msg_type == "close":
             info = self.tunnels.pop(req_id, None)
             if info:
                 try:
-                    info['sock'].close()
+                    if info.get('sock'):
+                        info['sock'].close()
                 except Exception:
                     pass
         else:
@@ -296,10 +306,18 @@ class ExitNode:
             print(f"Error sending stream close: {e}")
 
     def _serve_connect(self, host: str, port: int, return_path: dict, request_id: str):
+        info = self.tunnels.get(request_id)
         try:
             out = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             out.connect((host, port))
-            self.tunnels[request_id] = { 'sock': out, 'return_path': return_path }
+            # Store the live socket and flush any queued data frames
+            if info:
+                info['sock'] = out
+                for queued in info.pop('queue', []):
+                    out.sendall(queued)
+                info['ready'].set()
+            else:
+                self.tunnels[request_id] = {'sock': out, 'return_path': return_path}
 
             # Start reader thread: pump origin->proxy
             def reader():
@@ -322,6 +340,7 @@ class ExitNode:
             threading.Thread(target=reader, daemon=True).start()
         except Exception as e:
             print(f"CONNECT error to {host}:{port} | {e}")
+            self.tunnels.pop(request_id, None)
 
 if __name__ == "__main__":
     exit_node = ExitNode(port=6000)

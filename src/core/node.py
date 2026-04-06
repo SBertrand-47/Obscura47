@@ -199,8 +199,7 @@ class ObscuraNode:
                     if not line:
                         continue
                     incoming_packet = json.loads(line)
-            # Process the last packet from the buffer
-            self.process_frame(incoming_packet)
+                    self.process_frame(incoming_packet)
 
         except Exception as e:
             print(f"Error handling client: {e}")
