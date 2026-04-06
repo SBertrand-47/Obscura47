@@ -18,6 +18,19 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Cloudflare (and some WAFs) return 403 for urllib's default User-Agent (Python-urllib/x.x).
+_REGISTRY_UA = "Obscura47/1.0 (registry-client)"
+
+
+def _registry_headers(extra: dict | None = None) -> dict:
+    h = {
+        "User-Agent": _REGISTRY_UA,
+        "Accept": "application/json",
+    }
+    if extra:
+        h.update(extra)
+    return h
+
 
 def _ssl_ctx():
     """Return an SSL context honoring OBSCURA_TLS_VERIFY (None for http:// URLs)."""
@@ -50,7 +63,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
     req = urllib.request.Request(
         f"{REGISTRY_URL}/register",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=_registry_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     ctx = _ssl_ctx()
@@ -77,7 +90,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
             verify_req = urllib.request.Request(
                 f"{REGISTRY_URL}/register/verify",
                 data=verify_body,
-                headers={"Content-Type": "application/json"},
+                headers=_registry_headers({"Content-Type": "application/json"}),
                 method="POST",
             )
             with urllib.request.urlopen(verify_req, timeout=5, context=ctx) as verify_resp:
@@ -127,7 +140,7 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
     url = f"{REGISTRY_URL}/peers"
     if role_filter:
         url += f"?role={role_filter}"
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, headers=_registry_headers(), method="GET")
     try:
         with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx()) as resp:
             peers = json.loads(resp.read())

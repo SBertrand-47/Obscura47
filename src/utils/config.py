@@ -139,8 +139,22 @@ REGISTRY_TLS_KEY = getenv_str("OBSCURA_REGISTRY_TLS_KEY", "")
 # WebSocket transport TLS (serves wss:// on node/exit ws ports)
 WS_TLS_CERT = getenv_str("OBSCURA_WS_TLS_CERT", "")
 WS_TLS_KEY = getenv_str("OBSCURA_WS_TLS_KEY", "")
+# True only when both paths exist (e.g. .env copied from server but certs not on this machine → False)
+WS_TLS_ACTIVE = bool(
+    WS_TLS_CERT
+    and WS_TLS_KEY
+    and os.path.isfile(WS_TLS_CERT)
+    and os.path.isfile(WS_TLS_KEY)
+)
 # Client-side: set to false to skip TLS cert verification (dev / self-signed)
 TLS_VERIFY = getenv_str("OBSCURA_TLS_VERIFY", "true").lower() in ("1", "true", "yes")
+
+if WS_TLS_CERT and WS_TLS_KEY and not WS_TLS_ACTIVE:
+    from src.utils.logger import get_logger as _get_cfg_log
+
+    _get_cfg_log(__name__).warning(
+        "OBSCURA_WS_TLS_* paths set but certificate files not found; WebSocket servers use ws://"
+    )
 
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT

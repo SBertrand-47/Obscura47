@@ -12,7 +12,7 @@ from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     ONION_ONLY, NODE_KEY_PATH, NODE_WS_PORT,
-    WS_TLS_CERT, WS_TLS_KEY,
+    WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE,
 )
 
 log = get_logger(__name__)
@@ -51,7 +51,7 @@ class ObscuraNode:
             daemon=True
         ).start()
 
-        self.ws_tls_enabled = bool(WS_TLS_CERT and WS_TLS_KEY)
+        self.ws_tls_enabled = WS_TLS_ACTIVE
 
         # Register with internet bootstrap registry (with ws_port and priv_key for auth)
         start_heartbeat("node", self.port, self.pub_pem,
@@ -63,8 +63,8 @@ class ObscuraNode:
             self.host, self.ws_port,
             self.priv_key, self.pub_pem,
             on_frame=self._on_ws_frame,
-            tls_cert=WS_TLS_CERT or None,
-            tls_key=WS_TLS_KEY or None,
+            tls_cert=WS_TLS_CERT if WS_TLS_ACTIVE else None,
+            tls_key=WS_TLS_KEY if WS_TLS_ACTIVE else None,
         )
         self.ws_server.start()
 
