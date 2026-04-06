@@ -35,7 +35,6 @@ from src.utils.config import (
     EXIT_HEALTH_DECAY,
     EXIT_HEALTH_RTT_ALPHA,
     JSON_LOGS,
-    WS_TLS_CERT, WS_TLS_KEY,
 )
 
 PROXY_HOST = CFG_PROXY_HOST
@@ -329,11 +328,11 @@ def ws_response_listener():
     """WebSocket server to receive responses from exit nodes (dual-protocol)."""
     import websockets
     from websockets.asyncio.server import serve as ws_serve
-    from src.utils.config import WS_TLS_CERT, WS_TLS_KEY
+    from src.utils.config import WS_TLS_ACTIVE, WS_TLS_CERT, WS_TLS_KEY
     from src.core.ws_transport import _build_server_ssl_context
 
     ssl_ctx = None
-    if WS_TLS_CERT and WS_TLS_KEY:
+    if WS_TLS_ACTIVE:
         ssl_ctx = _build_server_ssl_context(WS_TLS_CERT, WS_TLS_KEY)
 
     async def _handle_ws(websocket):
