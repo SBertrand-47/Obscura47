@@ -7,6 +7,7 @@ import signal
 import sys
 import base64
 import asyncio
+from src.utils.logger import get_logger
 from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery
@@ -46,6 +47,8 @@ NODE_DISCOVERY_PORT = CFG_NODE_DISCOVERY_PORT
 EXIT_DISCOVERY_PORT = CFG_EXIT_DISCOVERY_PORT
 DISCOVERY_INTERVAL = CFG_DISCOVERY_INTERVAL
 
+log = get_logger(__name__)
+
 running = True
 relay_peers = []  # Observed relay nodes
 exit_peers = []   # Observed exit nodes
@@ -66,7 +69,7 @@ def log_selected_exit(prefix: str, destination: dict):
         key = (destination['host'], destination['port'])
         stats = exit_health.get(key)
         if not stats:
-            print(f"🚏 {prefix} exit {destination['host']}:{destination['port']} | no health stats yet")
+            log.info(f"{prefix} exit {destination['host']}:{destination['port']} | no health stats yet")
             return
         ok = stats.get('ok', 0)
         fail = stats.get('fail', 0)
@@ -75,7 +78,7 @@ def log_selected_exit(prefix: str, destination: dict):
         backoff_left = 0
         if stats.get('backoff_until', 0.0) > time.time():
             backoff_left = int(stats['backoff_until'] - time.time())
-        print(f"🚏 {prefix} exit {destination['host']}:{destination['port']} | rtt={rtt:.1f}ms | success={ok}/{total} | backoff={backoff_left}s")
+        log.info(f"{prefix} exit {destination['host']}:{destination['port']} | rtt={rtt:.1f}ms | success={ok}/{total} | backoff={backoff_left}s")
     except Exception:
         pass
 
@@ -121,7 +124,7 @@ def handle_browser_request(client_socket):
         if not request:
             return
 
-        print(f"🌍 Received browser request (first 100 chars): {request[:100]}...")
+        log.debug(f"Received browser request (first 100 chars): {request[:100]}...")
 
         # Build URL for exit node
         url = parse_http_request_to_url(request.decode(errors="ignore"))
@@ -131,7 +134,7 @@ def handle_browser_request(client_socket):
             return
 
         if not relay_peers and not exit_peers:
-            print("⚠️ No discovered peers yet. Cannot route request.")
+            log.warning("No discovered peers yet. Cannot route request.")
             client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
             client_socket.close()
             return
@@ -161,36 +164,36 @@ def handle_browser_request(client_socket):
         }
 
         # Relay URL to exit via random relay route
-        direct_relay_message(json.dumps({"data": url}), destination, relay_peers, return_path=return_path, request_id=request_id)
+        direct_relay_message(url, destination, relay_peers, return_path=return_path, request_id=request_id)
         with pending_lock:
             if request_id in pending_meta:
                 pending_meta[request_id]['exit'] = f"{destination['host']}:{destination['port']}"
-        print(f"⏳ Waiting for response from the exit node | request_id={request_id}...")
+        log.info(f"Waiting for response from the exit node | request_id={request_id}...")
 
     except ConnectionResetError:
-        print("⚠️ Connection reset by client. Ignoring.")
+        log.warning("Connection reset by client. Ignoring.")
     except Exception as e:
-        print(f"❌ Error in handle_browser_request: {e}")
+        log.error(f"Error in handle_browser_request: {e}")
     finally:
         # Do not close here; will close after response or timeout in response handler
         pass
 
 def listen_for_clients():
     """Continuously listens for client discovery responses."""
-    print("👂 Listening for client discovery on port 50000...")
+    log.info("Listening for client discovery on port 50000...")
     while running:
         try:
             listen_for_discovery(client_peers, local_port=PROXY_PORT, multicast_port=DISCOVERY_PORT)
         except ConnectionResetError:
-            print("⚠️ Connection reset during discovery. Retrying...")
+            log.warning("Connection reset during discovery. Retrying...")
             continue
         except Exception as e:
-            print(f"❌ Error in client discovery listener: {e}")
+            log.error(f"Error in client discovery listener: {e}")
             time.sleep(2)  # Prevent infinite error loops
 
 def observe_relays_and_exits():
     """Passively observe relay and exit discovery channels to build peer list."""
-    print("👀 Observing relay and exit discovery...")
+    log.info("Observing relay and exit discovery...")
     # Passive observers now also receive multicast-echoed discovery responses, including pub keys
     threading.Thread(target=observe_discovery, args=(relay_peers, NODE_DISCOVERY_PORT), daemon=True).start()
     threading.Thread(target=observe_discovery, args=(exit_peers, EXIT_DISCOVERY_PORT), daemon=True).start()
@@ -256,7 +259,7 @@ def exit_health_monitor():
             except Exception:
                 pass
         except Exception as e:
-            print(f"⚠️ Exit health monitor error: {e}")
+            log.warning(f"Exit health monitor error: {e}")
         time.sleep(EXIT_HEALTH_INTERVAL)
 
 def choose_best_exit():
@@ -285,14 +288,14 @@ def continuous_discovery():
     """Continuously broadcasts discovery requests so clients/nodes can find the proxy."""
     while running:
         try:
-            print("🔍 Broadcasting discovery request for clients...")
+            log.info("Broadcasting discovery request for clients...")
             broadcast_discovery(DISCOVERY_PORT)
             # Also trigger node and exit responses (proxy stays passive on those channels)
             broadcast_discovery(NODE_DISCOVERY_PORT)
             broadcast_discovery(EXIT_DISCOVERY_PORT)
             time.sleep(DISCOVERY_INTERVAL)
         except Exception as e:
-            print(f"❌ Error broadcasting discovery: {e}")
+            log.error(f"Error broadcasting discovery: {e}")
             time.sleep(2)  # Prevent spamming logs on error
 
 def response_listener():
@@ -301,14 +304,14 @@ def response_listener():
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((PROXY_HOST, PROXY_RESPONSE_PORT))
         server.listen(5)
-        print(f"📥 Proxy response listener on {PROXY_HOST}:{PROXY_RESPONSE_PORT}")
+        log.info(f"Proxy response listener on {PROXY_HOST}:{PROXY_RESPONSE_PORT}")
 
         while running:
             try:
                 conn, _ = server.accept()
                 threading.Thread(target=handle_exit_response, args=(conn,), daemon=True).start()
             except Exception as e:
-                print(f"⚠️ Response listener error: {e}")
+                log.warning(f"Response listener error: {e}")
 
 def handle_exit_response(conn):
     """Handle exit response received via legacy TCP. Delegates to shared handler."""
@@ -318,7 +321,7 @@ def handle_exit_response(conn):
             return
         _handle_exit_response_data(data)
     except Exception as e:
-        print(f"Error handling exit response: {e}")
+        log.error(f"Error handling exit response: {e}")
     finally:
         conn.close()
 
@@ -339,14 +342,14 @@ def ws_response_listener():
                 try:
                     _handle_exit_response_data(message)
                 except Exception as e:
-                    print(f"[ws-response] Error: {e}")
+                    log.error(f"[ws-response] Error: {e}")
         except websockets.exceptions.ConnectionClosed:
             pass
 
     async def _serve():
         server = await ws_serve(_handle_ws, PROXY_HOST, PROXY_WS_RESPONSE_PORT, ssl=ssl_ctx)
         scheme = "wss" if ssl_ctx else "ws"
-        print(f"[ws-response] WebSocket response listener on {scheme}://{PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
+        log.info(f"[ws-response] WebSocket response listener on {scheme}://{PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
         try:
             await server.serve_forever()
         except asyncio.CancelledError:
@@ -365,9 +368,9 @@ def _handle_exit_response_data(raw_data):
     typ = packet.get("type")
     request_id = packet.get("request_id", "")
     if JSON_LOGS:
-        print(json.dumps({"event":"exit_frame","type":typ,"request_id":request_id}))
+        log.debug(json.dumps({"event":"exit_frame","type":typ,"request_id":request_id}))
     else:
-        print(f"Exit frame | type={typ} | request_id={request_id}")
+        log.debug(f"Exit frame | type={typ} | request_id={request_id}")
 
     with pending_lock:
         client_socket = pending_requests.get(request_id)
@@ -395,9 +398,9 @@ def _handle_exit_response_data(raw_data):
                 if summary:
                     dur = max(0.0, time.time() - summary.get('started', time.time()))
                     if JSON_LOGS:
-                        print(json.dumps({"event":"tunnel_closed","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
+                        log.info(json.dumps({"event":"tunnel_closed","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
                     else:
-                        print(f"Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+                        log.info(f"Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
             else:
                 # Backwards-compatible HTTP body delivery (non-tunnel)
                 payload = packet.get("data", "")
@@ -416,7 +419,7 @@ def _handle_exit_response_data(raw_data):
                     else:
                         client_socket.send(body.encode())
         except Exception as e:
-            print(f"Error delivering to client | {e}")
+            log.error(f"Error delivering to client | {e}")
             try:
                 client_socket.close()
             except Exception:
@@ -427,11 +430,11 @@ def _handle_exit_response_data(raw_data):
             if summary:
                 dur = max(0.0, time.time() - summary.get('started', time.time()))
                 if JSON_LOGS:
-                    print(json.dumps({"event":"tunnel_closed_error","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
+                    log.error(json.dumps({"event":"tunnel_closed_error","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
                 else:
-                    print(f"Tunnel closed (error) | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+                    log.error(f"Tunnel closed (error) | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
     else:
-        print(f"No pending client for request_id={request_id}")
+        log.warning(f"No pending client for request_id={request_id}")
 
 
 def start_proxy():
@@ -446,9 +449,9 @@ def start_proxy():
     if guards is not None:
         snap = guards.snapshot()
         if snap:
-            print(f"[guards] Loaded {len(snap)} pinned guard(s) from disk")
+            log.info(f"[guards] Loaded {len(snap)} pinned guard(s) from disk")
         else:
-            print(f"[guards] No persisted guards; will pin from peer pool on first circuit")
+            log.info("[guards] No persisted guards; will pin from peer pool on first circuit")
 
     # Start the discovery listener
     threading.Thread(target=listen_for_clients, daemon=True).start()
@@ -481,7 +484,7 @@ def start_proxy():
         server.bind((PROXY_HOST, PROXY_PORT))
         server.listen(5)
 
-        print(f"🚀 Proxy running on {PROXY_HOST}:{PROXY_PORT}")
+        log.info(f"Proxy running on {PROXY_HOST}:{PROXY_PORT}")
 
         while running:
             try:
@@ -490,10 +493,10 @@ def start_proxy():
             except socket.timeout:
                 continue
             except ConnectionResetError:
-                print("⚠️ Connection reset while accepting client. Ignoring.")
+                log.warning("Connection reset while accepting client. Ignoring.")
                 continue
             except Exception as e:
-                print(f"❌ Error accepting client: {e}")
+                log.error(f"Error accepting client: {e}")
                 continue
 
 def handle_new_client(client_socket):
@@ -541,7 +544,7 @@ def handle_new_client(client_socket):
         else:
             handle_browser_request(client_socket)
     except Exception as e:
-        print(f"❌ Error handling new client: {e}")
+        log.error(f"Error handling new client: {e}")
         try:
             client_socket.close()
         except Exception:
@@ -600,7 +603,7 @@ def handle_connect(client_socket):
                     with pending_lock:
                         meta = pending_meta.get(request_id)
                         if meta and meta['bytes_up'] + meta['bytes_down'] >= TUNNEL_MAX_BYTES:
-                            print(f"⚠️ Tunnel byte cap reached for {request_id}")
+                            log.warning(f"Tunnel byte cap reached for {request_id}")
                             break
                     send_tunnel_data(destination, route, request_id, base64.b64encode(chunk).decode())
                     with pending_lock:
@@ -610,15 +613,15 @@ def handle_connect(client_socket):
                             metrics['bytes_up'] += len(chunk)
                     # Cap by duration
                     if time.time() - started >= max_seconds:
-                        print(f"⚠️ Tunnel time cap reached for {request_id}")
+                        log.warning(f"Tunnel time cap reached for {request_id}")
                         break
             except Exception as e:
-                print(f"⚠️ Upstream error | {e}")
+                log.warning(f"Upstream error | {e}")
             finally:
                 close_tunnel(destination, route, request_id)
         threading.Thread(target=upstream, daemon=True).start()
     except Exception as e:
-        print(f"❌ CONNECT handling error: {e}")
+        log.error(f"CONNECT handling error: {e}")
         try:
             client_socket.close()
         except Exception:
@@ -635,7 +638,7 @@ def metrics_worker():
             r = get_router_metrics()
         except Exception:
             r = {'frame_retries': 0, 'message_reroutes': 0}
-        print(f"📊 Metrics | active={metrics['active_tunnels']} | total={metrics['total_tunnels']} | up={metrics['bytes_up']}B | down={metrics['bytes_down']}B | frame_retries={r['frame_retries']} | reroutes={r['message_reroutes']}")
+        log.info(f"Metrics | active={metrics['active_tunnels']} | total={metrics['total_tunnels']} | up={metrics['bytes_up']}B | down={metrics['bytes_down']}B | frame_retries={r['frame_retries']} | reroutes={r['message_reroutes']}")
 
 def cleanup_worker():
     while running:
@@ -660,6 +663,6 @@ def cleanup_worker():
                         pass
                 if summary:
                     dur = max(0.0, now - summary.get('started', now))
-                    print(f"🧹 Tunnel GC | req={req} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+                    log.info(f"Tunnel GC | req={req} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
             except Exception:
                 pass

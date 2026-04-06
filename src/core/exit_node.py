@@ -5,6 +5,7 @@ import ipaddress
 import threading
 import time
 import base64
+from src.utils.logger import get_logger
 from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, ecc_load_or_create_keypair
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat
@@ -19,6 +20,8 @@ from src.utils.config import (
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
 DISCOVERY_INTERVAL = CFG_DISCOVERY_INTERVAL  # Broadcast interval
+
+log = get_logger(__name__)
 
 class ExitNode:
     def __init__(self, host='0.0.0.0', port=6000):
@@ -57,7 +60,7 @@ class ExitNode:
             tls_key=WS_TLS_KEY or None,
         )
         self.ws_server.start()
-        print(f"WebSocket server on port {self.ws_port}")
+        log.info(f"WebSocket server on port {self.ws_port}")
 
         # Periodic sweeper for abandoned tunnels
         threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
@@ -68,7 +71,7 @@ class ExitNode:
             packet = json.loads(message)
             self.process_frame(packet)
         except Exception as e:
-            print(f"[ws] Frame error: {e}")
+            log.error(f"[ws] Frame error: {e}")
 
     def process_frame(self, packet: dict):
         """Process an incoming encrypted frame (shared by TCP and WebSocket handlers)."""
@@ -99,7 +102,7 @@ class ExitNode:
                 'created': time.time(), 'last_active': time.time(),
             }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
-            print(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
+            log.info(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
         elif msg_type == "data":
             chunk_b64 = request_data.get("chunk")
             if not chunk_b64:
@@ -116,7 +119,7 @@ class ExitNode:
                 info['sock'].sendall(raw)
                 info['last_active'] = time.time()
             except Exception as e:
-                print(f"Exit write error | request_id={req_id} | {e}")
+                log.error(f"Exit write error | request_id={req_id} | {e}")
         elif msg_type == "close":
             info = self.tunnels.pop(req_id, None)
             if info:
@@ -138,13 +141,13 @@ class ExitNode:
 
     def listen_for_proxies(self):
         """Continuously listen for proxy/node discovery requests."""
-        print(f"Listening for discovery on port {EXIT_NODE_MULTICAST_PORT}...")
+        log.info(f"Listening for discovery on port {EXIT_NODE_MULTICAST_PORT}...")
         listen_for_discovery(self.peers, self.port, EXIT_NODE_MULTICAST_PORT, extra_fields={'pub': self.pub_pem})
 
     def continuous_discovery(self):
         """Continuously broadcasts discovery requests so proxies/nodes can find the Exit Node."""
         while self.running:
-            print("Broadcasting Exit Node discovery request...")
+            log.info("Broadcasting Exit Node discovery request...")
             broadcast_discovery(EXIT_NODE_MULTICAST_PORT)
             time.sleep(DISCOVERY_INTERVAL)
 
@@ -153,17 +156,17 @@ class ExitNode:
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
         self.server_socket.settimeout(1.0)
-        print(f"Exit Node started at {self.host}:{self.port} (TCP), waiting for requests...")
+        log.info(f"Exit Node started at {self.host}:{self.port} (TCP), waiting for requests...")
 
         while self.running:
             try:
                 client_socket, addr = self.server_socket.accept()
-                print(f"Connection from {addr}")
+                log.info(f"Connection from {addr}")
                 threading.Thread(target=self.handle_request, args=(client_socket,), daemon=True).start()
             except socket.timeout:
                 continue
             except OSError:
-                print("Exit Node shutting down...")
+                log.info("Exit Node shutting down...")
                 break
 
     def shutdown(self):
@@ -185,7 +188,7 @@ class ExitNode:
                 self.ws_server.stop()
             except Exception:
                 pass
-        print(f"Exit Node {self.host}:{self.port} shut down.")
+        log.info(f"Exit Node {self.host}:{self.port} shut down.")
 
     def _tunnel_sweeper(self):
         """Close tunnels that have been idle too long."""
@@ -201,7 +204,7 @@ class ExitNode:
                     except Exception:
                         pass
                     self.tunnels.pop(req_id, None)
-                    print(f"Swept idle tunnel {req_id}")
+                    log.info(f"Swept idle tunnel {req_id}")
 
     def handle_request(self, client_socket):
         """Handle requests forwarded through the network (legacy TCP)."""
@@ -220,7 +223,7 @@ class ExitNode:
                     self.process_frame(packet)
 
         except Exception as e:
-            print(f"Error in Exit Node: {e}")
+            log.error(f"Error in Exit Node: {e}")
         finally:
             client_socket.close()
 
@@ -246,7 +249,7 @@ class ExitNode:
             resp = requests.get(url, headers={**headers, 'Host': host}, timeout=5)
             return resp.text
         except Exception as e:
-            print(f"Error fetching page: {e}")
+            log.error(f"Error fetching page: {e}")
             return f"Error fetching {url}: {e}"
 
     def _extract_host(self, url: str) -> str:
@@ -278,16 +281,20 @@ class ExitNode:
             return True
 
     def _domain_allowed(self, host: str) -> bool:
-        if EXIT_ALLOW_DOMAINS and not any(host.endswith(d) for d in EXIT_ALLOW_DOMAINS):
+        def _matches(host: str, pattern: str) -> bool:
+            """Match domain or subdomain: 'example.com' matches 'example.com' and 'sub.example.com'."""
+            return host == pattern or host.endswith("." + pattern)
+
+        if EXIT_ALLOW_DOMAINS and not any(_matches(host, d) for d in EXIT_ALLOW_DOMAINS):
             return False
-        if EXIT_DENY_DOMAINS and any(host.endswith(d) for d in EXIT_DENY_DOMAINS):
+        if EXIT_DENY_DOMAINS and any(_matches(host, d) for d in EXIT_DENY_DOMAINS):
             return False
         return True
 
     def send_response_back(self, return_path, response_data):
         """Sends the fetched response back to the proxy (TCP or WebSocket)."""
         if not return_path or "host" not in return_path or "port" not in return_path:
-            print("Invalid return path provided, response lost.")
+            log.warning("Invalid return path provided, response lost.")
             return
 
         packet = {
@@ -300,7 +307,7 @@ class ExitNode:
         if ws_port:
             client = get_ws_client()
             if client and client.send_frame(return_path['host'], ws_port, json.dumps(packet)):
-                print(f"Sent response back to proxy (WebSocket).")
+                log.info("Sent response back to proxy (WebSocket).")
                 return
 
         # Fall back to TCP
@@ -308,9 +315,9 @@ class ExitNode:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.connect((return_path['host'], return_path['port']))
                 sock.send(json.dumps(packet).encode())
-                print(f"Sent response back to proxy (TCP).")
+                log.info("Sent response back to proxy (TCP).")
         except Exception as e:
-            print(f"Error sending response to proxy: {e}")
+            log.error(f"Error sending response to proxy: {e}")
 
     def send_stream_chunk(self, return_path, request_id: str, data_bytes: bytes):
         packet = {
@@ -333,7 +340,7 @@ class ExitNode:
                 sock.connect((return_path['host'], return_path['port']))
                 sock.send(packet_json.encode())
         except Exception as e:
-            print(f"Error sending stream chunk: {e}")
+            log.error(f"Error sending stream chunk: {e}")
 
     def send_stream_close(self, return_path, request_id: str):
         packet = {
@@ -355,7 +362,7 @@ class ExitNode:
                 sock.connect((return_path['host'], return_path['port']))
                 sock.send(packet_json.encode())
         except Exception as e:
-            print(f"Error sending stream close: {e}")
+            log.error(f"Error sending stream close: {e}")
 
     def _serve_connect(self, host: str, port: int, return_path: dict, request_id: str):
         info = self.tunnels.get(request_id)
@@ -380,7 +387,7 @@ class ExitNode:
                             break
                         self.send_stream_chunk(return_path, request_id, data)
                 except Exception as e:
-                    print(f"Exit reader error | request_id={request_id} | {e}")
+                    log.error(f"Exit reader error | request_id={request_id} | {e}")
                 finally:
                     self.send_stream_close(return_path, request_id)
                     try:
@@ -391,7 +398,7 @@ class ExitNode:
 
             threading.Thread(target=reader, daemon=True).start()
         except Exception as e:
-            print(f"CONNECT error to {host}:{port} | {e}")
+            log.error(f"CONNECT error to {host}:{port} | {e}")
             self.tunnels.pop(request_id, None)
 
 if __name__ == "__main__":

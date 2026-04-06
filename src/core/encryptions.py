@@ -6,6 +6,10 @@ from Crypto.Protocol.KDF import HKDF
 from Crypto.Hash import SHA256
 from Crypto.Signature import DSS
 
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 
 # NOTE: Demo-only symmetric key. For production, use per-hop ephemeral keys.
 AES_KEY = os.urandom(16)
@@ -34,7 +38,7 @@ def decrypt_message(encrypted_message: str, key: bytes = AES_KEY) -> str | None:
         cipher = AES.new(key, AES.MODE_CFB, iv)
         return cipher.decrypt(encrypted_data).decode()
     except Exception as e:
-        print(f"❌ Decryption error: {e}")
+        log.error(f"Decryption error: {e}")
         return None
 
 

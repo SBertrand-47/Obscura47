@@ -5,6 +5,9 @@ Wraps the standalone FastAPI registry for use via `python -m src.main registry`.
 """
 
 from src.utils.config import REGISTRY_HOST, REGISTRY_PORT
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 
 def run_registry(host: str | None = None, port: int | None = None):
@@ -16,7 +19,7 @@ def run_registry(host: str | None = None, port: int | None = None):
     host = host or REGISTRY_HOST
     port = port or REGISTRY_PORT
 
-    print(f"[registry] Obscura47 bootstrap registry (FastAPI) on {host}:{port}")
+    log.info(f"Obscura47 bootstrap registry (FastAPI) on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

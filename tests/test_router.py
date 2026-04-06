@@ -153,8 +153,14 @@ class TestOnionRouting:
         assert final["payload"]["return_path"] == {"host": "back"}
         assert final["payload"]["request_id"] == "req-1"
 
-    def test_relay_message_no_peers(self, capsys):
-        r = Router(node=None, peers=[])
-        r.relay_message("hello", None)
-        out = capsys.readouterr().out
-        assert "No peers" in out or "No route" in out
+    def test_relay_message_no_peers(self, caplog):
+        import logging
+        logger = logging.getLogger("src.core.router")
+        logger.propagate = True
+        try:
+            r = Router(node=None, peers=[])
+            with caplog.at_level(logging.WARNING, logger="src.core.router"):
+                r.relay_message("hello", None)
+            assert "No peers" in caplog.text or "No route" in caplog.text
+        finally:
+            logger.propagate = False

@@ -4,11 +4,14 @@ import socket
 import time
 import base64
 from src.core.encryptions import encrypt_message, decrypt_message, onion_encrypt_for_peer
+from src.utils.logger import get_logger
 from src.utils.config import (
     FRAME_RETRY_ATTEMPTS, FRAME_RETRY_BASE_DELAY_MS, MESSAGE_ROUTE_RETRIES,
     CHANNEL_QUEUE_MAX, CHANNEL_WRITE_TIMEOUT, CHANNEL_IDLE_CLOSE_SECONDS,
     ONION_ONLY, PREFER_WEBSOCKET, SOCKET_CONNECT_TIMEOUT,
 )
+
+log = get_logger(__name__)
 
 # Router-level metrics
 FRAME_RETRIES = 0
@@ -59,7 +62,7 @@ class Router:
         First hop is pinned to a guard when GuardSet is installed.
         """
         if len(self.peers) < hops:
-            print("Not enough peers for full hop count!")
+            log.warning("Not enough peers for full hop count")
             hops = len(self.peers)
         if hops <= 0:
             return []
@@ -88,7 +91,7 @@ class Router:
             route.append(destination)
 
         if not route:
-            print("No peers/routes available. Message not sent.")
+            log.warning("No peers/routes available. Message not sent.")
             return
 
         # Onion layering if all hops publish pub keys
@@ -115,14 +118,14 @@ class Router:
                 # without _send_frame_via_route which would double-encrypt.
                 envelope = {"encrypted_data": inner}
                 if not _send_raw_frame(route[0], envelope):
-                    print("relay_message (onion) failed to send to first hop")
+                    log.error("relay_message (onion) failed to send to first hop")
                 return
             except Exception as e:
-                print(f"Onion build failed, falling back: {e}")
+                log.error("Onion build failed, falling back: %s", e)
 
         # Fallback legacy path with visible route
         if ONION_ONLY:
-            print("Onion-only mode: missing pubkeys; dropping message")
+            log.warning("Onion-only mode: missing pubkeys; dropping message")
             return
         envelope = {
             "data": data,
@@ -144,7 +147,7 @@ class Router:
                 full_route.append(destination)
             MESSAGE_REROUTES += 1
         if attempts >= MESSAGE_ROUTE_RETRIES and not sent:
-            print("relay_message failed after route retries")
+            log.error("relay_message failed after route retries")
 
     def forward_message(self, next_node, message_content):
         """
@@ -167,7 +170,7 @@ class Router:
         # Try WebSocket first
         frame_json = json.dumps({"encrypted_data": encrypted_message})
         if _try_ws_send(next_node, frame_json):
-            print(f"Sent (persist/WS) to {next_node['host']}:{next_node.get('ws_port', '?')}")
+            log.info("Sent (persist/WS) to %s:%s", next_node['host'], next_node.get('ws_port', '?'))
             return
 
         # Fall back to TCP persistent socket
@@ -201,7 +204,7 @@ class Router:
                 else:
                     entry['q'][0] = chunk[sent:]
                     time.sleep(0.01)
-            print(f"Sent (persist/TCP) to {next_node['host']}:{next_node['port']}")
+            log.info("Sent (persist/TCP) to %s:%s", next_node['host'], next_node['port'])
             if is_close:
                 ent = self._tunnel_sockets.pop(key, None)
                 try:
@@ -216,7 +219,7 @@ class Router:
                     ent['sock'].close()
             except Exception:
                 pass
-            print(f"Persistent send error to {next_node}: {e}")
+            log.error("Persistent send error to %s: %s", next_node, e)
 
     def send_to_next_hop(self, next_node, encrypted_message):
         """
@@ -227,7 +230,7 @@ class Router:
 
         # Try WebSocket
         if _try_ws_send(next_node, frame_json):
-            print(f"Sent encrypted message to {next_node['host']}:{next_node.get('ws_port', '?')} (WS)")
+            log.info("Sent encrypted message to %s:%s (WS)", next_node['host'], next_node.get('ws_port', '?'))
             return
 
         # Fall back to TCP
@@ -237,9 +240,9 @@ class Router:
                 sock.connect((next_node['host'], next_node['port']))
                 sock.settimeout(None)
                 sock.send((frame_json + "\n").encode())
-                print(f"Sent encrypted message to {next_node['host']}:{next_node['port']} (TCP)")
+                log.info("Sent encrypted message to %s:%s (TCP)", next_node['host'], next_node['port'])
         except Exception as e:
-            print(f"Error sending to {next_node}: {e}")
+            log.error("Error sending to %s: %s", next_node, e)
 
 def direct_relay_message(data, destination, peers, return_path=None, request_id=None):
     """
@@ -286,7 +289,7 @@ def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
 
     # Try WebSocket first
     if _try_ws_send(next_hop, frame_json):
-        print(f"Sent raw frame to {next_hop['host']}:{next_hop.get('ws_port', '?')} (WS)")
+        log.info("Sent raw frame to %s:%s (WS)", next_hop['host'], next_hop.get('ws_port', '?'))
         return True
 
     # Fall back to TCP
@@ -296,17 +299,17 @@ def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
             sock.connect((next_hop['host'], next_hop['port']))
             sock.settimeout(None)
             sock.send((frame_json + "\n").encode())
-        print(f"Sent raw frame to {next_hop['host']}:{next_hop['port']} (TCP)")
+        log.info("Sent raw frame to %s:%s (TCP)", next_hop['host'], next_hop['port'])
         return True
     except Exception as e:
-        print(f"Error sending raw frame to {next_hop}: {e}")
+        log.error("Error sending raw frame to %s: %s", next_hop, e)
         return False
 
 
 def _send_frame_via_route(route, envelope):
     """Encrypt envelope and send to the first hop of route."""
     if not route:
-        print("No route; cannot send frame")
+        log.warning("No route; cannot send frame")
         return
     # Use onion layer if next hop published a public key
     next_hop = route[0]
@@ -328,7 +331,7 @@ def _send_frame_via_route(route, envelope):
         try:
             # Try WebSocket first (for any frame type)
             if _try_ws_send(first_hop, frame_json):
-                print(f"Sent frame to {first_hop['host']}:{first_hop.get('ws_port', '?')} (WS)")
+                log.info("Sent frame to %s:%s (WS)", first_hop['host'], first_hop.get('ws_port', '?'))
                 return True
 
             # Fall back to TCP
@@ -366,7 +369,7 @@ def _send_frame_via_route(route, envelope):
                     sock.connect((first_hop['host'], first_hop['port']))
                     sock.settimeout(None)
                     sock.send((frame_json + "\n").encode())
-            print(f"Sent frame to {first_hop['host']}:{first_hop['port']} (TCP)")
+            log.info("Sent frame to %s:%s (TCP)", first_hop['host'], first_hop['port'])
             if is_tunnel and envelope.get('type') == 'close':
                 try:
                     ent = TUNNEL_SOCKETS.pop(key, None)
@@ -389,7 +392,7 @@ def _send_frame_via_route(route, envelope):
             jitter = random.uniform(0, delay_ms * 0.2)
             time.sleep((delay_ms + jitter) / 1000.0)
             delay_ms *= 2
-    print(f"Failed to send frame to {first_hop['host']}:{first_hop['port']} after {FRAME_RETRY_ATTEMPTS} attempts")
+    log.error("Failed to send frame to %s:%s after %d attempts", first_hop['host'], first_hop['port'], FRAME_RETRY_ATTEMPTS)
     return False
 
 def channel_idle_sweeper():
@@ -415,7 +418,7 @@ def start_tunnel(destination, peers, request_id: str, host: str, port: int, retu
     if route is None:
         route = build_route47(peers)
     if not route:
-        print("start_tunnel: empty route, cannot start")
+        log.warning("start_tunnel: empty route, cannot start")
         return route
     remaining = list(route[1:]) + [destination]
     envelope = {
