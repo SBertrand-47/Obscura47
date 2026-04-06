@@ -92,6 +92,9 @@ CHANNEL_QUEUE_MAX = getenv_int("OBSCURA_CHANNEL_QUEUE_MAX", 100)
 CHANNEL_WRITE_TIMEOUT = float(os.getenv("OBSCURA_CHANNEL_WRITE_TIMEOUT", "2.0"))
 CHANNEL_IDLE_CLOSE_SECONDS = float(os.getenv("OBSCURA_CHANNEL_IDLE_CLOSE_SECONDS", "60"))
 
+# General socket connect timeout (seconds) for relay/router TCP connections
+SOCKET_CONNECT_TIMEOUT = float(os.getenv("OBSCURA_SOCKET_CONNECT_TIMEOUT", "5.0"))
+
 # Onion/observability
 ONION_ONLY = getenv_str("OBSCURA_ONION_ONLY", "false").lower() in ("1", "true", "yes")
 JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "yes")

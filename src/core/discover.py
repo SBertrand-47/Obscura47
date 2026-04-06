@@ -16,7 +16,7 @@ def get_local_ip():
         try:
             s.connect(("8.8.8.8", 80))
             return s.getsockname()[0]
-        except:
+        except Exception:
             return "127.0.0.1"
 
 def broadcast_discovery(multicast_port=DISCOVERY_PORT):

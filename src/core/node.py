@@ -169,6 +169,7 @@ class ObscuraNode:
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
+            self.server_socket.settimeout(1.0)
             print(f"Node started at {self.host}:{self.port} (TCP), waiting for connections...")
         except OSError:
             print(f"Port {self.port} is already in use! Trying another port...")
@@ -181,9 +182,25 @@ class ObscuraNode:
                 client_socket, addr = self.server_socket.accept()
                 print(f"Connection from {addr}")
                 threading.Thread(target=self.handle_client, args=(client_socket,), daemon=True).start()
+            except socket.timeout:
+                continue
             except OSError:
                 print("Node shutting down...")
                 break
+
+    def shutdown(self):
+        """Gracefully stop the node."""
+        self.running = False
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
+        if hasattr(self, 'ws_server'):
+            try:
+                self.ws_server.stop()
+            except Exception:
+                pass
+        print(f"Node {self.host}:{self.port} shut down.")
 
     def handle_client(self, client_socket):
         """Handles incoming encrypted messages from other nodes (legacy TCP)."""

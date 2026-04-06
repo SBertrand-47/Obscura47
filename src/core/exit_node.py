@@ -14,7 +14,7 @@ from src.utils.config import (
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     EXIT_DOH_ENDPOINT, EXIT_DOH_TIMEOUT, EXIT_DENY_PRIVATE_IPS,
     EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS, EXIT_KEY_PATH, EXIT_WS_PORT,
-    WS_TLS_CERT, WS_TLS_KEY,
+    WS_TLS_CERT, WS_TLS_KEY, TUNNEL_IDLE_SECONDS,
 )
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -59,6 +59,9 @@ class ExitNode:
         self.ws_server.start()
         print(f"WebSocket server on port {self.ws_port}")
 
+        # Periodic sweeper for abandoned tunnels
+        threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
+
     def _on_ws_frame(self, message: str):
         """Handle a frame received via WebSocket (same logic as TCP)."""
         try:
@@ -93,6 +96,7 @@ class ExitNode:
             self.tunnels[req_id] = {
                 'sock': None, 'return_path': return_path,
                 'queue': [], 'ready': threading.Event(),
+                'created': time.time(), 'last_active': time.time(),
             }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
             print(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
@@ -110,6 +114,7 @@ class ExitNode:
                 return
             try:
                 info['sock'].sendall(raw)
+                info['last_active'] = time.time()
             except Exception as e:
                 print(f"Exit write error | request_id={req_id} | {e}")
         elif msg_type == "close":
@@ -147,12 +152,56 @@ class ExitNode:
         """Start listening for incoming relay requests (legacy TCP)."""
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(5)
+        self.server_socket.settimeout(1.0)
         print(f"Exit Node started at {self.host}:{self.port} (TCP), waiting for requests...")
 
         while self.running:
-            client_socket, addr = self.server_socket.accept()
-            print(f"Connection from {addr}")
-            threading.Thread(target=self.handle_request, args=(client_socket,), daemon=True).start()
+            try:
+                client_socket, addr = self.server_socket.accept()
+                print(f"Connection from {addr}")
+                threading.Thread(target=self.handle_request, args=(client_socket,), daemon=True).start()
+            except socket.timeout:
+                continue
+            except OSError:
+                print("Exit Node shutting down...")
+                break
+
+    def shutdown(self):
+        """Gracefully stop the exit node and close all tunnels."""
+        self.running = False
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
+        for req_id, info in list(self.tunnels.items()):
+            try:
+                if info.get('sock'):
+                    info['sock'].close()
+            except Exception:
+                pass
+        self.tunnels.clear()
+        if hasattr(self, 'ws_server'):
+            try:
+                self.ws_server.stop()
+            except Exception:
+                pass
+        print(f"Exit Node {self.host}:{self.port} shut down.")
+
+    def _tunnel_sweeper(self):
+        """Close tunnels that have been idle too long."""
+        while self.running:
+            time.sleep(10)
+            now = time.time()
+            for req_id, info in list(self.tunnels.items()):
+                last = info.get('last_active', info.get('created', 0))
+                if now - last > TUNNEL_IDLE_SECONDS:
+                    try:
+                        if info.get('sock'):
+                            info['sock'].close()
+                    except Exception:
+                        pass
+                    self.tunnels.pop(req_id, None)
+                    print(f"Swept idle tunnel {req_id}")
 
     def handle_request(self, client_socket):
         """Handle requests forwarded through the network (legacy TCP)."""
