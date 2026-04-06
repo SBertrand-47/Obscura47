@@ -273,6 +273,16 @@ async def challenge_cleanup_loop():
             del _pending_challenges[k]
 
 
+async def rate_bucket_gc_loop():
+    """Purge stale rate-limit buckets to prevent unbounded memory growth."""
+    while True:
+        await asyncio.sleep(120)
+        now = time.time()
+        stale = [ip for ip, ts_list in _rate_buckets.items() if not ts_list or now - max(ts_list) > 120]
+        for ip in stale:
+            del _rate_buckets[ip]
+
+
 # ── FastAPI App ──────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -281,6 +291,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(expiry_loop())
     asyncio.create_task(stats_loop())
     asyncio.create_task(challenge_cleanup_loop())
+    asyncio.create_task(rate_bucket_gc_loop())
     print(f"=========================================")
     print(f"  Obscura47 Bootstrap Registry (FastAPI)")
     print(f"  Peer TTL: {PEER_TTL}s")
