@@ -186,6 +186,11 @@ Persistent state lives under `~/.obscura47/`:
 - `node_key.pem`, `exit_key.pem`, `proxy_key.pem`: long-lived ECC keypairs
 - `guards.json`: proxy's pinned guard set
 
+Important config note:
+
+- `OBSCURA_REGISTRY_URL` decides which registry, and therefore which network view, a node joins.
+- Admin settings such as `OBSCURA_REGISTRY_ADMIN_KEY` and `OBSCURA_ADMIN_PUB_PEM` do not change normal routing, but they do affect operator control paths and kill-switch trust.
+
 ## Network Roles Explained
 
 **As a relay node**, your machine forwards encrypted blobs between other nodes.
@@ -205,6 +210,15 @@ browser to use `127.0.0.1:9047` as an HTTP proxy.
 ```bash
 python -m pytest tests/ -q --ignore=tests/test_e2e_tunnel.py
 ```
+
+## Logging and Retention
+
+Obscura47 keeps logging intentionally narrow by default.
+
+- Registry admin actions can be written to a JSONL audit log.
+- Exit nodes can write destination/byte-count summaries for egress events.
+- The audit layer does not persist client-origin metadata, payloads, or full route traces.
+- Retention is configurable with `OBSCURA_AUDIT_RETENTION_DAYS`.
 
 ## Security & Threat Model
 
