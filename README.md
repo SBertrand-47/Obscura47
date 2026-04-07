@@ -142,7 +142,7 @@ dist\Obscura47.exe                  # Windows GUI
 Then point a client at the proxy:
 
 ```bash
-curl -x 127.0.0.1:9047 https://example.com
+curl -x 127.0.0.1:9047 https://obscura47.net
 ```
 
 ## Operator Tools
