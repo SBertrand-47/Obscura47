@@ -6,10 +6,11 @@ import threading
 import time
 import base64
 from src.utils.logger import get_logger
-from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, onion_decrypt_checked, ecc_load_or_create_keypair
+from src.core.encryptions import decrypt_message, encrypt_message, onion_decrypt_with_priv, onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat
 from src.core.ws_transport import WSServer, get_ws_client
+from src.core.router import _send_frame_via_route
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -65,16 +66,21 @@ class ExitNode:
         # Periodic sweeper for abandoned tunnels
         threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
 
-    def _on_ws_frame(self, message: str):
+    def _on_ws_frame(self, message: str, reverse_send=None):
         """Handle a frame received via WebSocket (same logic as TCP)."""
         try:
             packet = json.loads(message)
-            self.process_frame(packet)
+            self.process_frame(packet, send_back=reverse_send)
         except Exception as e:
             log.error(f"[ws] Frame error: {e}")
 
-    def process_frame(self, packet: dict):
-        """Process an incoming encrypted frame (shared by TCP and WebSocket handlers)."""
+    def process_frame(self, packet: dict, send_back=None):
+        """Process an incoming encrypted frame (shared by TCP and WebSocket handlers).
+
+        ``send_back`` is an optional callable that writes data back to the
+        inbound connection this frame arrived on — used as a reverse channel
+        for streaming responses back through the relay chain.
+        """
         encrypted_data = packet.get("encrypted_data")
         if not encrypted_data:
             return
@@ -100,6 +106,7 @@ class ExitNode:
                 'sock': None, 'return_path': return_path,
                 'queue': [], 'ready': threading.Event(),
                 'created': time.time(), 'last_active': time.time(),
+                'send_back': send_back,  # reverse channel to relay chain
             }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
             log.info(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
@@ -207,7 +214,21 @@ class ExitNode:
                     log.info(f"Swept idle tunnel {req_id}")
 
     def handle_request(self, client_socket):
-        """Handle requests forwarded through the network (legacy TCP)."""
+        """Handle requests forwarded through the network (legacy TCP).
+
+        Creates a thread-safe ``send_back`` closure so that reverse-channel
+        response frames can be written back on this same inbound connection.
+        """
+        _send_lock = threading.Lock()
+
+        def _tcp_send_back(data_str):
+            """Write *data_str* back to the inbound TCP socket (reverse channel)."""
+            try:
+                with _send_lock:
+                    client_socket.sendall((data_str + "\n").encode())
+            except Exception:
+                pass
+
         try:
             buffer = ""
             while True:
@@ -220,7 +241,7 @@ class ExitNode:
                     if not line:
                         continue
                     packet = json.loads(line)
-                    self.process_frame(packet)
+                    self.process_frame(packet, send_back=_tcp_send_back)
 
         except Exception as e:
             log.error(f"Error in Exit Node: {e}")
@@ -291,33 +312,80 @@ class ExitNode:
             return False
         return True
 
+    def _send_to_proxy(self, return_path: dict, packet: dict):
+        """Send a response packet back to the proxy.
+
+        Preferred path: **reverse channel** — the response is encrypted for
+        the proxy's public key and sent back through the same inbound
+        connection that delivered the original CONNECT frame.  Each relay
+        hop forwards it back on *its* stored reverse channel, so no new
+        inbound connections are required.  This works even when the proxy
+        is behind NAT.
+
+        Fallback: relay-route / direct WS / direct TCP (legacy behaviour).
+        """
+        req_id = packet.get('request_id', '')
+
+        # ── 1. Reverse channel (NAT-safe) ────────────────────────
+        info = self.tunnels.get(req_id)
+        send_back = info.get('send_back') if info else None
+        if send_back:
+            try:
+                proxy_pub = return_path.get('pub')
+                inner_json = json.dumps(packet)
+                encrypted = onion_encrypt_for_peer(proxy_pub, inner_json) if proxy_pub else inner_json
+                pkt_type = packet.get('type', '')
+                reverse_type = 'reverse_close' if pkt_type == 'close' else 'reverse_data'
+                reverse_frame = {
+                    'type': reverse_type,
+                    'request_id': req_id,
+                    'encrypted_response': encrypted,
+                }
+                send_back(json.dumps(reverse_frame))
+                return
+            except Exception as e:
+                log.warning(f"Reverse channel failed for {req_id}, falling back: {e}")
+
+        # ── 2. Relay-route fallback ───────────────────────────────
+        packet_json = json.dumps(packet)
+        return_route = return_path.get("return_route")
+        if return_route and isinstance(return_route, list) and len(return_route) > 0:
+            proxy_hop = {"host": return_path["host"], "port": return_path["port"]}
+            if return_path.get("pub"):
+                proxy_hop["pub"] = return_path["pub"]
+            remaining = list(return_route[1:]) + [proxy_hop]
+            envelope = dict(packet)
+            envelope["route"] = remaining
+            _send_frame_via_route([return_route[0]], envelope)
+            return
+
+        # ── 3. Direct WS ─────────────────────────────────────────
+        ws_port = return_path.get("ws_port")
+        if ws_port:
+            client = get_ws_client()
+            if client and client.send_frame(return_path['host'], ws_port, packet_json):
+                return
+
+        # ── 4. Direct TCP (only works if proxy is reachable) ─────
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(5.0)
+                sock.connect((return_path['host'], return_path['port']))
+                sock.send((packet_json + "\n").encode())
+        except Exception as e:
+            log.error(f"Error sending to proxy: {e}")
+
     def send_response_back(self, return_path, response_data):
-        """Sends the fetched response back to the proxy (TCP or WebSocket)."""
+        """Sends the fetched response back to the proxy."""
         if not return_path or "host" not in return_path or "port" not in return_path:
             log.warning("Invalid return path provided, response lost.")
             return
-
         packet = {
             "request_id": return_path.get("request_id", ""),
             "data": response_data
         }
-
-        # Try WebSocket if return_path has ws_port
-        ws_port = return_path.get("ws_port")
-        if ws_port:
-            client = get_ws_client()
-            if client and client.send_frame(return_path['host'], ws_port, json.dumps(packet)):
-                log.info("Sent response back to proxy (WebSocket).")
-                return
-
-        # Fall back to TCP
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect((return_path['host'], return_path['port']))
-                sock.send(json.dumps(packet).encode())
-                log.info("Sent response back to proxy (TCP).")
-        except Exception as e:
-            log.error(f"Error sending response to proxy: {e}")
+        self._send_to_proxy(return_path, packet)
+        log.info("Sent response back to proxy.")
 
     def send_stream_chunk(self, return_path, request_id: str, data_bytes: bytes):
         packet = {
@@ -325,44 +393,14 @@ class ExitNode:
             "request_id": request_id,
             "chunk": base64.b64encode(data_bytes).decode(),
         }
-        packet_json = json.dumps(packet)
-
-        # Try WebSocket if return_path has ws_port
-        ws_port = return_path.get("ws_port")
-        if ws_port:
-            client = get_ws_client()
-            if client and client.send_frame(return_path['host'], ws_port, packet_json):
-                return
-
-        # Fall back to TCP
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect((return_path['host'], return_path['port']))
-                sock.send(packet_json.encode())
-        except Exception as e:
-            log.error(f"Error sending stream chunk: {e}")
+        self._send_to_proxy(return_path, packet)
 
     def send_stream_close(self, return_path, request_id: str):
         packet = {
             "type": "close",
             "request_id": request_id,
         }
-        packet_json = json.dumps(packet)
-
-        # Try WebSocket if return_path has ws_port
-        ws_port = return_path.get("ws_port")
-        if ws_port:
-            client = get_ws_client()
-            if client and client.send_frame(return_path['host'], ws_port, packet_json):
-                return
-
-        # Fall back to TCP
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.connect((return_path['host'], return_path['port']))
-                sock.send(packet_json.encode())
-        except Exception as e:
-            log.error(f"Error sending stream close: {e}")
+        self._send_to_proxy(return_path, packet)
 
     def _serve_connect(self, host: str, port: int, return_path: dict, request_id: str):
         info = self.tunnels.get(request_id)

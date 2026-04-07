@@ -34,10 +34,28 @@ class ObscuraNode:
         # Load or create persistent node ECDH keypair for onion layer
         self.priv_key, self.pub_pem = ecc_load_or_create_keypair(NODE_KEY_PATH)
 
+        # Reverse-channel registry: request_id -> send_back callable
+        # When a tunnel CONNECT arrives on an inbound connection, we record
+        # the send_back function (TCP socket writer or WS reverse_send) so
+        # that later reverse_data / reverse_close frames can flow back
+        # toward the proxy on the *same* connection — no new inbound connect.
+        self._reverse_channels = {}
+        self._reverse_lock = threading.Lock()
+
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Initialize global WS client for outbound WebSocket connections
-        get_ws_client(self.priv_key, self.pub_pem)
+        # Initialize global WS client for outbound WebSocket connections.
+        # The on_receive callback handles reverse-channel frames arriving
+        # on outbound WS connections (responses flowing back from downstream).
+        def _ws_reverse_handler(message):
+            try:
+                frame = json.loads(message) if isinstance(message, str) else message
+                if frame.get('type') in ('reverse_data', 'reverse_close'):
+                    self._handle_reverse_frame(frame)
+            except Exception as e:
+                log.error("WS reverse frame error: %s", e)
+
+        get_ws_client(self.priv_key, self.pub_pem, on_receive=_ws_reverse_handler)
 
         # Start discovery listener continuously
         threading.Thread(
@@ -77,16 +95,50 @@ class ObscuraNode:
         # Create the router with updated peers
         self.router = Router(self, self.peers)
 
-    def _on_ws_frame(self, message: str):
+    def _on_ws_frame(self, message: str, reverse_send=None):
         """Handle a frame received via WebSocket (same logic as TCP)."""
         try:
             packet = json.loads(message)
-            self.process_frame(packet)
+            # Reverse-channel frames bypass normal onion processing
+            if packet.get('type') in ('reverse_data', 'reverse_close'):
+                self._handle_reverse_frame(packet)
+                return
+            self.process_frame(packet, send_back=reverse_send)
         except Exception as e:
             log.error("WS frame error: %s", e)
 
-    def process_frame(self, incoming_packet: dict):
-        """Process an incoming encrypted frame (shared by TCP and WebSocket handlers)."""
+    def _handle_reverse_frame(self, frame):
+        """Forward a reverse-channel response frame back toward the proxy.
+
+        The frame is looked up by ``request_id`` in the stored reverse
+        channels and written verbatim to the inbound connection that
+        originally delivered the corresponding CONNECT frame.
+        """
+        if isinstance(frame, str):
+            frame = json.loads(frame)
+        req_id = frame.get('request_id', '')
+        with self._reverse_lock:
+            send_fn = self._reverse_channels.get(req_id)
+        if send_fn:
+            try:
+                send_fn(json.dumps(frame))
+                log.debug("Reverse-channel forwarded | request_id=%s", req_id)
+            except Exception as e:
+                log.error("Reverse-channel send error | request_id=%s | %s", req_id, e)
+        else:
+            log.warning("No reverse channel for request_id=%s", req_id)
+        if frame.get('type') == 'reverse_close':
+            with self._reverse_lock:
+                self._reverse_channels.pop(req_id, None)
+
+    def process_frame(self, incoming_packet: dict, send_back=None):
+        """Process an incoming encrypted frame (shared by TCP and WebSocket handlers).
+
+        ``send_back`` is an optional callable that writes data back to the
+        inbound connection this frame arrived on.  It is stored as a
+        *reverse channel* on tunnel CONNECT frames so that response frames
+        can later flow back through the same connection path.
+        """
         encrypted_data = incoming_packet.get("encrypted_data", None)
         if not encrypted_data:
             log.warning("No encrypted data found. Dropping message.")
@@ -132,12 +184,21 @@ class ObscuraNode:
         if isinstance(layer, dict) and layer.get('type') in ('connect', 'data', 'close') and isinstance(layer.get('route'), list):
             route = layer['route']
             req_id = layer.get("request_id", "")
+            # Store the inbound connection as a reverse channel on CONNECT
+            if layer['type'] == 'connect' and send_back and req_id:
+                with self._reverse_lock:
+                    self._reverse_channels[req_id] = send_back
+                log.info("Stored reverse channel for request_id=%s", req_id)
             if route:
                 next_hop = route.pop(0)
                 log.info("Forwarding tunnel frame (%s) to %s:%s | request_id=%s", layer['type'], next_hop['host'], next_hop['port'], req_id)
                 self.router.forward_message(next_hop, layer)
             else:
                 log.info("Tunnel frame with empty route at %s:%s | request_id=%s", self.host, self.port, req_id)
+            # Clean up reverse channel on CLOSE
+            if layer['type'] == 'close' and req_id:
+                with self._reverse_lock:
+                    self._reverse_channels.pop(req_id, None)
             return
 
         # Legacy envelope with explicit route
@@ -206,7 +267,22 @@ class ObscuraNode:
         log.warning("Node %s:%s shut down", self.host, self.port)
 
     def handle_client(self, client_socket):
-        """Handles incoming encrypted messages from other nodes (legacy TCP)."""
+        """Handles incoming encrypted messages from other nodes (legacy TCP).
+
+        A thread-safe ``send_back`` closure is created for this socket so
+        that reverse-channel responses can be written back on the same
+        inbound TCP connection.
+        """
+        _send_lock = threading.Lock()
+
+        def _tcp_send_back(data_str):
+            """Write *data_str* back to the inbound TCP socket (reverse channel)."""
+            try:
+                with _send_lock:
+                    client_socket.sendall((data_str + "\n").encode())
+            except Exception:
+                pass
+
         try:
             buffer = ""
             while True:
@@ -219,7 +295,11 @@ class ObscuraNode:
                     if not line:
                         continue
                     incoming_packet = json.loads(line)
-                    self.process_frame(incoming_packet)
+                    # Reverse-channel frames skip decryption
+                    if incoming_packet.get('type') in ('reverse_data', 'reverse_close'):
+                        self._handle_reverse_frame(incoming_packet)
+                    else:
+                        self.process_frame(incoming_packet, send_back=_tcp_send_back)
 
         except Exception as e:
             log.error("Error handling client: %s", e)

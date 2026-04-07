@@ -5,12 +5,14 @@ import json
 import time
 import signal
 import sys
+import os
 import base64
 import asyncio
 from src.utils.logger import get_logger
-from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel
+from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery
+from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv, decrypt_message
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
@@ -41,6 +43,17 @@ PROXY_HOST = CFG_PROXY_HOST
 PROXY_PORT = CFG_PROXY_PORT
 PROXY_RESPONSE_PORT = CFG_PROXY_RESPONSE_PORT  # Separate inbound port for exit responses (TCP)
 PROXY_WS_RESPONSE_PORT = CFG_PROXY_WS_RESPONSE_PORT  # WebSocket response port
+
+# The IP that exit nodes should use to reach us (return_path).
+# PROXY_HOST is the bind address (often 0.0.0.0 or 127.0.0.1) — exits can't connect to that.
+# Use OBSCURA_PROXY_RETURN_HOST to set an explicit public IP, or auto-detect via get_local_ip().
+from src.core.discover import get_local_ip as _get_local_ip
+from src.utils.config import PROXY_KEY_PATH
+_return_host_env = os.environ.get("OBSCURA_PROXY_RETURN_HOST", "")
+PROXY_RETURN_HOST = _return_host_env if _return_host_env else _get_local_ip()
+
+# Proxy's own ECC keypair — used to decrypt responses routed back through relays
+_proxy_priv, _proxy_pub_pem = ecc_load_or_create_keypair(PROXY_KEY_PATH)
 DISCOVERY_PORT = CFG_DISCOVERY_PORT  # Discovery port for proxies
 NODE_DISCOVERY_PORT = CFG_NODE_DISCOVERY_PORT
 EXIT_DISCOVERY_PORT = CFG_EXIT_DISCOVERY_PORT
@@ -156,10 +169,15 @@ def handle_browser_request(client_socket):
             pending_requests[request_id] = client_socket
             pending_meta[request_id] = {'started': time.time(), 'bytes_up': 0, 'bytes_down': 0}
 
+        # Build a return route through relays so exit doesn't need direct access to proxy
+        return_route = build_route47(relay_peers)
+        return_route_reversed = list(reversed(return_route)) if return_route else []
         return_path = {
-            "host": PROXY_HOST,
+            "host": PROXY_RETURN_HOST,
             "port": PROXY_RESPONSE_PORT,
+            "pub": _proxy_pub_pem,
             "request_id": request_id,
+            "return_route": return_route_reversed,
         }
 
         # Relay URL to exit via random relay route
@@ -301,9 +319,9 @@ def response_listener():
     """TCP server to receive responses from exit nodes and forward to original client."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((PROXY_HOST, PROXY_RESPONSE_PORT))
+        server.bind(("0.0.0.0", PROXY_RESPONSE_PORT))
         server.listen(5)
-        log.info(f"Proxy response listener on {PROXY_HOST}:{PROXY_RESPONSE_PORT}")
+        log.info(f"Proxy response listener on 0.0.0.0:{PROXY_RESPONSE_PORT} (return_host={PROXY_RETURN_HOST})")
 
         while running:
             try:
@@ -312,13 +330,49 @@ def response_listener():
             except Exception as e:
                 log.warning(f"Response listener error: {e}")
 
-def handle_exit_response(conn):
-    """Handle exit response received via legacy TCP. Delegates to shared handler."""
+def _process_response_frame(raw: bytes):
+    """Decode a single response frame — decrypt onion layer if present, then dispatch."""
     try:
-        data = conn.recv(1024 * 1024)
-        if not data:
+        packet = json.loads(raw)
+    except Exception:
+        log.warning("Malformed response frame")
+        return
+    # If the frame is an encrypted onion envelope, decrypt it first
+    if "encrypted_data" in packet and len(packet) == 1:
+        decrypted = onion_decrypt_with_priv(_proxy_priv, packet["encrypted_data"])
+        if decrypted is None:
+            decrypted = decrypt_message(packet["encrypted_data"])
+        if decrypted is None:
+            log.warning("Could not decrypt relayed response frame")
             return
-        _handle_exit_response_data(data)
+        try:
+            packet = json.loads(decrypted)
+        except Exception:
+            log.warning("Decrypted response is not valid JSON")
+            return
+        # Unwrap onion payload wrapper if present
+        if "payload" in packet and isinstance(packet["payload"], dict):
+            packet = packet["payload"]
+    _handle_exit_response_data(json.dumps(packet))
+
+
+def handle_exit_response(conn):
+    """Handle exit response received via TCP. Decrypts onion layer if present."""
+    try:
+        buffer = b""
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if not line:
+                    continue
+                _process_response_frame(line)
+        # Handle any remaining data without newline delimiter (legacy compat)
+        if buffer.strip():
+            _process_response_frame(buffer)
     except Exception as e:
         log.error(f"Error handling exit response: {e}")
     finally:
@@ -346,7 +400,7 @@ def ws_response_listener():
             pass
 
     async def _serve():
-        server = await ws_serve(_handle_ws, PROXY_HOST, PROXY_WS_RESPONSE_PORT, ssl=ssl_ctx)
+        server = await ws_serve(_handle_ws, "0.0.0.0", PROXY_WS_RESPONSE_PORT, ssl=ssl_ctx)
         scheme = "wss" if ssl_ctx else "ws"
         log.info(f"[ws-response] WebSocket response listener on {scheme}://{PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
         try:
@@ -436,11 +490,47 @@ def _handle_exit_response_data(raw_data):
         log.warning(f"No pending client for request_id={request_id}")
 
 
+def _handle_reverse_response(frame: dict):
+    """Process a reverse-channel response frame from an outbound tunnel socket.
+
+    The frame's ``encrypted_response`` is decrypted with the proxy's private
+    key and then dispatched through the normal response handler.  This is the
+    primary path when the proxy is behind NAT — responses flow back on the
+    same TCP/WS connections used to send requests, so no new inbound
+    connections to the proxy are needed.
+    """
+    req_id = frame.get('request_id', '')
+    encrypted = frame.get('encrypted_response')
+    if encrypted:
+        decrypted = onion_decrypt_with_priv(_proxy_priv, encrypted)
+        if decrypted is None:
+            decrypted = decrypt_message(encrypted)
+        if decrypted:
+            try:
+                _handle_exit_response_data(decrypted)
+            except Exception as e:
+                log.error(f"Reverse response processing error | request_id={req_id} | {e}")
+            return
+        log.warning(f"Could not decrypt reverse response | request_id={req_id}")
+        return
+    # Fallback: unencrypted data (should not happen in production)
+    data = frame.get('data')
+    if data:
+        try:
+            _handle_exit_response_data(json.dumps(data) if isinstance(data, dict) else str(data))
+        except Exception as e:
+            log.error(f"Reverse response fallback error | request_id={req_id} | {e}")
+
+
 def start_proxy():
     """Starts the proxy server and continuously listens for clients."""
     global running
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+
+    # Register reverse-channel callback so responses arriving on outbound
+    # tunnel sockets are decrypted and delivered to the pending client.
+    set_reverse_frame_callback(_handle_reverse_response)
 
     # Initialize guard node set (first-hop pinning). No-op when disabled.
     from src.core.guards import init_guards
@@ -574,13 +664,17 @@ def handle_connect(client_socket):
         with pending_lock:
             pending_requests[request_id] = client_socket
 
+        route = build_route47(relay_peers)
+        # Build return route: reversed relay chain so responses traverse the overlay
+        return_route = list(reversed(route)) if route else []
         return_path = {
-            "host": PROXY_HOST,
+            "host": PROXY_RETURN_HOST,
             "port": PROXY_RESPONSE_PORT,
+            "pub": _proxy_pub_pem,
             "request_id": request_id,
+            "return_route": return_route,
         }
 
-        route = build_route47(relay_peers)
         start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route)
         started = time.time()
         max_seconds = TUNNEL_MAX_SECONDS

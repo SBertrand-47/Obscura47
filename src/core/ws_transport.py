@@ -125,9 +125,22 @@ class WSServer:
         if not await self._authenticate(websocket):
             return
 
+        # Create a thread-safe send-back function for reverse-channel responses
+        loop = self._loop or asyncio.get_event_loop()
+
+        def _reverse_send(data: str):
+            """Send data back to this connected peer (fire-and-forget)."""
+            try:
+                asyncio.run_coroutine_threadsafe(websocket.send(data), loop)
+            except Exception:
+                pass
+
         try:
             async for message in websocket:
                 try:
+                    self.on_frame(message, _reverse_send)
+                except TypeError:
+                    # Backward compat: on_frame doesn't accept reverse_send
                     self.on_frame(message)
                 except Exception as e:
                     log.error(f"Frame handler error: {e}")
@@ -179,7 +192,7 @@ class WSClient:
 
     def __init__(self, priv_key, pub_pem: str,
                  queue_max: int = 100, idle_close_seconds: float = 60.0,
-                 tls_verify: bool = True):
+                 tls_verify: bool = True, on_receive=None):
         """
         Args:
             priv_key: This node's ECC private key (for signing challenges)
@@ -187,12 +200,15 @@ class WSClient:
             queue_max: Max queued frames per connection before backpressure
             idle_close_seconds: Close connections idle longer than this
             tls_verify: Verify TLS certs when connecting via wss:// (False for dev)
+            on_receive: Optional callback invoked with each message received on
+                        outbound connections (used for reverse-channel frames).
         """
         self.priv_key = priv_key
         self.pub_pem = pub_pem
         self.queue_max = queue_max
         self.idle_close_seconds = idle_close_seconds
         self.tls_verify = tls_verify
+        self.on_receive = on_receive
 
         # Connection pool: (host, port, tls) -> {"ws": websocket, "last": timestamp}
         self._connections: dict[tuple, dict] = {}
@@ -236,6 +252,25 @@ class WSClient:
         result = json.loads(raw)
         return result.get("type") == "auth_ok"
 
+    async def _receive_loop(self, ws):
+        """Listen for incoming frames on an outbound WS connection.
+
+        This enables the *reverse-channel* pattern: downstream nodes send
+        response frames back on the same WebSocket the forward request
+        travelled through, avoiding new inbound connections.
+        """
+        try:
+            async for message in ws:
+                if self.on_receive:
+                    try:
+                        self.on_receive(message)
+                    except Exception as e:
+                        log.error(f"WS receive handler error: {e}")
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        except Exception:
+            pass
+
     async def _connect(self, host: str, port: int, tls: bool):
         """Establish and authenticate a WebSocket connection."""
         scheme = "wss" if tls else "ws"
@@ -247,6 +282,9 @@ class WSClient:
         if not await self._authenticate_to_server(ws):
             await ws.close()
             raise ConnectionRefusedError(f"Auth failed to {host}:{port}")
+        # Start a listener for reverse-channel frames on this connection
+        if self.on_receive:
+            asyncio.ensure_future(self._receive_loop(ws))
         return ws
 
     async def _get_or_create(self, host: str, port: int, tls: bool):
@@ -365,8 +403,14 @@ _global_client: WSClient | None = None
 _client_lock = threading.Lock()
 
 
-def get_ws_client(priv_key=None, pub_pem: str = "") -> WSClient | None:
-    """Get or create the global WSClient instance."""
+def get_ws_client(priv_key=None, pub_pem: str = "", on_receive=None) -> WSClient | None:
+    """Get or create the global WSClient instance.
+
+    ``on_receive`` is an optional callback invoked with each message received
+    on outbound WebSocket connections.  This enables the reverse-channel
+    pattern where downstream nodes send response frames back through the
+    same connection.
+    """
     global _global_client
     with _client_lock:
         if _global_client is None and priv_key is not None:
@@ -378,5 +422,6 @@ def get_ws_client(priv_key=None, pub_pem: str = "") -> WSClient | None:
                 queue_max=CHANNEL_QUEUE_MAX,
                 idle_close_seconds=CHANNEL_IDLE_CLOSE_SECONDS,
                 tls_verify=TLS_VERIFY,
+                on_receive=on_receive,
             )
         return _global_client
