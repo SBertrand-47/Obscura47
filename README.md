@@ -142,6 +142,25 @@ Then point a client at the proxy:
 curl -x 127.0.0.1:9047 https://example.com
 ```
 
+## Operator Tools
+
+Most users and contributors do not need any admin tooling. The standard
+contributor path is `join_network.py`, the tray app, or the main runtime roles
+under `src.main`.
+
+`admin_cli.py` is for the network operator only. It manages exit approval,
+peer removal, and the signed kill-switch workflow against a registry you
+control.
+
+Important safety rules:
+
+- Never commit `.env`, admin tokens, or generated admin keys.
+- `admin_cli.py keygen` writes operator keys to `~/.obscura47/`, not the repo.
+- Leave `OBSCURA_REGISTRY_ADMIN_KEY` empty in sample configs and only set it in
+  your private deployment environment.
+- If you are just contributing bandwidth as a relay or exit, you can ignore
+  `admin_cli.py` entirely.
+
 ## Configuration
 
 All settings are environment variables. See [`.env.example`](.env.example) for
