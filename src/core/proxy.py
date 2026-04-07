@@ -107,23 +107,6 @@ def observe_relays_and_exits():
     threading.Thread(target=observe_discovery, args=(relay_peers, NODE_DISCOVERY_PORT), daemon=True).start()
     threading.Thread(target=observe_discovery, args=(exit_peers, EXIT_DISCOVERY_PORT), daemon=True).start()
     threading.Thread(target=exit_health_monitor, daemon=True).start()
-    # Load persisted health if available
-    try:
-        import json as _json
-        from src.utils.config import EXIT_HEALTH_PATH
-        with open(EXIT_HEALTH_PATH, 'r', encoding='utf-8') as f:
-            data = _json.load(f)
-            if isinstance(data, dict):
-                for key, val in data.items():
-                    if isinstance(key, str) and ':' in key:
-                        h, p = key.rsplit(':', 1)
-                        try:
-                            p = int(p)
-                        except Exception:
-                            continue
-                        exit_health[(h, p)] = val
-    except Exception:
-        pass
 
 def exit_health_monitor():
     while running:
@@ -159,14 +142,6 @@ def exit_health_monitor():
                     # reset backoff on success
                     stats['backoff_until'] = 0.0
                 exit_health[key] = stats
-            # Persist health periodically
-            try:
-                import json as _json
-                from src.utils.config import EXIT_HEALTH_PATH
-                with open(EXIT_HEALTH_PATH, 'w', encoding='utf-8') as f:
-                    _json.dump(exit_health, f)
-            except Exception:
-                pass
         except Exception as e:
             log.warning(f"Exit health monitor error: {e}")
         time.sleep(EXIT_HEALTH_INTERVAL)
