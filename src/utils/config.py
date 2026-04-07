@@ -103,6 +103,7 @@ JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "y
 # Persistent key paths (role-specific)
 NODE_KEY_PATH = getenv_str("OBSCURA_NODE_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "node_key.pem"))
 EXIT_KEY_PATH = getenv_str("OBSCURA_EXIT_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "exit_key.pem"))
+PROXY_KEY_PATH = getenv_str("OBSCURA_PROXY_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "proxy_key.pem"))
 
 
 # Bootstrap registry (internet discovery)

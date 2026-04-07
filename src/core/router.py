@@ -3,6 +3,7 @@ import json
 import socket
 import time
 import base64
+import threading
 from src.core.encryptions import encrypt_message, decrypt_message, onion_encrypt_for_peer
 from src.utils.logger import get_logger
 from src.utils.config import (
@@ -17,6 +18,63 @@ log = get_logger(__name__)
 FRAME_RETRIES = 0
 MESSAGE_REROUTES = 0
 TUNNEL_SOCKETS = {}  # (request_id, host, port) -> {'sock': socket, 'last': ts, 'q': list}
+
+# ---------------------------------------------------------------------------
+# Reverse-channel infrastructure
+# ---------------------------------------------------------------------------
+# When the proxy or a relay opens a persistent outbound socket to the next hop,
+# the downstream node may send *reverse-channel* frames back on that same
+# connection (type "reverse_data" / "reverse_close").  A reader thread is
+# started on every new outbound tunnel socket to catch those frames.
+#
+# The module-level callback (_reverse_frame_callback) is set by proxy.py so
+# that reverse frames arriving on TUNNEL_SOCKETS are delivered to the proxy's
+# response handler.  Relay nodes use the Router instance to forward reverse
+# frames toward the proxy through their own stored reverse channels.
+# ---------------------------------------------------------------------------
+_reverse_frame_callback = None
+
+
+def set_reverse_frame_callback(callback):
+    """Register a callback for reverse-channel frames on outbound tunnel sockets.
+
+    ``callback`` receives a single ``dict`` argument (the parsed frame).
+    Used by the proxy to process responses arriving through reverse channels.
+    """
+    global _reverse_frame_callback
+    _reverse_frame_callback = callback
+
+
+def _start_tunnel_reader(sock, callback):
+    """Start a daemon reader on *sock* that dispatches reverse-channel frames.
+
+    The reader runs until the socket is closed or an error occurs.
+    ``callback(frame_dict)`` is invoked for every ``reverse_data`` /
+    ``reverse_close`` frame received.
+    """
+
+    def _reader():
+        buf = ""
+        try:
+            while True:
+                data = sock.recv(8192)
+                if not data:
+                    break
+                buf += data.decode(errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    if not line:
+                        continue
+                    try:
+                        frame = json.loads(line)
+                        if frame.get("type") in ("reverse_data", "reverse_close"):
+                            callback(frame)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    threading.Thread(target=_reader, daemon=True).start()
 
 def get_router_metrics():
     return { 'frame_retries': FRAME_RETRIES, 'message_reroutes': MESSAGE_REROUTES }
@@ -187,6 +245,9 @@ class Router:
                 sock.settimeout(None)
                 entry = {'sock': sock, 'last': time.time(), 'q': []}
                 self._tunnel_sockets[key] = entry
+                # Start reverse-channel reader for relay nodes
+                if self.node and hasattr(self.node, '_handle_reverse_frame'):
+                    _start_tunnel_reader(sock, self.node._handle_reverse_frame)
             # queue and flush with backpressure
             pkt = (frame_json + "\n").encode()
             if len(entry['q']) >= CHANNEL_QUEUE_MAX:
@@ -345,6 +406,10 @@ def _send_frame_via_route(route, envelope):
                     sock.settimeout(None)
                     entry = {'sock': sock, 'last': time.time(), 'q': []}
                     TUNNEL_SOCKETS[key] = entry
+                    # Start a reverse-channel reader so responses can flow
+                    # back on this same connection without new inbound connects.
+                    if _reverse_frame_callback:
+                        _start_tunnel_reader(sock, _reverse_frame_callback)
                 # Backpressure queue
                 if len(entry['q']) >= CHANNEL_QUEUE_MAX:
                     raise RuntimeError('channel queue overflow')

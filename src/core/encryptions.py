@@ -83,7 +83,7 @@ def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> 
 
 # Frames are padded to the nearest multiple of this block size before encryption.
 # This prevents packet-length correlation across hops.
-PADDING_BLOCK = 512  # bytes
+PADDING_BLOCK = 128  # bytes (must be <= 255 for PKCS7)
 
 
 def _pad(plaintext: bytes) -> bytes:
