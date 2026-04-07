@@ -5,6 +5,7 @@ import time
 import base64
 import sys
 from src.utils.logger import get_logger
+from src.utils.audit import write_audit_event
 from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
@@ -14,6 +15,7 @@ from src.utils.config import (
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     EXIT_KEY_PATH, EXIT_WS_PORT,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE, TUNNEL_IDLE_SECONDS,
+    EXIT_EGRESS_AUDIT_ENABLED, EXIT_EGRESS_AUDIT_PATH, AUDIT_RETENTION_DAYS,
 )
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -64,6 +66,39 @@ class ExitNode:
         # Periodic sweeper for abandoned tunnels
         threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
 
+    def _audit_exit_event(self, event_type: str, info: dict, **extra):
+        target_host = info.get("target_host")
+        target_port = info.get("target_port")
+        if not target_host or not target_port:
+            return
+        write_audit_event(
+            EXIT_EGRESS_AUDIT_PATH,
+            {
+                "component": "exit",
+                "event": event_type,
+                "request_id": info.get("request_id"),
+                "target_host": target_host,
+                "target_port": target_port,
+                "bytes_to_origin": info.get("bytes_to_origin", 0),
+                "bytes_from_origin": info.get("bytes_from_origin", 0),
+                "duration_s": round(max(0.0, time.time() - info.get("created", time.time())), 3),
+                **extra,
+            },
+            enabled=EXIT_EGRESS_AUDIT_ENABLED,
+            retention_days=AUDIT_RETENTION_DAYS,
+        )
+
+    def _close_tunnel(self, request_id: str, *, event_type: str, result: str, error: str | None = None):
+        info = self.tunnels.pop(request_id, None)
+        if not info:
+            return
+        try:
+            if info.get("sock"):
+                info["sock"].close()
+        except Exception:
+            pass
+        self._audit_exit_event(event_type, info, result=result, error=error)
+
     def _on_ws_frame(self, message: str, reverse_send=None):
         """Handle a frame received via WebSocket (same logic as TCP)."""
         try:
@@ -103,6 +138,11 @@ class ExitNode:
                 'queue': [], 'ready': threading.Event(),
                 'created': time.time(), 'last_active': time.time(),
                 'send_back': send_back,  # reverse channel to relay chain
+                'request_id': req_id,
+                'target_host': host,
+                'target_port': port,
+                'bytes_to_origin': 0,
+                'bytes_from_origin': 0,
             }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
             log.info(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
@@ -121,16 +161,11 @@ class ExitNode:
             try:
                 info['sock'].sendall(raw)
                 info['last_active'] = time.time()
+                info['bytes_to_origin'] = info.get('bytes_to_origin', 0) + len(raw)
             except Exception as e:
                 log.error(f"Exit write error | request_id={req_id} | {e}")
         elif msg_type == "close":
-            info = self.tunnels.pop(req_id, None)
-            if info:
-                try:
-                    if info.get('sock'):
-                        info['sock'].close()
-                except Exception:
-                    pass
+            self._close_tunnel(req_id, event_type="egress_closed", result="client_close")
         else:
             log.warning(f"Unknown tunnel frame type: {msg_type} | request_id={req_id}")
 
@@ -207,12 +242,7 @@ class ExitNode:
             for req_id, info in list(self.tunnels.items()):
                 last = info.get('last_active', info.get('created', 0))
                 if now - last > TUNNEL_IDLE_SECONDS:
-                    try:
-                        if info.get('sock'):
-                            info['sock'].close()
-                    except Exception:
-                        pass
-                    self.tunnels.pop(req_id, None)
+                    self._close_tunnel(req_id, event_type="egress_closed", result="idle_timeout")
                     log.info(f"Swept idle tunnel {req_id}")
 
     def handle_request(self, client_socket):
@@ -309,29 +339,52 @@ class ExitNode:
                     out.sendall(queued)
                 info['ready'].set()
             else:
-                self.tunnels[request_id] = {'sock': out, 'return_path': return_path}
+                self.tunnels[request_id] = {
+                    'sock': out,
+                    'return_path': return_path,
+                    'created': time.time(),
+                    'last_active': time.time(),
+                    'request_id': request_id,
+                    'target_host': host,
+                    'target_port': port,
+                    'bytes_to_origin': 0,
+                    'bytes_from_origin': 0,
+                }
+                info = self.tunnels[request_id]
+
+            self._audit_exit_event("egress_connected", info, result="connected")
 
             # Start reader thread: pump origin->proxy
             def reader():
+                close_result = "remote_close"
+                close_error = None
                 try:
                     while True:
                         data = out.recv(8192)
                         if not data:
                             break
+                        if info:
+                            info['last_active'] = time.time()
+                            info['bytes_from_origin'] = info.get('bytes_from_origin', 0) + len(data)
                         self.send_stream_chunk(return_path, request_id, data)
                 except Exception as e:
                     log.error(f"Exit reader error | request_id={request_id} | {e}")
+                    close_result = "reader_error"
+                    close_error = str(e)
                 finally:
                     self.send_stream_close(return_path, request_id)
-                    try:
-                        out.close()
-                    except Exception:
-                        pass
-                    self.tunnels.pop(request_id, None)
+                    self._close_tunnel(
+                        request_id,
+                        event_type="egress_closed",
+                        result=close_result,
+                        error=close_error,
+                    )
 
             threading.Thread(target=reader, daemon=True).start()
         except Exception as e:
             log.error(f"CONNECT error to {host}:{port} | {e}")
+            if info:
+                self._audit_exit_event("egress_connect_failed", info, result="connect_failed", error=str(e))
             self.tunnels.pop(request_id, None)
 
 if __name__ == "__main__":

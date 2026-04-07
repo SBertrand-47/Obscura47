@@ -36,6 +36,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+try:
+    from src.utils.audit import write_audit_event
+except Exception:
+    def write_audit_event(*_args, **_kwargs):
+        return
+
 # ── Configuration ────────────────────────────────────────────────
 DEFAULT_PORT = int(os.getenv("OBSCURA_REGISTRY_PORT", "8470"))
 PEER_TTL = int(os.getenv("OBSCURA_REGISTRY_PEER_TTL", "120"))
@@ -44,6 +50,12 @@ ADMIN_KEY = os.getenv("OBSCURA_REGISTRY_ADMIN_KEY", "")
 RATE_LIMIT = int(os.getenv("OBSCURA_REGISTRY_RATE_LIMIT", "60"))  # requests/min/IP
 TLS_CERT = os.getenv("OBSCURA_REGISTRY_TLS_CERT", "")
 TLS_KEY = os.getenv("OBSCURA_REGISTRY_TLS_KEY", "")
+AUDIT_RETENTION_DAYS = int(os.getenv("OBSCURA_AUDIT_RETENTION_DAYS", "14"))
+REGISTRY_ADMIN_AUDIT_ENABLED = os.getenv("OBSCURA_REGISTRY_ADMIN_AUDIT_ENABLED", "true").lower() in ("1", "true", "yes")
+REGISTRY_ADMIN_AUDIT_PATH = os.getenv(
+    "OBSCURA_REGISTRY_ADMIN_AUDIT_PATH",
+    os.path.join(os.path.expanduser("~"), ".obscura47", "audit", "registry_admin.jsonl"),
+)
 # Admin public key: read from inline PEM or file path
 _admin_pub_raw = os.getenv("OBSCURA_ADMIN_PUB_PEM", "")
 _admin_pub_path = os.getenv("OBSCURA_ADMIN_PUB_PEM_PATH", "")
@@ -497,6 +509,34 @@ def _get_client_ip(request: Request) -> str:
     return request.client.host
 
 
+def _audit_admin_event(action: str, *, request: Request | None = None, target: str | None = None,
+                       allowed: bool, reason: str | None = None) -> None:
+    write_audit_event(
+        REGISTRY_ADMIN_AUDIT_PATH,
+        {
+            "component": "registry",
+            "event": "admin_action",
+            "action": action,
+            "allowed": allowed,
+            "source_ip": _get_client_ip(request) if request is not None else None,
+            "target": target,
+            "reason": reason,
+        },
+        enabled=REGISTRY_ADMIN_AUDIT_ENABLED,
+        retention_days=AUDIT_RETENTION_DAYS,
+    )
+
+
+def _require_admin_auth(request: Request, authorization: str | None, action: str, target: str | None = None) -> None:
+    if not ADMIN_KEY:
+        _audit_admin_event(action, request=request, target=target, allowed=False, reason="admin_not_configured")
+        raise HTTPException(403, detail="Admin key not configured")
+    if authorization != f"Bearer {ADMIN_KEY}":
+        _audit_admin_event(action, request=request, target=target, allowed=False, reason="invalid_admin_key")
+        raise HTTPException(403, detail="Invalid admin key")
+    _audit_admin_event(action, request=request, target=target, allowed=True)
+
+
 # ── Endpoints ────────────────────────────────────────────────────
 
 @app.post("/register")
@@ -604,12 +644,9 @@ async def health_check():
 
 
 @app.delete("/peers/{peer_id:path}")
-async def remove_peer(peer_id: str, authorization: str | None = Header(default=None)):
+async def remove_peer(peer_id: str, request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: remove a specific peer. Requires OBSCURA_REGISTRY_ADMIN_KEY."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "remove_peer", peer_id)
 
     deleted = await delete_peer(peer_id)
     if not deleted:
@@ -621,24 +658,18 @@ async def remove_peer(peer_id: str, authorization: str | None = Header(default=N
 # ── Exit Node Approval Endpoints ─────────────────────────────────
 
 @app.get("/admin/pending")
-async def list_pending_exits(authorization: str | None = Header(default=None)):
+async def list_pending_exits(request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: list all unapproved exit nodes."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "list_pending_exits")
 
     pending = await get_unapproved_exits()
     return {"pending_exits": pending}
 
 
 @app.post("/admin/approve/{peer_id:path}")
-async def approve_exit_node(peer_id: str, authorization: str | None = Header(default=None)):
+async def approve_exit_node(peer_id: str, request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: approve a pending exit node."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "approve_exit", peer_id)
 
     approved = await approve_exit(peer_id)
     if not approved:
@@ -648,12 +679,9 @@ async def approve_exit_node(peer_id: str, authorization: str | None = Header(def
 
 
 @app.post("/admin/reject/{peer_id:path}")
-async def reject_exit_node(peer_id: str, authorization: str | None = Header(default=None)):
+async def reject_exit_node(peer_id: str, request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: reject/remove a pending exit node."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "reject_exit", peer_id)
 
     deleted = await reject_exit(peer_id)
     if not deleted:
@@ -672,12 +700,9 @@ async def get_kill_status():
 
 
 @app.post("/admin/kill")
-async def activate_kill_switch(body: KillSwitchRequest, authorization: str | None = Header(default=None)):
+async def activate_kill_switch(body: KillSwitchRequest, request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: activate the kill switch. Body must include reason and signature."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "activate_kill_switch")
 
     await set_kill_active(body.reason, body.signature)
     print(f"[registry] Admin activated kill switch: {body.reason}")
@@ -685,12 +710,9 @@ async def activate_kill_switch(body: KillSwitchRequest, authorization: str | Non
 
 
 @app.post("/admin/revive")
-async def deactivate_kill_switch(authorization: str | None = Header(default=None)):
+async def deactivate_kill_switch(request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: deactivate the kill switch."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "deactivate_kill_switch")
 
     await set_kill_inactive()
     print(f"[registry] Admin deactivated kill switch")
@@ -700,12 +722,9 @@ async def deactivate_kill_switch(authorization: str | None = Header(default=None
 # ── Enhanced Health Endpoint ─────────────────────────────────────
 
 @app.get("/admin/health")
-async def admin_health_check(authorization: str | None = Header(default=None)):
+async def admin_health_check(request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: detailed per-node health stats."""
-    if not ADMIN_KEY:
-        raise HTTPException(403, detail="Admin key not configured")
-    if authorization != f"Bearer {ADMIN_KEY}":
-        raise HTTPException(403, detail="Invalid admin key")
+    _require_admin_auth(request, authorization, "admin_health_check")
 
     all_peers = await get_all_peers_with_details()
     return AdminHealthResponse(
