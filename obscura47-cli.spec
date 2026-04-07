@@ -1,23 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Obscura47 — PyInstaller Spec File (GUI)
-Builds the windowed desktop app.
+Obscura47 — PyInstaller Spec File (CLI)
+Builds the command-line binary for running individual roles.
 
-Usage:  pyinstaller obscura47.spec
+Usage:  pyinstaller obscura47-cli.spec
+
+Result: dist/Obscura47-CLI  (or dist/Obscura47-CLI.exe on Windows)
+
+Run:    ./dist/Obscura47-CLI node
+        ./dist/Obscura47-CLI exit
+        ./dist/Obscura47-CLI proxy
 """
 
 import sys
 import os
 
 block_cipher = None
-is_mac = sys.platform == 'darwin'
 is_win = sys.platform == 'win32'
 
 icon_path = None
 if is_win and os.path.exists('assets/icon.ico'):
     icon_path = 'assets/icon.ico'
-elif is_mac and os.path.exists('assets/icon.icns'):
-    icon_path = 'assets/icon.icns'
 
 hidden_imports = [
     'src.core.proxy',
@@ -49,7 +52,7 @@ hidden_imports = [
 ]
 
 a = Analysis(
-    ['app.py'],
+    ['src/main.py'],
     pathex=['.'],
     binaries=[],
     datas=[
@@ -73,14 +76,14 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Obscura47',
+    name='Obscura47-CLI',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -88,16 +91,3 @@ exe = EXE(
     entitlements_file=None,
     icon=icon_path,
 )
-
-if is_mac:
-    app = BUNDLE(
-        exe,
-        name='Obscura47.app',
-        icon=icon_path,
-        bundle_identifier='com.obscura47.app',
-        info_plist={
-            'CFBundleDisplayName': 'Obscura47',
-            'CFBundleShortVersionString': '1.0.0',
-            'NSHighResolutionCapable': True,
-        },
-    )

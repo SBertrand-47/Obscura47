@@ -7,17 +7,14 @@ import signal
 import sys
 import os
 import base64
-import asyncio
 from src.utils.logger import get_logger
-from src.core.router import direct_relay_message, build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback
+from src.core.router import build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
-from src.core.internet_discovery import start_internet_discovery
-from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv, decrypt_message
+from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
+from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
-    PROXY_RESPONSE_PORT as CFG_PROXY_RESPONSE_PORT,
-    PROXY_WS_RESPONSE_PORT as CFG_PROXY_WS_RESPONSE_PORT,
     DISCOVERY_PORT as CFG_DISCOVERY_PORT,
     NODE_DISCOVERY_PORT as CFG_NODE_DISCOVERY_PORT,
     EXIT_DISCOVERY_PORT as CFG_EXIT_DISCOVERY_PORT,
@@ -41,16 +38,8 @@ from src.utils.config import (
 
 PROXY_HOST = CFG_PROXY_HOST
 PROXY_PORT = CFG_PROXY_PORT
-PROXY_RESPONSE_PORT = CFG_PROXY_RESPONSE_PORT  # Separate inbound port for exit responses (TCP)
-PROXY_WS_RESPONSE_PORT = CFG_PROXY_WS_RESPONSE_PORT  # WebSocket response port
 
-# The IP that exit nodes should use to reach us (return_path).
-# PROXY_HOST is the bind address (often 0.0.0.0 or 127.0.0.1) — exits can't connect to that.
-# Use OBSCURA_PROXY_RETURN_HOST to set an explicit public IP, or auto-detect via get_local_ip().
-from src.core.discover import get_local_ip as _get_local_ip
 from src.utils.config import PROXY_KEY_PATH
-_return_host_env = os.environ.get("OBSCURA_PROXY_RETURN_HOST", "")
-PROXY_RETURN_HOST = _return_host_env if _return_host_env else _get_local_ip()
 
 # Proxy's own ECC keypair — used to decrypt responses routed back through relays
 _proxy_priv, _proxy_pub_pem = ecc_load_or_create_keypair(PROXY_KEY_PATH)
@@ -97,103 +86,6 @@ def log_selected_exit(prefix: str, destination: dict):
 pending_requests = {}  # request_id -> client_socket
 pending_meta = {}       # request_id -> {'started': ts, 'bytes_up': int, 'bytes_down': int, 'last_activity': ts, 'exit': hostport}
 pending_lock = threading.Lock()
-
-def parse_http_request_to_url(request_text: str) -> str | None:
-    try:
-        lines = request_text.split("\r\n")
-        if not lines:
-            return None
-        request_line = lines[0]
-        parts = request_line.split()
-        if len(parts) < 3:
-            return None
-        method, target, _ = parts[0], parts[1], parts[2]
-        if method.upper() == "CONNECT":
-            return None  # Not supported yet
-        if target.startswith("http://") or target.startswith("https://"):
-            return target
-        # Otherwise, build from Host header + path
-        host = None
-        for line in lines[1:]:
-            if line.lower().startswith("host:"):
-                host = line.split(":", 1)[1].strip()
-                break
-        if not host:
-            return None
-        path = target if target.startswith("/") else "/"
-        return f"http://{host}{path}"
-    except Exception:
-        return None
-
-def handle_browser_request(client_socket):
-    """Handles incoming HTTP requests from the browser."""
-    global running
-    try:
-        if not running:
-            return
-
-        request = client_socket.recv(4096)
-        if not request:
-            return
-
-        log.debug(f"Received browser request (first 100 chars): {request[:100]}...")
-
-        # Build URL for exit node
-        url = parse_http_request_to_url(request.decode(errors="ignore"))
-        if not url:
-            client_socket.send(b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n")
-            client_socket.close()
-            return
-
-        if not relay_peers and not exit_peers:
-            log.warning("No discovered peers yet. Cannot route request.")
-            client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
-            client_socket.close()
-            return
-
-        # Choose the best exit destination
-        destination = choose_best_exit()
-        if not destination and relay_peers:
-            candidates = [p for p in relay_peers if p.get("port", 0) >= 6000]
-            destination = random.choice(candidates) if candidates else None
-        if not destination:
-            client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
-            client_socket.close()
-            return
-
-        log_selected_exit("HTTP", destination)
-
-        # Create a unique request id and record the client socket for response
-        request_id = str(time.time_ns())
-        with pending_lock:
-            pending_requests[request_id] = client_socket
-            pending_meta[request_id] = {'started': time.time(), 'bytes_up': 0, 'bytes_down': 0}
-
-        # Build a return route through relays so exit doesn't need direct access to proxy
-        return_route = build_route47(relay_peers)
-        return_route_reversed = list(reversed(return_route)) if return_route else []
-        return_path = {
-            "host": PROXY_RETURN_HOST,
-            "port": PROXY_RESPONSE_PORT,
-            "pub": _proxy_pub_pem,
-            "request_id": request_id,
-            "return_route": return_route_reversed,
-        }
-
-        # Relay URL to exit via random relay route
-        direct_relay_message(url, destination, relay_peers, return_path=return_path, request_id=request_id)
-        with pending_lock:
-            if request_id in pending_meta:
-                pending_meta[request_id]['exit'] = f"{destination['host']}:{destination['port']}"
-        log.info(f"Waiting for response from the exit node | request_id={request_id}...")
-
-    except ConnectionResetError:
-        log.warning("Connection reset by client. Ignoring.")
-    except Exception as e:
-        log.error(f"Error in handle_browser_request: {e}")
-    finally:
-        # Do not close here; will close after response or timeout in response handler
-        pass
 
 def listen_for_clients():
     """Continuously listens for client discovery responses."""
@@ -315,104 +207,6 @@ def continuous_discovery():
             log.error(f"Error broadcasting discovery: {e}")
             time.sleep(2)  # Prevent spamming logs on error
 
-def response_listener():
-    """TCP server to receive responses from exit nodes and forward to original client."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("0.0.0.0", PROXY_RESPONSE_PORT))
-        server.listen(5)
-        log.info(f"Proxy response listener on 0.0.0.0:{PROXY_RESPONSE_PORT} (return_host={PROXY_RETURN_HOST})")
-
-        while running:
-            try:
-                conn, _ = server.accept()
-                threading.Thread(target=handle_exit_response, args=(conn,), daemon=True).start()
-            except Exception as e:
-                log.warning(f"Response listener error: {e}")
-
-def _process_response_frame(raw: bytes):
-    """Decode a single response frame — decrypt onion layer if present, then dispatch."""
-    try:
-        packet = json.loads(raw)
-    except Exception:
-        log.warning("Malformed response frame")
-        return
-    # If the frame is an encrypted onion envelope, decrypt it first
-    if "encrypted_data" in packet and len(packet) == 1:
-        decrypted = onion_decrypt_with_priv(_proxy_priv, packet["encrypted_data"])
-        if decrypted is None:
-            decrypted = decrypt_message(packet["encrypted_data"])
-        if decrypted is None:
-            log.warning("Could not decrypt relayed response frame")
-            return
-        try:
-            packet = json.loads(decrypted)
-        except Exception:
-            log.warning("Decrypted response is not valid JSON")
-            return
-        # Unwrap onion payload wrapper if present
-        if "payload" in packet and isinstance(packet["payload"], dict):
-            packet = packet["payload"]
-    _handle_exit_response_data(json.dumps(packet))
-
-
-def handle_exit_response(conn):
-    """Handle exit response received via TCP. Decrypts onion layer if present."""
-    try:
-        buffer = b""
-        while True:
-            chunk = conn.recv(65536)
-            if not chunk:
-                break
-            buffer += chunk
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                if not line:
-                    continue
-                _process_response_frame(line)
-        # Handle any remaining data without newline delimiter (legacy compat)
-        if buffer.strip():
-            _process_response_frame(buffer)
-    except Exception as e:
-        log.error(f"Error handling exit response: {e}")
-    finally:
-        conn.close()
-
-def ws_response_listener():
-    """WebSocket server to receive responses from exit nodes (dual-protocol)."""
-    import websockets
-    from websockets.asyncio.server import serve as ws_serve
-    from src.utils.config import WS_TLS_ACTIVE, WS_TLS_CERT, WS_TLS_KEY
-    from src.core.ws_transport import _build_server_ssl_context
-
-    ssl_ctx = None
-    if WS_TLS_ACTIVE:
-        ssl_ctx = _build_server_ssl_context(WS_TLS_CERT, WS_TLS_KEY)
-
-    async def _handle_ws(websocket):
-        try:
-            async for message in websocket:
-                try:
-                    _handle_exit_response_data(message)
-                except Exception as e:
-                    log.error(f"[ws-response] Error: {e}")
-        except websockets.exceptions.ConnectionClosed:
-            pass
-
-    async def _serve():
-        server = await ws_serve(_handle_ws, "0.0.0.0", PROXY_WS_RESPONSE_PORT, ssl=ssl_ctx)
-        scheme = "wss" if ssl_ctx else "ws"
-        log.info(f"[ws-response] WebSocket response listener on {scheme}://{PROXY_HOST}:{PROXY_WS_RESPONSE_PORT}")
-        try:
-            await server.serve_forever()
-        except asyncio.CancelledError:
-            pass
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_serve())
-
-
 def _handle_exit_response_data(raw_data):
     """Shared handler for exit response frames (used by both TCP and WS listeners)."""
     if isinstance(raw_data, bytes):
@@ -455,22 +249,7 @@ def _handle_exit_response_data(raw_data):
                     else:
                         log.info(f"Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
             else:
-                # Backwards-compatible HTTP body delivery (non-tunnel)
-                payload = packet.get("data", "")
-                if isinstance(payload, (bytes, bytearray)):
-                    client_socket.send(payload)
-                else:
-                    body = payload if isinstance(payload, str) else str(payload)
-                    if not body.startswith("HTTP/"):
-                        headers = (
-                            "HTTP/1.1 200 OK\r\n"
-                            f"Content-Length: {len(body.encode())}\r\n"
-                            "Content-Type: text/html; charset=utf-8\r\n"
-                            "Connection: close\r\n\r\n"
-                        )
-                        client_socket.send(headers.encode() + body.encode())
-                    else:
-                        client_socket.send(body.encode())
+                log.warning(f"Unknown tunnel frame type: {typ} | request_id={request_id}")
         except Exception as e:
             log.error(f"Error delivering to client | {e}")
             try:
@@ -503,8 +282,6 @@ def _handle_reverse_response(frame: dict):
     encrypted = frame.get('encrypted_response')
     if encrypted:
         decrypted = onion_decrypt_with_priv(_proxy_priv, encrypted)
-        if decrypted is None:
-            decrypted = decrypt_message(encrypted)
         if decrypted:
             try:
                 _handle_exit_response_data(decrypted)
@@ -513,13 +290,7 @@ def _handle_reverse_response(frame: dict):
             return
         log.warning(f"Could not decrypt reverse response | request_id={req_id}")
         return
-    # Fallback: unencrypted data (should not happen in production)
-    data = frame.get('data')
-    if data:
-        try:
-            _handle_exit_response_data(json.dumps(data) if isinstance(data, dict) else str(data))
-        except Exception as e:
-            log.error(f"Reverse response fallback error | request_id={req_id} | {e}")
+    log.warning(f"No encrypted_response in reverse frame | request_id={req_id}")
 
 
 def start_proxy():
@@ -554,9 +325,15 @@ def start_proxy():
     # Internet-wide peer discovery via bootstrap registry
     start_internet_discovery(relay_peers, exit_peers)
 
-    # Start response listeners for exit node callbacks (TCP + WebSocket)
-    threading.Thread(target=response_listener, daemon=True).start()
-    threading.Thread(target=ws_response_listener, daemon=True).start()
+    # Kill switch monitor for proxy shutdown
+    def _proxy_shutdown(reason: str):
+        global running
+        running = False
+        log.warning(f"Kill switch activated: {reason}")
+        sys.exit(0)
+
+    start_kill_switch_monitor(_proxy_shutdown)
+
     threading.Thread(target=metrics_worker, daemon=True).start()
     threading.Thread(target=cleanup_worker, daemon=True).start()
     # Start channel idle sweeper in router
@@ -631,7 +408,9 @@ def handle_new_client(client_socket):
                 metrics['active_tunnels'] = active_tunnels
                 per_ip_tunnels[peer_ip] = max(0, per_ip_tunnels.get(peer_ip, 1) - 1)
         else:
-            handle_browser_request(client_socket)
+            # Only CONNECT tunnels are supported (no legacy HTTP relay)
+            client_socket.send(b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n")
+            client_socket.close()
     except Exception as e:
         log.error(f"Error handling new client: {e}")
         try:
@@ -665,14 +444,11 @@ def handle_connect(client_socket):
             pending_requests[request_id] = client_socket
 
         route = build_route47(relay_peers)
-        # Build return route: reversed relay chain so responses traverse the overlay
-        return_route = list(reversed(route)) if route else []
+        # Reverse channel: responses flow back on the same connections,
+        # so return_path only needs the proxy's public key for encryption.
         return_path = {
-            "host": PROXY_RETURN_HOST,
-            "port": PROXY_RESPONSE_PORT,
             "pub": _proxy_pub_pem,
             "request_id": request_id,
-            "return_route": return_route,
         }
 
         start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route)
@@ -731,7 +507,7 @@ def metrics_worker():
             r = get_router_metrics()
         except Exception:
             r = {'frame_retries': 0, 'message_reroutes': 0}
-        log.info(f"Metrics | active={metrics['active_tunnels']} | total={metrics['total_tunnels']} | up={metrics['bytes_up']}B | down={metrics['bytes_down']}B | frame_retries={r['frame_retries']} | reroutes={r['message_reroutes']}")
+        log.info(f"Metrics | active={metrics['active_tunnels']} | total={metrics['total_tunnels']} | up={metrics['bytes_up']}B | down={metrics['bytes_down']}B | frame_retries={r['frame_retries']}")
 
 def cleanup_worker():
     while running:

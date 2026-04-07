@@ -4,19 +4,18 @@ import socket
 import time
 import base64
 import threading
-from src.core.encryptions import encrypt_message, decrypt_message, onion_encrypt_for_peer
+from src.core.encryptions import onion_encrypt_for_peer
 from src.utils.logger import get_logger
 from src.utils.config import (
-    FRAME_RETRY_ATTEMPTS, FRAME_RETRY_BASE_DELAY_MS, MESSAGE_ROUTE_RETRIES,
+    FRAME_RETRY_ATTEMPTS, FRAME_RETRY_BASE_DELAY_MS,
     CHANNEL_QUEUE_MAX, CHANNEL_WRITE_TIMEOUT, CHANNEL_IDLE_CLOSE_SECONDS,
-    ONION_ONLY, PREFER_WEBSOCKET, SOCKET_CONNECT_TIMEOUT,
+    PREFER_WEBSOCKET, SOCKET_CONNECT_TIMEOUT,
 )
 
 log = get_logger(__name__)
 
 # Router-level metrics
 FRAME_RETRIES = 0
-MESSAGE_REROUTES = 0
 TUNNEL_SOCKETS = {}  # (request_id, host, port) -> {'sock': socket, 'last': ts, 'q': list}
 
 # ---------------------------------------------------------------------------
@@ -77,12 +76,7 @@ def _start_tunnel_reader(sock, callback):
     threading.Thread(target=_reader, daemon=True).start()
 
 def get_router_metrics():
-    return { 'frame_retries': FRAME_RETRIES, 'message_reroutes': MESSAGE_REROUTES }
-
-"""
-Encryption is now provided by src.core.encryptions to decouple concerns.
-"""
-
+    return { 'frame_retries': FRAME_RETRIES }
 
 def _try_ws_send(next_hop: dict, frame_json: str) -> bool:
     """Try sending a frame via WebSocket if the peer supports it and WS is preferred."""
@@ -152,60 +146,35 @@ class Router:
             log.warning("No peers/routes available. Message not sent.")
             return
 
-        # Onion layering if all hops publish pub keys
+        # All hops must publish pub keys for onion routing
         can_onion = all(isinstance(h, dict) and h.get('pub') for h in route)
-        if can_onion:
-            try:
-                payload = {"data": data}
-                if return_path is not None:
-                    payload["return_path"] = return_path
-                if request_id is not None:
-                    payload["request_id"] = request_id
-
-                inner = payload
-                for i in range(len(route) - 1, -1, -1):
-                    next_hop = route[i + 1] if i < len(route) - 1 else None
-                    if next_hop is None:
-                        layer_plain = {"payload": inner}
-                    else:
-                        layer_plain = {"next_hop": next_hop, "inner": inner}
-                    sealed = onion_encrypt_for_peer(route[i]['pub'], json.dumps(layer_plain))
-                    inner = sealed
-
-                # inner is already sealed for route[0] — send directly
-                # without _send_frame_via_route which would double-encrypt.
-                envelope = {"encrypted_data": inner}
-                if not _send_raw_frame(route[0], envelope):
-                    log.error("relay_message (onion) failed to send to first hop")
-                return
-            except Exception as e:
-                log.error("Onion build failed, falling back: %s", e)
-
-        # Fallback legacy path with visible route
-        if ONION_ONLY:
-            log.warning("Onion-only mode: missing pubkeys; dropping message")
+        if not can_onion:
+            log.warning("Missing pubkeys on route; dropping message")
             return
-        envelope = {
-            "data": data,
-            "route": route,
-            "return_path": return_path,
-            "request_id": request_id,
-        }
-        full_route = list(route)
-        attempts = 0
-        sent = False
-        global MESSAGE_REROUTES
-        while attempts < MESSAGE_ROUTE_RETRIES:
-            sent = _send_frame_via_route(full_route, envelope)
-            if sent:
-                break
-            attempts += 1
-            full_route = self.build_random_route()
-            if destination:
-                full_route.append(destination)
-            MESSAGE_REROUTES += 1
-        if attempts >= MESSAGE_ROUTE_RETRIES and not sent:
-            log.error("relay_message failed after route retries")
+
+        try:
+            payload = {"data": data}
+            if return_path is not None:
+                payload["return_path"] = return_path
+            if request_id is not None:
+                payload["request_id"] = request_id
+
+            inner = payload
+            for i in range(len(route) - 1, -1, -1):
+                next_hop = route[i + 1] if i < len(route) - 1 else None
+                if next_hop is None:
+                    layer_plain = {"payload": inner}
+                else:
+                    layer_plain = {"next_hop": next_hop, "inner": inner}
+                sealed = onion_encrypt_for_peer(route[i]['pub'], json.dumps(layer_plain))
+                inner = sealed
+
+            # inner is already sealed for route[0] — send directly
+            envelope = {"encrypted_data": inner}
+            if not _send_raw_frame(route[0], envelope):
+                log.error("relay_message (onion) failed to send to first hop")
+        except Exception as e:
+            log.error("Onion build failed: %s", e)
 
     def forward_message(self, next_node, message_content):
         """
@@ -216,7 +185,10 @@ class Router:
         """
         payload = json.dumps(message_content)
         next_pub = next_node.get('pub') if isinstance(next_node, dict) else None
-        encrypted = onion_encrypt_for_peer(next_pub, payload) if next_pub else encrypt_message(payload)
+        if not next_pub:
+            log.warning("No public key for next hop; dropping forward")
+            return
+        encrypted = onion_encrypt_for_peer(next_pub, payload)
 
         # Persistent tunnel frames reuse a per-request socket to next hop
         if isinstance(message_content, dict) and message_content.get('type') in ('connect', 'data', 'close') and message_content.get('request_id'):
@@ -305,14 +277,6 @@ class Router:
         except Exception as e:
             log.error("Error sending to %s: %s", next_node, e)
 
-def direct_relay_message(data, destination, peers, return_path=None, request_id=None):
-    """
-    A top-level helper for modules (like `proxy.py`) that just want
-    to relay a message without manually instantiating a Router.
-    """
-    r = Router(node=None, peers=peers)
-    r.relay_message(data, destination, return_path=return_path, request_id=request_id)
-
 def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     """
     Build a route with length in the range [4,7] when available.
@@ -372,11 +336,13 @@ def _send_frame_via_route(route, envelope):
     if not route:
         log.warning("No route; cannot send frame")
         return
-    # Use onion layer if next hop published a public key
     next_hop = route[0]
     next_pub = next_hop.get('pub') if isinstance(next_hop, dict) else None
+    if not next_pub:
+        log.warning("No public key for first hop; cannot send frame")
+        return False
     payload = json.dumps(envelope)
-    encrypted = onion_encrypt_for_peer(next_pub, payload) if next_pub else encrypt_message(payload)
+    encrypted = onion_encrypt_for_peer(next_pub, payload)
     first_hop = route[0]
     attempt = 0
     delay_ms = FRAME_RETRY_BASE_DELAY_MS

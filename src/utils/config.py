@@ -157,6 +157,29 @@ if WS_TLS_CERT and WS_TLS_KEY and not WS_TLS_ACTIVE:
         "OBSCURA_WS_TLS_* paths set but certificate files not found; WebSocket servers use ws://"
     )
 
+# Kill switch and health reporting
+# ADMIN_PUB_PEM can be set directly as a PEM string, or loaded from a file path.
+_admin_pub_pem_raw = getenv_str("OBSCURA_ADMIN_PUB_PEM", "")
+_admin_pub_pem_path = getenv_str("OBSCURA_ADMIN_PUB_PEM_PATH", "")
+if _admin_pub_pem_raw and _admin_pub_pem_raw.startswith("-----"):
+    ADMIN_PUB_PEM = _admin_pub_pem_raw
+elif _admin_pub_pem_path:
+    try:
+        _resolved = _admin_pub_pem_path
+        if not os.path.isabs(_resolved):
+            _resolved = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                _resolved,
+            )
+        with open(_resolved, "r", encoding="utf-8") as _f:
+            ADMIN_PUB_PEM = _f.read().strip()
+    except Exception:
+        ADMIN_PUB_PEM = ""
+else:
+    ADMIN_PUB_PEM = ""
+KILL_SWITCH_CHECK_INTERVAL = getenv_int("OBSCURA_KILL_SWITCH_CHECK_INTERVAL", 30)
+NODE_HEALTH_REPORT_INTERVAL = getenv_int("OBSCURA_NODE_HEALTH_REPORT_INTERVAL", 15)
+
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
 EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT

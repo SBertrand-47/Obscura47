@@ -2,16 +2,17 @@ import socket
 import threading
 import json
 import time
+import sys
 from src.core.router import Router
-from src.core.encryptions import decrypt_message, onion_decrypt_with_priv, onion_decrypt_checked, ecc_load_or_create_keypair
+from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair
 from src.core.discover import listen_for_discovery, broadcast_discovery
-from src.core.internet_discovery import start_heartbeat
+from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer, get_ws_client
 from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
-    ONION_ONLY, NODE_KEY_PATH, NODE_WS_PORT,
+    NODE_KEY_PATH, NODE_WS_PORT,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE,
 )
 
@@ -30,6 +31,7 @@ class ObscuraNode:
         self.ws_port = NODE_WS_PORT
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
+        self._killed = False
         self.peers = []
         # Load or create persistent node ECDH keypair for onion layer
         self.priv_key, self.pub_pem = ecc_load_or_create_keypair(NODE_KEY_PATH)
@@ -144,16 +146,10 @@ class ObscuraNode:
             log.warning("No encrypted data found. Dropping message.")
             return
 
-        # Try onion layer first; fall back to legacy frame encryption
         decrypted_message = onion_decrypt_checked(self.priv_key, encrypted_data)
         if decrypted_message is None:
-            if ONION_ONLY:
-                log.warning("Onion-only mode: legacy frame rejected")
-                return
-            decrypted_message = decrypt_message(encrypted_data)
-            if decrypted_message is None:
-                log.error("Decryption failed. Dropping message.")
-                return
+            log.warning("Onion decryption failed; dropping frame")
+            return
 
         try:
             layer = json.loads(decrypted_message)
@@ -199,19 +195,6 @@ class ObscuraNode:
             if layer['type'] == 'close' and req_id:
                 with self._reverse_lock:
                     self._reverse_channels.pop(req_id, None)
-            return
-
-        # Legacy envelope with explicit route
-        if isinstance(layer, dict) and 'route' in layer:
-            hop_count = len(layer.get("route", []))
-            req_id = layer.get("request_id", "")
-            log.info("Received at %s:%s | hops_remaining=%d | request_id=%s", self.host, self.port, hop_count, req_id)
-            if layer["route"]:
-                next_hop = layer["route"].pop(0)
-                log.info("Forwarding to %s:%s | request_id=%s", next_hop['host'], next_hop['port'], req_id)
-                self.router.forward_message(next_hop, layer)
-            else:
-                log.info("Final destination reached at %s:%s | request_id=%s", self.host, self.port, req_id)
             return
 
         log.warning("Unrecognized frame shape; dropping")
@@ -306,10 +289,24 @@ class ObscuraNode:
         finally:
             client_socket.close()
 
+    def _shutdown(self, reason: str):
+        """Shutdown callback for kill switch activation."""
+        log.warning(f"Kill switch activated: {reason}")
+        self._killed = True
+        self.running = False
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
+        sys.exit(0)
+
     def run(self):
         """Start the node server in a separate daemon thread."""
         server_thread = threading.Thread(target=self.start_server, daemon=True)
         server_thread.start()
+
+        # Start kill switch monitor
+        start_kill_switch_monitor(self._shutdown)
 
 if __name__ == "__main__":
     node = ObscuraNode(port=5001)

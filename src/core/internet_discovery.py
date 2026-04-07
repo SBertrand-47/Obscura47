@@ -12,8 +12,8 @@ import ssl
 import time
 import threading
 import urllib.request
-from typing import List, Dict
-from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS, TLS_VERIFY
+from typing import List, Dict, Callable
+from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS, TLS_VERIFY, ADMIN_PUB_PEM, KILL_SWITCH_CHECK_INTERVAL
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -206,6 +206,98 @@ def start_internet_discovery(relay_peers: List[Dict], exit_peers: List[Dict], in
     t = threading.Thread(
         target=internet_discovery_loop,
         args=(relay_peers, exit_peers, interval),
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+def _ecdsa_verify_signature(pub_pem: str, message_bytes: bytes, signature_b64: str) -> bool:
+    """
+    Verify an ECDSA signature on a message using a public key in PEM format.
+    Returns True if signature is valid, False otherwise.
+    """
+    try:
+        from Crypto.PublicKey import ECC
+        from Crypto.Signature import DSS
+        from Crypto.Hash import SHA256
+        import base64
+
+        # Import the public key
+        pub_key = ECC.import_key(pub_pem)
+
+        # Decode the signature from base64
+        signature_bytes = base64.b64decode(signature_b64)
+
+        # Verify the signature
+        verifier = DSS.new(pub_key, mode='fips-186-3', encoding='binary')
+        hash_obj = SHA256.new(message_bytes)
+        verifier.verify(hash_obj, signature_bytes)
+        return True
+    except Exception as e:
+        log.debug(f"Signature verification failed: {e}")
+        return False
+
+
+def check_network_status() -> dict:
+    """
+    Check the registry for network status including kill switch state.
+    Returns a dict with at least 'kill_active' key.
+    On any error, returns {"kill_active": False} (fail-open).
+    """
+    try:
+        req = urllib.request.Request(
+            f"{REGISTRY_URL}/network/status",
+            headers=_registry_headers(),
+            method="GET"
+        )
+        ctx = _ssl_ctx()
+        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            result = json.loads(resp.read())
+            return result if isinstance(result, dict) else {"kill_active": False}
+    except Exception as e:
+        log.debug(f"Failed to check network status: {e}")
+        return {"kill_active": False}
+
+
+def kill_switch_monitor(shutdown_callback: Callable[[str], None]):
+    """
+    Monitor the registry for kill switch activation.
+    Runs in a loop, checking every KILL_SWITCH_CHECK_INTERVAL seconds.
+    If kill_active is True, verifies the signature (if ADMIN_PUB_PEM is configured)
+    and calls shutdown_callback(reason) if valid.
+    """
+    while True:
+        try:
+            status = check_network_status()
+            if status.get("kill_active", False):
+                reason = status.get("reason", "kill switch activated")
+                timestamp = status.get("timestamp", "")
+                signature = status.get("signature", "")
+
+                # Verify signature if ADMIN_PUB_PEM is configured
+                if ADMIN_PUB_PEM:
+                    message = f"KILL:{reason}:{timestamp}"
+                    if not _ecdsa_verify_signature(ADMIN_PUB_PEM, message.encode(), signature):
+                        log.warning(f"Kill switch signature verification failed, ignoring")
+                        time.sleep(KILL_SWITCH_CHECK_INTERVAL)
+                        continue
+
+                # Signature valid (or no verification configured), execute shutdown
+                log.warning(f"Kill switch activated: {reason}")
+                shutdown_callback(reason)
+                break
+        except Exception as e:
+            log.error(f"Error in kill switch monitor: {e}")
+
+        time.sleep(KILL_SWITCH_CHECK_INTERVAL)
+
+
+def start_kill_switch_monitor(shutdown_callback: Callable[[str], None]):
+    """Start the kill switch monitor in a daemon thread."""
+    t = threading.Thread(
+        target=kill_switch_monitor,
+        args=(shutdown_callback,),
         daemon=True,
     )
     t.start()
