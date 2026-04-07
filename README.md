@@ -48,7 +48,7 @@ python tray_app.py node+exit         # Tray mode, relay + exit
                                                                  ▼
 ┌────────┐   HTTP CONNECT   ┌────────┐  onion frame  ┌────────┐  onion frame  ┌────────┐   plain    ┌────────┐
 │ client │ ───────────────► │ proxy  │ ────────────► │ relay  │ ────────────► │  exit  │ ────────► │ origin │
-└────────┘                  └────────┘               │ (guard)│  … 3-6 hops … └────────┘           └────────┘
+└────────┘                  └────────┘               │ (guard)│  ... 3-6 hops ... └────────┘           └────────┘
                                  ▲                    └────────┘                   │
                                  │         reverse channel (same connections)      │
                                  └─────────────────────────────────────────────────┘
