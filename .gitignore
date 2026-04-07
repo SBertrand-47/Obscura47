@@ -45,9 +45,24 @@ Thumbs.db
 
 # App runtime outputs
 exit_health.json
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pid
+*.out
 
 # Admin private key (NEVER commit)
 admin_key.pem
+*.pyc
+*.pyo
+*.pyd
+
+# Per-role local env files used by helper scripts
+.env.node
+.env.exit
+.env.proxy
 
 # Build artifacts
 *.spec.bak
