@@ -71,11 +71,11 @@ def check_dependencies():
     if missing:
         print(f"\n[!] Missing dependencies: {', '.join(missing)}")
         print("    Install them with:\n")
-        print(f"    pip install -r requirement.txt\n")
+        print(f"    pip install -r requirements.txt\n")
         resp = input("    Install now? [Y/n] ").strip().lower()
         if resp in ("", "y", "yes"):
             import subprocess
-            req_path = os.path.join(os.path.dirname(__file__), "requirement.txt")
+            req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req_path])
             print()
         else:

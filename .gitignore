@@ -55,6 +55,7 @@ exit_health.json
 
 # Admin private key (NEVER commit)
 admin_key.pem
+admin_pub.pem
 *.pyc
 *.pyo
 *.pyd
@@ -63,6 +64,10 @@ admin_key.pem
 .env.node
 .env.exit
 .env.proxy
+
+# Local inventory/debug dumps
+folder_structure
+folder_structure.txt
 
 # Build artifacts
 *.spec.bak

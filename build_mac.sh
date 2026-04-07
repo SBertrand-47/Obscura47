@@ -6,7 +6,7 @@
 #
 #  Prerequisites:
 #    pip3 install pyinstaller
-#    pip3 install -r requirement.txt
+#    pip3 install -r requirements.txt
 # ─────────────────────────────────────────────────────────────
 
 set -e
@@ -35,7 +35,7 @@ fi
 
 # Install dependencies
 echo "[1/4] Installing dependencies..."
-pip3 install -r requirement.txt --quiet
+pip3 install -r requirements.txt --quiet
 
 HIDDEN_IMPORTS=(
     --hidden-import "src.core.proxy"

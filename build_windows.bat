@@ -6,7 +6,7 @@ REM            dist/Obscura47-CLI.exe  (single-file, console mode)
 REM
 REM  Prerequisites:
 REM    pip install pyinstaller
-REM    pip install -r requirement.txt
+REM    pip install -r requirements.txt
 REM ─────────────────────────────────────────────────────────────
 
 echo.
@@ -32,7 +32,7 @@ if errorlevel 1 (
 
 REM Install dependencies
 echo [1/4] Installing dependencies...
-pip install -r requirement.txt --quiet
+pip install -r requirements.txt --quiet
 
 REM ── Build GUI app (windowed, no console) ────────────────────
 echo [2/4] Building Obscura47 GUI (.exe)...

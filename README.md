@@ -14,7 +14,7 @@ contributing bandwidth as a relay node. No configuration needed.
 ```bash
 git clone https://github.com/your-repo/Obscura47.git
 cd Obscura47
-pip install -r requirement.txt
+pip install -r requirements.txt
 python join_network.py
 ```
 
@@ -90,7 +90,7 @@ python tray_app.py node+exit         # Tray mode, relay + exit
 Python 3.10+.
 
 ```bash
-pip install -r requirement.txt
+pip install -r requirements.txt
 cp .env.example .env       # optional, all vars have defaults
 ```
 
