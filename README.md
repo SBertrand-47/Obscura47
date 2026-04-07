@@ -25,6 +25,11 @@ python join_network.py node          # Relay node (recommended)
 python join_network.py node+exit     # Both relay and exit
 ```
 
+For the shared public network, contributors should point `OBSCURA_REGISTRY_URL`
+at the current project registry published by the operator. The sample config
+keeps this as a placeholder on purpose so the live registry can change without
+baking a host into the repo history.
+
 On Windows, double-click `Obscura47.exe` if you have the pre-built binary,
 or run the tray app to keep it in the background:
 
@@ -169,7 +174,7 @@ the full annotated list. The most commonly tweaked:
 | Variable | Default | Purpose |
 |---|---|---|
 | `OBSCURA_PROXY_PORT` | `9047` | Local HTTP CONNECT listener |
-| `OBSCURA_REGISTRY_URL` | `http://localhost:8470` | Registry endpoint for discovery |
+| `OBSCURA_REGISTRY_URL` | `http://localhost:8470` | Registry endpoint for discovery; use the operator-published shared registry for the public network |
 | `OBSCURA_PREFER_WEBSOCKET` | `true` | Prefer ws/wss over raw TCP |
 | `OBSCURA_GUARD_ENABLED` | `true` | Pin first-hop to a persistent guard set |
 | `OBSCURA_GUARD_COUNT` | `3` | Size of the guard set |
