@@ -99,6 +99,24 @@ SOCKET_CONNECT_TIMEOUT = float(os.getenv("OBSCURA_SOCKET_CONNECT_TIMEOUT", "5.0"
 ONION_ONLY = getenv_str("OBSCURA_ONION_ONLY", "false").lower() in ("1", "true", "yes")
 JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "yes")
 
+# Minimal persistent audit logs. Keep these narrow to preserve anonymity:
+# registry admin actions and exit egress summaries only, no client-origin log.
+AUDIT_LOG_DIR = getenv_str(
+    "OBSCURA_AUDIT_LOG_DIR",
+    os.path.join(os.path.expanduser("~"), ".obscura47", "audit"),
+)
+AUDIT_RETENTION_DAYS = getenv_int("OBSCURA_AUDIT_RETENTION_DAYS", 14)
+REGISTRY_ADMIN_AUDIT_ENABLED = getenv_str("OBSCURA_REGISTRY_ADMIN_AUDIT_ENABLED", "true").lower() in ("1", "true", "yes")
+REGISTRY_ADMIN_AUDIT_PATH = getenv_str(
+    "OBSCURA_REGISTRY_ADMIN_AUDIT_PATH",
+    os.path.join(AUDIT_LOG_DIR, "registry_admin.jsonl"),
+)
+EXIT_EGRESS_AUDIT_ENABLED = getenv_str("OBSCURA_EXIT_EGRESS_AUDIT_ENABLED", "true").lower() in ("1", "true", "yes")
+EXIT_EGRESS_AUDIT_PATH = getenv_str(
+    "OBSCURA_EXIT_EGRESS_AUDIT_PATH",
+    os.path.join(AUDIT_LOG_DIR, "exit_egress.jsonl"),
+)
+
 
 # Persistent key paths (role-specific)
 NODE_KEY_PATH = getenv_str("OBSCURA_NODE_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "node_key.pem"))
@@ -183,5 +201,4 @@ NODE_HEALTH_REPORT_INTERVAL = getenv_int("OBSCURA_NODE_HEALTH_REPORT_INTERVAL", 
 # Back-compat aliases used by some modules
 NODE_MULTICAST_PORT = NODE_DISCOVERY_PORT
 EXIT_NODE_MULTICAST_PORT = EXIT_DISCOVERY_PORT
-
 

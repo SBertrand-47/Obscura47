@@ -1,7 +1,8 @@
 """Integration tests for the FastAPI registry server."""
+import importlib
+import json
 import os
 import tempfile
-import importlib
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,9 +13,12 @@ from src.core.encryptions import ecc_generate_keypair, ecdsa_sign
 def client(tmp_path, monkeypatch):
     """Return a FastAPI TestClient with a fresh isolated SQLite database."""
     db_path = str(tmp_path / "test_registry.db")
+    audit_path = str(tmp_path / "registry_admin.jsonl")
     monkeypatch.setenv("OBSCURA_REGISTRY_DB_PATH", db_path)
     monkeypatch.setenv("OBSCURA_REGISTRY_ADMIN_KEY", "test-admin-key")
     monkeypatch.setenv("OBSCURA_REGISTRY_RATE_LIMIT", "1000")  # high for tests
+    monkeypatch.setenv("OBSCURA_REGISTRY_ADMIN_AUDIT_ENABLED", "true")
+    monkeypatch.setenv("OBSCURA_REGISTRY_ADMIN_AUDIT_PATH", audit_path)
 
     # Reload registry_server to pick up new env vars
     import registry_server
@@ -24,6 +28,7 @@ def client(tmp_path, monkeypatch):
     registry_server._rate_buckets.clear()
 
     with TestClient(registry_server.app) as c:
+        c.audit_path = audit_path
         yield c
 
 
@@ -49,9 +54,9 @@ class TestBasicEndpoints:
         r = client.get("/peers")
         assert r.status_code == 200
         peers = r.json()
-        assert len(peers) == 2
+        assert len(peers) == 1
         roles = {p["role"] for p in peers}
-        assert roles == {"node", "exit"}
+        assert roles == {"node"}
 
     def test_peers_role_filter(self, client):
         client.post("/register", json={"role": "node", "port": 5001})
@@ -155,6 +160,24 @@ class TestAdminAPI:
             headers={"Authorization": "Bearer test-admin-key"},
         )
         assert r.status_code == 404
+
+    def test_delete_with_admin_key_writes_audit_event(self, client):
+        client.post("/register", json={"role": "node", "port": 5001})
+        r = client.delete(
+            "/peers/testclient:5001",
+            headers={"Authorization": "Bearer test-admin-key"},
+        )
+        assert r.status_code == 200
+
+        with open(client.audit_path, "r", encoding="utf-8") as fh:
+            events = [json.loads(line) for line in fh if line.strip()]
+
+        assert len(events) == 1
+        assert events[0]["event"] == "admin_action"
+        assert events[0]["action"] == "remove_peer"
+        assert events[0]["allowed"] is True
+        assert events[0]["source_ip"] == "testclient"
+        assert events[0]["target"] == "testclient:5001"
 
 
 # ── Persistence ───────────────────────────────────────────────────
