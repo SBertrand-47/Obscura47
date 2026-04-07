@@ -45,3 +45,9 @@ Thumbs.db
 
 # App runtime outputs
 exit_health.json
+
+# Admin private key (NEVER commit)
+admin_key.pem
+
+# Build artifacts
+*.spec.bak
