@@ -1,7 +1,7 @@
 # Obscura47
 
 Obscura47 is a Tor-style anonymous overlay network written in Python. It routes
-TCP traffic through 4–7 encrypted hops using onion layering, with dual transport
+TCP traffic through 4-7 encrypted hops using onion layering, with dual transport
 (WebSocket + TCP), a FastAPI registry for internet-wide peer discovery, ECDSA
 challenge-response auth, guard-node pinning, and bidirectional reverse channels
 for NAT traversal.
@@ -48,7 +48,7 @@ python tray_app.py node+exit         # Tray mode, relay + exit
                                                                  ▼
 ┌────────┐   HTTP CONNECT   ┌────────┐  onion frame  ┌────────┐  onion frame  ┌────────┐   plain    ┌────────┐
 │ client │ ───────────────► │ proxy  │ ────────────► │ relay  │ ────────────► │  exit  │ ────────► │ origin │
-└────────┘                  └────────┘               │ (guard)│  … 3–6 hops … └────────┘           └────────┘
+└────────┘                  └────────┘               │ (guard)│  ... 3-6 hops ... └────────┘           └────────┘
                                  ▲                    └────────┘                   │
                                  │         reverse channel (same connections)      │
                                  └─────────────────────────────────────────────────┘
@@ -70,7 +70,7 @@ python tray_app.py node+exit         # Tray mode, relay + exit
 
 ## Features
 
-- **Onion routing**: 4–7 hops, ECDH P-256 + AES-GCM per layer, onion-only
+- **Onion routing**: 4-7 hops, ECDH P-256 + AES-GCM per layer, onion-only
 - **Bidirectional reverse channels**: responses flow back on the same connections
   that carried requests, solving NAT traversal without requiring inbound ports
 - **Guard-node pinning**: persistent first-hop commitment (Tor-style)
@@ -197,7 +197,7 @@ website. Your IP is what the website sees. Exit nodes require admin approval
 before they receive traffic. Only run an exit if you understand the implications.
 
 **As a proxy user**, you browse the internet through the Obscura network. Your
-traffic is encrypted through 4–7 hops before reaching the exit. Configure your
+traffic is encrypted through 4-7 hops before reaching the exit. Configure your
 browser to use `127.0.0.1:9047` as an HTTP proxy.
 
 ## Running the Tests
