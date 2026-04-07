@@ -12,7 +12,7 @@ contributing bandwidth as a relay node. No configuration needed.
 ## Quick Join (for contributors)
 
 ```bash
-git clone https://github.com/your-repo/Obscura47.git
+git clone https://github.com/SBertrand-47/Obscura47.git
 cd Obscura47
 pip install -r requirements.txt
 python join_network.py

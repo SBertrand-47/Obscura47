@@ -44,6 +44,7 @@ Thumbs.db
 *.log
 
 # App runtime outputs
+exit_health.json
 *.db
 *.db-shm
 *.db-wal
