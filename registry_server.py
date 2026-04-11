@@ -28,12 +28,14 @@ import secrets
 import time
 import base64
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 
 import aiosqlite
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 try:
@@ -56,6 +58,8 @@ REGISTRY_ADMIN_AUDIT_PATH = os.getenv(
     "OBSCURA_REGISTRY_ADMIN_AUDIT_PATH",
     os.path.join(os.path.expanduser("~"), ".obscura47", "audit", "registry_admin.jsonl"),
 )
+DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
+DASHBOARD_DIST_DIR = DASHBOARD_DIR / "dist"
 # Admin public key: read from inline PEM or file path
 _admin_pub_raw = os.getenv("OBSCURA_ADMIN_PUB_PEM", "")
 _admin_pub_path = os.getenv("OBSCURA_ADMIN_PUB_PEM_PATH", "")
@@ -165,6 +169,12 @@ class PeerHealthInfo(BaseModel):
 class AdminHealthResponse(BaseModel):
     total_peers: int
     peers: list[PeerHealthInfo]
+
+
+class AdminPeerInfo(PeerHealthInfo):
+    pub: str | None = None
+    ws_port: int | None = None
+    ws_tls: bool | None = None
 
 
 # ── Pending challenges (in-memory, short-lived) ─────────────────
@@ -335,16 +345,21 @@ async def get_stats() -> tuple[dict[str, int], int]:
 async def get_unapproved_exits() -> list[dict]:
     """Get all pending (unapproved) exit nodes."""
     cursor = await DB.execute(
-        "SELECT id, host, port, last_heartbeat, approved FROM peers WHERE role = 'exit' AND approved = 0 ORDER BY last_heartbeat DESC"
+        "SELECT id, host, port, pub_pem, ws_port, ws_tls, last_heartbeat, approved FROM peers WHERE role = 'exit' AND approved = 0 ORDER BY last_heartbeat DESC"
     )
     rows = await cursor.fetchall()
+    now = time.time()
     return [
         {
             "peer_id": r[0],
             "host": r[1],
             "port": r[2],
-            "last_heartbeat": r[3],
-            "approved": r[4],
+            "pub": r[3],
+            "ws_port": r[4],
+            "ws_tls": bool(r[5]) if r[5] is not None else None,
+            "last_heartbeat": r[6],
+            "time_since_heartbeat": now - r[6],
+            "approved": bool(r[7]),
         }
         for r in rows
     ]
@@ -410,7 +425,7 @@ async def set_kill_inactive() -> None:
 async def get_all_peers_with_details() -> list[dict]:
     """Get all peers (including stale) with detailed info for admin health endpoint."""
     cursor = await DB.execute(
-        "SELECT id, host, port, role, approved, last_heartbeat FROM peers ORDER BY last_heartbeat DESC"
+        "SELECT id, host, port, role, approved, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers ORDER BY last_heartbeat DESC"
     )
     rows = await cursor.fetchall()
     now = time.time()
@@ -421,11 +436,43 @@ async def get_all_peers_with_details() -> list[dict]:
             "port": r[2],
             "role": r[3],
             "approved": bool(r[4]),
-            "last_heartbeat": r[5],
-            "time_since_heartbeat": now - r[5],
+            "pub": r[5],
+            "ws_port": r[6],
+            "ws_tls": bool(r[7]) if r[7] is not None else None,
+            "last_heartbeat": r[8],
+            "time_since_heartbeat": now - r[8],
         }
         for r in rows
     ]
+
+
+async def get_dashboard_summary() -> dict:
+    """Return the admin dashboard view backed by the registry SQLite DB."""
+    peers = await get_all_peers_with_details()
+    status = await get_network_status()
+    live_cutoff = PEER_TTL
+    pending_exits = [p for p in peers if p["role"] == "exit" and not p["approved"]]
+    approved_exits = [p for p in peers if p["role"] == "exit" and p["approved"]]
+    live_peers = [p for p in peers if p["time_since_heartbeat"] <= live_cutoff]
+    stale_peers = [p for p in peers if p["time_since_heartbeat"] > live_cutoff]
+    role_counts: dict[str, int] = {}
+    for peer in peers:
+        role_counts[peer["role"]] = role_counts.get(peer["role"], 0) + 1
+    return {
+        "status": "ok",
+        "peer_ttl": PEER_TTL,
+        "network": status,
+        "summary": {
+            "total": len(peers),
+            "live": len(live_peers),
+            "stale": len(stale_peers),
+            "pending_exits": len(pending_exits),
+            "approved_exits": len(approved_exits),
+            "roles": role_counts,
+        },
+        "pending_exits": pending_exits,
+        "peers": peers,
+    }
 
 
 # ── Background tasks ─────────────────────────────────────────────
@@ -501,6 +548,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+if (DASHBOARD_DIST_DIR / "assets").exists():
+    app.mount("/dashboard/assets", StaticFiles(directory=DASHBOARD_DIST_DIR / "assets"), name="dashboard-assets")
+
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
@@ -538,6 +588,18 @@ def _require_admin_auth(request: Request, authorization: str | None, action: str
 
 
 # ── Endpoints ────────────────────────────────────────────────────
+
+@app.get("/admin/dashboard", response_class=HTMLResponse)
+async def admin_dashboard():
+    """Serve the React admin dashboard when it has been built."""
+    index_path = DASHBOARD_DIST_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(
+            503,
+            detail="Dashboard is not built. Run `npm install && npm run build` in the dashboard directory.",
+        )
+    return FileResponse(index_path)
+
 
 @app.post("/register")
 async def register_peer(body: PeerRegistration, request: Request):
@@ -655,6 +717,18 @@ async def remove_peer(peer_id: str, request: Request, authorization: str | None 
     return {"ok": True, "deleted": peer_id}
 
 
+@app.post("/admin/remove/{peer_id:path}")
+async def admin_remove_peer(peer_id: str, request: Request, authorization: str | None = Header(default=None)):
+    """Admin-only compatibility endpoint: remove a specific peer."""
+    _require_admin_auth(request, authorization, "remove_peer", peer_id)
+
+    deleted = await delete_peer(peer_id)
+    if not deleted:
+        raise HTTPException(404, detail="Peer not found")
+    print(f"[registry] Admin removed peer {peer_id}")
+    return {"ok": True, "deleted": peer_id}
+
+
 # ── Exit Node Approval Endpoints ─────────────────────────────────
 
 @app.get("/admin/pending")
@@ -663,7 +737,7 @@ async def list_pending_exits(request: Request, authorization: str | None = Heade
     _require_admin_auth(request, authorization, "list_pending_exits")
 
     pending = await get_unapproved_exits()
-    return {"pending_exits": pending}
+    return {"pending_exits": pending, "pending": pending}
 
 
 @app.post("/admin/approve/{peer_id:path}")
@@ -731,6 +805,26 @@ async def admin_health_check(request: Request, authorization: str | None = Heade
         total_peers=len(all_peers),
         peers=[PeerHealthInfo(**p) for p in all_peers]
     )
+
+
+@app.get("/admin/peers")
+async def admin_list_peers(request: Request, authorization: str | None = Header(default=None)):
+    """Admin-only: list all peers with approval and transport details."""
+    _require_admin_auth(request, authorization, "list_admin_peers")
+
+    all_peers = await get_all_peers_with_details()
+    return {
+        "total_peers": len(all_peers),
+        "peers": [AdminPeerInfo(**p) for p in all_peers],
+    }
+
+
+@app.get("/admin/dashboard/data")
+async def admin_dashboard_data(request: Request, authorization: str | None = Header(default=None)):
+    """Admin-only: combined data needed by the React dashboard."""
+    _require_admin_auth(request, authorization, "view_dashboard")
+
+    return await get_dashboard_summary()
 
 
 # ── Main ─────────────────────────────────────────────────────────
