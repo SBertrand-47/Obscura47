@@ -179,6 +179,46 @@ class TestAdminAPI:
         assert events[0]["source_ip"] == "testclient"
         assert events[0]["target"] == "testclient:5001"
 
+    def test_admin_peers_lists_sqlite_registry_peers(self, client):
+        client.post("/register", json={"role": "node", "port": 5001, "ws_port": 5002})
+        client.post("/register", json={"role": "exit", "port": 6000, "ws_port": 6001})
+
+        r = client.get(
+            "/admin/peers",
+            headers={"Authorization": "Bearer test-admin-key"},
+        )
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total_peers"] == 2
+        assert {p["role"] for p in data["peers"]} == {"node", "exit"}
+        exit_peer = next(p for p in data["peers"] if p["role"] == "exit")
+        assert exit_peer["approved"] is False
+        assert exit_peer["ws_port"] == 6001
+
+    def test_dashboard_data_highlights_pending_exits(self, client):
+        client.post("/register", json={"role": "node", "port": 5001})
+        client.post("/register", json={"role": "exit", "port": 6000, "ws_port": 6001})
+
+        r = client.get(
+            "/admin/dashboard/data",
+            headers={"Authorization": "Bearer test-admin-key"},
+        )
+
+        assert r.status_code == 200
+        data = r.json()
+        assert data["summary"]["total"] == 2
+        assert data["summary"]["pending_exits"] == 1
+        assert data["pending_exits"][0]["peer_id"] == "testclient:6000"
+
+    def test_dashboard_data_requires_admin_key(self, client):
+        r = client.get("/admin/dashboard/data")
+        assert r.status_code == 403
+
+    def test_admin_dashboard_reports_when_not_built(self, client):
+        r = client.get("/admin/dashboard")
+        assert r.status_code in (200, 503)
+
 
 # ── Persistence ───────────────────────────────────────────────────
 
