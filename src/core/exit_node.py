@@ -9,7 +9,7 @@ from src.utils.audit import write_audit_event
 from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
-from src.core.ws_transport import WSServer, get_ws_client
+from src.core.ws_transport import WSServer
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -38,8 +38,9 @@ class ExitNode:
         self.tunnels = {}  # request_id -> { 'sock': socket, 'return_path': dict }
         self.priv_key, self.pub_pem = ecc_load_or_create_keypair(EXIT_KEY_PATH)
 
-        # Initialize global WS client for outbound WebSocket connections
-        get_ws_client(self.priv_key, self.pub_pem)
+        # Exit nodes do not initiate outbound WebSocket connections - their
+        # reverse-channel writes reuse the inbound WSServer connection via
+        # the per-connection ``_reverse_send`` closure.  No WSClient needed.
 
         # Start peer discovery
         threading.Thread(target=self.listen_for_proxies, daemon=True).start()
