@@ -28,6 +28,32 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 
+def _ws_is_open(ws) -> bool:
+    """Return whether a websockets connection is still usable.
+
+    websockets has changed its public connection-state API across releases:
+    older versions expose ``open`` / ``closed`` booleans, while newer asyncio
+    connections expose a ``state`` enum.  Keep the pool compatible so tunnel
+    frames reuse the same WebSocket and preserve their reverse channel.
+    """
+    open_attr = getattr(ws, "open", None)
+    if isinstance(open_attr, bool):
+        return open_attr
+
+    closed_attr = getattr(ws, "closed", None)
+    if isinstance(closed_attr, bool):
+        return not closed_attr
+
+    state = getattr(ws, "state", None)
+    state_name = getattr(state, "name", None)
+    if isinstance(state_name, str):
+        return state_name.upper() == "OPEN"
+    if isinstance(state, int):
+        return state == 1
+
+    return True
+
+
 def _build_server_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     """Build an SSL context for the WSServer (TLS termination)."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -44,7 +70,7 @@ def _build_client_ssl_context(verify: bool) -> ssl.SSLContext:
     return ctx
 
 
-# ── WSServer ─────────────────────────────────────────────────────
+# -- WSServer -----------------------------------------------------
 
 class WSServer:
     """
@@ -182,7 +208,7 @@ class WSServer:
             self._server.close()
 
 
-# ── WSClient ─────────────────────────────────────────────────────
+# -- WSClient -----------------------------------------------------
 
 class WSClient:
     """
@@ -292,7 +318,7 @@ class WSClient:
         key = (host, port, tls)
         with self._conn_lock:
             entry = self._connections.get(key)
-            if entry and entry.get("ws") and entry["ws"].open:
+            if entry and entry.get("ws") and _ws_is_open(entry["ws"]):
                 entry["last"] = time.time()
                 return entry["ws"]
 
@@ -397,7 +423,7 @@ class WSClient:
                     log.info(f"Closed idle connection to {host}:{port}")
 
 
-# ── Singleton client instance (lazily initialized per node) ──────
+# -- Singleton client instance (lazily initialized per node) ------
 
 _global_client: WSClient | None = None
 _client_lock = threading.Lock()
