@@ -7,13 +7,14 @@ from src.core.router import Router
 from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
-from src.core.ws_transport import WSServer, get_ws_client
+from src.core.ws_transport import WSServer, WSClient
 from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     NODE_KEY_PATH, NODE_WS_PORT,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE,
+    CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS, TLS_VERIFY,
 )
 
 log = get_logger(__name__)
@@ -46,9 +47,10 @@ class ObscuraNode:
 
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Initialize global WS client for outbound WebSocket connections.
-        # The on_receive callback handles reverse-channel frames arriving
-        # on outbound WS connections (responses flowing back from downstream).
+        # Own WSClient for outbound WebSocket connections.
+        # Each role (proxy/node) owns a separate WSClient so that reverse
+        # frames arriving on this role's outbound connections are handled
+        # by this role's handler - never intercepted by another role's.
         def _ws_reverse_handler(message):
             try:
                 frame = json.loads(message) if isinstance(message, str) else message
@@ -57,7 +59,13 @@ class ObscuraNode:
             except Exception as e:
                 log.error("WS reverse frame error: %s", e)
 
-        get_ws_client(self.priv_key, self.pub_pem, on_receive=_ws_reverse_handler)
+        self.ws_client = WSClient(
+            self.priv_key, self.pub_pem,
+            queue_max=CHANNEL_QUEUE_MAX,
+            idle_close_seconds=CHANNEL_IDLE_CLOSE_SECONDS,
+            tls_verify=TLS_VERIFY,
+            on_receive=_ws_reverse_handler,
+        )
 
         # Start discovery listener continuously
         threading.Thread(
