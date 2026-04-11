@@ -19,6 +19,29 @@ FRAME_RETRIES = 0
 TUNNEL_SOCKETS = {}  # (request_id, host, port) -> {'sock': socket, 'last': ts, 'q': list}
 
 # ---------------------------------------------------------------------------
+# Per-role WebSocket client binding
+# ---------------------------------------------------------------------------
+# The proxy and the node each own their own WSClient (distinct identity and
+# distinct reverse-channel handler).  When several roles share a process, a
+# single process-wide WSClient singleton would let one role's reverse handler
+# intercept frames meant for another.  Callers pass their client explicitly
+# through ``_try_ws_send``.  For module-level send paths (used by the proxy),
+# ``set_proxy_ws_client`` installs the proxy's client as the default.
+# ---------------------------------------------------------------------------
+_PROXY_WS_CLIENT = None
+
+
+def set_proxy_ws_client(client):
+    """Install the proxy's WSClient as the default for module-level sends.
+
+    Called by ``proxy.start_proxy`` during startup so that
+    ``start_tunnel`` / ``send_tunnel_data`` / ``close_tunnel`` send outbound
+    frames through the proxy's own client (with the proxy's reverse handler).
+    """
+    global _PROXY_WS_CLIENT
+    _PROXY_WS_CLIENT = client
+
+# ---------------------------------------------------------------------------
 # Reverse-channel infrastructure
 # ---------------------------------------------------------------------------
 # When the proxy or a relay opens a persistent outbound socket to the next hop,
@@ -78,8 +101,14 @@ def _start_tunnel_reader(sock, callback):
 def get_router_metrics():
     return { 'frame_retries': FRAME_RETRIES }
 
-def _try_ws_send(next_hop: dict, frame_json: str) -> bool:
-    """Try sending a frame via WebSocket if the peer supports it and WS is preferred."""
+def _try_ws_send(next_hop: dict, frame_json: str, ws_client=None) -> bool:
+    """Try sending a frame via WebSocket if the peer supports it and WS is preferred.
+
+    ``ws_client`` is the WSClient instance the caller wants to send through.
+    When ``None``, falls back to the legacy process-wide singleton via
+    ``get_ws_client()`` - this path is kept only for backward compatibility
+    with tests that monkeypatch ``get_ws_client``.
+    """
     if not PREFER_WEBSOCKET:
         return False
     if not isinstance(next_hop, dict):
@@ -89,8 +118,10 @@ def _try_ws_send(next_hop: dict, frame_json: str) -> bool:
         return False
     ws_tls = bool(next_hop.get('ws_tls'))
     try:
-        from src.core.ws_transport import get_ws_client
-        client = get_ws_client()
+        client = ws_client
+        if client is None:
+            from src.core.ws_transport import get_ws_client
+            client = get_ws_client()
         if client is None:
             return False
         return client.send_frame(next_hop['host'], ws_port, frame_json, tls=ws_tls)
@@ -106,6 +137,16 @@ class Router:
         """
         self.node = node
         self.peers = peers
+
+    def _ws_client(self):
+        """Return this role's WSClient, if any.
+
+        Reads ``ws_client`` off the owning node so that outbound WS sends
+        authenticate with this role's identity and route reverse frames
+        through this role's handler.  Returns ``None`` when no client is
+        bound (falls back to TCP via ``_try_ws_send``).
+        """
+        return getattr(self.node, 'ws_client', None) if self.node is not None else None
 
     def build_random_route(self, hops=3):
         """
@@ -171,7 +212,13 @@ class Router:
 
             # inner is already sealed for route[0] — send directly
             envelope = {"encrypted_data": inner}
-            if not _send_raw_frame(route[0], envelope):
+            ws_client = self._ws_client()
+            sent = (
+                _send_raw_frame(route[0], envelope, ws_client=ws_client)
+                if ws_client is not None
+                else _send_raw_frame(route[0], envelope)
+            )
+            if not sent:
                 log.error("relay_message (onion) failed to send to first hop")
         except Exception as e:
             log.error("Onion build failed: %s", e)
@@ -199,7 +246,7 @@ class Router:
     def _send_to_next_hop_persistent(self, next_node, encrypted_message, request_id: str, is_close: bool = False):
         # Try WebSocket first
         frame_json = json.dumps({"encrypted_data": encrypted_message})
-        if _try_ws_send(next_node, frame_json):
+        if _try_ws_send(next_node, frame_json, ws_client=self._ws_client()):
             log.info("Sent (persist/WS) to %s:%s", next_node['host'], next_node.get('ws_port', '?'))
             return
 
@@ -262,7 +309,7 @@ class Router:
         frame_json = json.dumps({"encrypted_data": encrypted_message})
 
         # Try WebSocket
-        if _try_ws_send(next_node, frame_json):
+        if _try_ws_send(next_node, frame_json, ws_client=self._ws_client()):
             log.info("Sent encrypted message to %s:%s (WS)", next_node['host'], next_node.get('ws_port', '?'))
             return
 
@@ -305,7 +352,7 @@ def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
 
     return random.sample(peers, hop_target)
 
-def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
+def _send_raw_frame(next_hop: dict, envelope: dict, ws_client=None) -> bool:
     """Send a pre-built envelope (already encrypted) to a peer without adding encryption.
 
     Used by relay_message's onion path where layers are already sealed.
@@ -313,7 +360,7 @@ def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
     frame_json = json.dumps(envelope)
 
     # Try WebSocket first
-    if _try_ws_send(next_hop, frame_json):
+    if _try_ws_send(next_hop, frame_json, ws_client=ws_client):
         log.info("Sent raw frame to %s:%s (WS)", next_hop['host'], next_hop.get('ws_port', '?'))
         return True
 
@@ -331,8 +378,16 @@ def _send_raw_frame(next_hop: dict, envelope: dict) -> bool:
         return False
 
 
-def _send_frame_via_route(route, envelope):
-    """Encrypt envelope and send to the first hop of route."""
+def _send_frame_via_route(route, envelope, ws_client=None):
+    """Encrypt envelope and send to the first hop of route.
+
+    ``ws_client`` is the sender's WebSocket client.  When omitted, defaults
+    to the proxy-installed client from ``set_proxy_ws_client``.  This keeps
+    reverse frames flowing through the caller's own handler even when
+    multiple roles run in a single process.
+    """
+    if ws_client is None:
+        ws_client = _PROXY_WS_CLIENT
     if not route:
         log.warning("No route; cannot send frame")
         return
@@ -357,7 +412,7 @@ def _send_frame_via_route(route, envelope):
     while attempt < FRAME_RETRY_ATTEMPTS:
         try:
             # Try WebSocket first (for any frame type)
-            if _try_ws_send(first_hop, frame_json):
+            if _try_ws_send(first_hop, frame_json, ws_client=ws_client):
                 log.info("Sent frame to %s:%s (WS)", first_hop['host'], first_hop.get('ws_port', '?'))
                 return True
 
