@@ -8,10 +8,11 @@ import sys
 import os
 import base64
 from src.utils.logger import get_logger
-from src.core.router import build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback
+from src.core.router import build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback, set_proxy_ws_client
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
 from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv
+from src.core.ws_transport import WSClient
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
@@ -268,11 +269,63 @@ def _handle_reverse_response(frame: dict):
     log.warning(f"No encrypted_response in reverse frame | request_id={req_id}")
 
 
+def _proxy_ws_on_receive(message):
+    """WSClient on_receive adapter for the proxy.
+
+    Incoming reverse-channel frames arrive as JSON strings on the proxy's
+    outbound WebSocket connections.  Parse them and hand off to the
+    existing dict-based reverse-frame handler.
+    """
+    try:
+        frame = json.loads(message) if isinstance(message, str) else message
+    except Exception as e:
+        log.error(f"Proxy WS on_receive parse error: {e}")
+        return
+    if not isinstance(frame, dict):
+        return
+    if frame.get('type') in ('reverse_data', 'reverse_close'):
+        try:
+            _handle_reverse_response(frame)
+        except Exception as e:
+            log.error(f"Proxy reverse handler error: {e}")
+
+
+_proxy_ws_client_instance = None
+
+
+def _init_proxy_ws_client():
+    """Create the proxy's own WSClient and register it for outbound sends.
+
+    Each role owns its own WSClient so that reverse-channel frames arriving
+    on this role's outbound WebSocket connections are processed by this
+    role's handler.  Sharing a process-wide singleton across roles lets one
+    role's handler intercept frames meant for another.
+    """
+    global _proxy_ws_client_instance
+    if _proxy_ws_client_instance is not None:
+        return _proxy_ws_client_instance
+    from src.utils.config import (
+        CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS, TLS_VERIFY,
+    )
+    _proxy_ws_client_instance = WSClient(
+        _proxy_priv, _proxy_pub_pem,
+        queue_max=CHANNEL_QUEUE_MAX,
+        idle_close_seconds=CHANNEL_IDLE_CLOSE_SECONDS,
+        tls_verify=TLS_VERIFY,
+        on_receive=_proxy_ws_on_receive,
+    )
+    set_proxy_ws_client(_proxy_ws_client_instance)
+    return _proxy_ws_client_instance
+
+
 def start_proxy():
     """Starts the proxy server and continuously listens for clients."""
     global running
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+
+    # Own WSClient (identity + reverse-channel handler) for outbound WS sends.
+    _init_proxy_ws_client()
 
     # Register reverse-channel callback so responses arriving on outbound
     # tunnel sockets are decrypted and delivered to the pending client.
