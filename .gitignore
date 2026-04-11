@@ -1,6 +1,8 @@
 # Virtual environments
 venv/
 .venv/
+node_modules/
+dashboard/node_modules/
 
 # Local environment files
 .env
