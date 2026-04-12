@@ -1,3 +1,4 @@
+import ipaddress
 import socket
 import json
 import threading
@@ -16,6 +17,7 @@ from src.utils.config import (
     EXIT_KEY_PATH, EXIT_WS_PORT,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE, TUNNEL_IDLE_SECONDS,
     EXIT_EGRESS_AUDIT_ENABLED, EXIT_EGRESS_AUDIT_PATH, AUDIT_RETENTION_DAYS,
+    EXIT_DENY_PRIVATE_IPS, EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS,
 )
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -24,13 +26,19 @@ DISCOVERY_INTERVAL = CFG_DISCOVERY_INTERVAL  # Broadcast interval
 log = get_logger(__name__)
 
 class ExitNode:
-    def __init__(self, host='0.0.0.0', port=6000):
+    def __init__(self, host='0.0.0.0', port=6000, lan_discovery=True):
         """The ExitNode listens for final relay messages, fetches external URLs,
         and sends the response back through the route.
+
+        Args:
+            lan_discovery: Whether to broadcast on LAN multicast. Disable for
+                           unapproved exit nodes to prevent them from being
+                           discovered by local proxies before admin approval.
         """
         self.host = host
         self.port = port
         self.ws_port = EXIT_WS_PORT
+        self.lan_discovery = lan_discovery
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
         self._killed = False
@@ -42,9 +50,12 @@ class ExitNode:
         # reverse-channel writes reuse the inbound WSServer connection via
         # the per-connection ``_reverse_send`` closure.  No WSClient needed.
 
-        # Start peer discovery
-        threading.Thread(target=self.listen_for_proxies, daemon=True).start()
-        threading.Thread(target=self.continuous_discovery, daemon=True).start()
+        # Start peer discovery (LAN multicast only when approved)
+        if lan_discovery:
+            threading.Thread(target=self.listen_for_proxies, daemon=True).start()
+            threading.Thread(target=self.continuous_discovery, daemon=True).start()
+        else:
+            log.info("LAN discovery disabled for this exit node")
 
         self.ws_tls_enabled = WS_TLS_ACTIVE
 
@@ -328,9 +339,40 @@ class ExitNode:
         }
         self._send_to_proxy(return_path, packet)
 
+    @staticmethod
+    def _is_private_ip(host: str) -> bool:
+        """Return True if *host* resolves to a private/reserved IP address."""
+        try:
+            addr = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+            return ipaddress.ip_address(addr).is_private
+        except Exception:
+            return False
+
+    def _check_egress_policy(self, host: str, port: int, request_id: str) -> str | None:
+        """Return an error string if the egress destination is blocked, else None."""
+        # Domain allow/deny lists
+        if EXIT_ALLOW_DOMAINS and host not in EXIT_ALLOW_DOMAINS:
+            return f"domain {host} not in allow list"
+        if EXIT_DENY_DOMAINS and host in EXIT_DENY_DOMAINS:
+            return f"domain {host} is denied"
+        # Private IP protection
+        if EXIT_DENY_PRIVATE_IPS and self._is_private_ip(host):
+            return f"private IP blocked for {host}"
+        return None
+
     def _serve_connect(self, host: str, port: int, return_path: dict, request_id: str):
         info = self.tunnels.get(request_id)
         try:
+            # Egress policy check
+            violation = self._check_egress_policy(host, port, request_id)
+            if violation:
+                log.warning(f"Egress blocked | {violation} | request_id={request_id}")
+                if info:
+                    self._audit_exit_event("egress_blocked", info, result="policy_denied", error=violation)
+                self.tunnels.pop(request_id, None)
+                self.send_stream_close(return_path, request_id)
+                return
+
             out = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             out.connect((host, port))
             # Store the live socket and flush any queued data frames
