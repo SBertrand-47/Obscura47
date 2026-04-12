@@ -100,6 +100,8 @@ def isolated_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OBSCURA_EXIT_WS_PORT", str(EXIT_WS_PORT))
     monkeypatch.setenv("OBSCURA_PROXY_WS_RESP_PORT", str(PROXY_WS_RESP_PORT))
     monkeypatch.setenv("OBSCURA_PROXY_RESP_PORT", str(PROXY_RESP_PORT))
+    # Test echo server runs on 127.0.0.1 — allow private IPs for testing
+    monkeypatch.setenv("OBSCURA_EXIT_DENY_PRIVATE_IPS", "false")
     yield
 
 
