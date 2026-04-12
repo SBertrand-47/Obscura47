@@ -85,7 +85,11 @@ def _color(text: str, color_code: str) -> str:
 def _http_request(method: str, endpoint: str, data: Optional[dict] = None) -> dict:
     """Make HTTP request to registry with auth header."""
     url = f"{REGISTRY_URL}{endpoint}"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Obscura47/1.0 (admin-cli)",
+    }
     if REGISTRY_ADMIN_KEY:
         headers["Authorization"] = f"Bearer {REGISTRY_ADMIN_KEY}"
 
