@@ -2,6 +2,8 @@
 Obscura47 — System Tray Application
 Runs Obscura47 in the background with a system tray icon (cross-platform).
 Launch this to run the network as a background service.
+
+Users join as relay nodes by default. Exit node status requires admin approval.
 """
 
 import sys
@@ -20,21 +22,13 @@ GREEN = "#3fb950"
 RED = "#f85149"
 TEXT = "#c9d1d9"
 
-# Default configuration
-DEFAULT_ROLE = "node"  # node | exit | node+exit
-
 
 class Obscura47Tray:
     """System tray application for running Obscura47 in the background."""
 
-    def __init__(self, initial_role: str = DEFAULT_ROLE):
-        self._initial_role = initial_role
+    def __init__(self):
         self._running_roles: set[str] = set()
         self._threads: dict[str, threading.Thread] = {}
-        self._role_state: dict[str, bool] = {
-            "node": initial_role in ["node", "node+exit"],
-            "exit": initial_role in ["exit", "node+exit"],
-        }
         self._peer_counts = {"relays": 0, "exits": 0}
         self._tray_icon: Optional[pystray.Icon] = None
         self._dashboard_process: Optional[subprocess.Popen] = None
@@ -42,12 +36,10 @@ class Obscura47Tray:
 
     def _create_icon(self, running: bool = True) -> Image.Image:
         """Generate a simple icon (64x64) with a colored circle."""
-        # Create a 64x64 image with dark background
-        img = Image.new("RGB", (64, 64), color=(13, 17, 23))  # BG color
+        img = Image.new("RGB", (64, 64), color=(13, 17, 23))
         draw = ImageDraw.Draw(img)
 
-        # Draw a circle (green if running, red if stopped)
-        circle_color = (63, 185, 80) if running else (248, 81, 73)  # GREEN or RED
+        circle_color = (63, 185, 80) if running else (248, 81, 73)
         radius = 20
         center_x, center_y = 32, 32
         draw.ellipse(
@@ -74,43 +66,43 @@ class Obscura47Tray:
         """Build the system tray context menu."""
         items = []
 
-        # Status item (disabled/informational)
+        # Status item
         running_roles = ", ".join(
-            [role.replace("node", "Relay Node").replace("exit", "Exit Node")
+            [role.replace("node", "Relay Node").replace("proxy", "Proxy")
              for role in sorted(self._running_roles)]
         ) or "Stopped"
         items.append(
             pystray.MenuItem(f"Status: {running_roles}", action=None, enabled=False)
         )
 
-        # Network info item (disabled/informational)
+        # Network info
         peer_info = f"Network: {self._peer_counts['relays']} relays, {self._peer_counts['exits']} exits"
         items.append(pystray.MenuItem(peer_info, action=None, enabled=False))
 
+        # Proxy address hint
+        if "proxy" in self._running_roles:
+            items.append(
+                pystray.MenuItem("Proxy: 127.0.0.1:9047", action=None, enabled=False)
+            )
+
         items.append(pystray.Menu.SEPARATOR)
 
-        # Role selection items (radio-style with checkmarks)
-        items.append(
-            pystray.MenuItem(
-                "Run as Relay Node",
-                action=lambda: self._set_role("node"),
-                checked=lambda item: "node" in self._running_roles and "exit" not in self._running_roles,
+        # Connect / Disconnect
+        is_connected = bool(self._running_roles)
+        if is_connected:
+            items.append(
+                pystray.MenuItem(
+                    "Disconnect",
+                    action=lambda: self._disconnect(),
+                )
             )
-        )
-        items.append(
-            pystray.MenuItem(
-                "Run as Exit Node",
-                action=lambda: self._set_role("exit"),
-                checked=lambda item: "exit" in self._running_roles and "node" not in self._running_roles,
+        else:
+            items.append(
+                pystray.MenuItem(
+                    "Connect to Network",
+                    action=lambda: self._connect(),
+                )
             )
-        )
-        items.append(
-            pystray.MenuItem(
-                "Run as Relay + Exit",
-                action=lambda: self._set_role("node+exit"),
-                checked=lambda item: "node" in self._running_roles and "exit" in self._running_roles,
-            )
-        )
 
         items.append(pystray.Menu.SEPARATOR)
 
@@ -132,28 +124,21 @@ class Obscura47Tray:
             self._tray_icon.menu = self._build_menu()
             self._tray_icon.update_menu()
 
-    def _set_role(self, role_spec: str):
-        """Set the node role(s): 'node', 'exit', or 'node+exit'."""
-        new_roles = set()
-        if "node" in role_spec:
-            new_roles.add("node")
-        if "exit" in role_spec:
-            new_roles.add("exit")
-
-        # Stop roles that are no longer needed
-        for role in list(self._running_roles):
-            if role not in new_roles:
-                self._stop_role(role)
-
-        # Start new roles
-        for role in new_roles:
+    def _connect(self):
+        """Start as relay node + proxy (the standard client role)."""
+        for role in ("node", "proxy"):
             if role not in self._running_roles:
                 self._start_role(role)
+        self._update_menu()
 
+    def _disconnect(self):
+        """Stop all running roles."""
+        for role in list(self._running_roles):
+            self._stop_role(role)
         self._update_menu()
 
     def _start_role(self, role: str):
-        """Start a specific role (node or exit)."""
+        """Start a specific role."""
         if role in self._running_roles:
             return
 
@@ -175,7 +160,7 @@ class Obscura47Tray:
         print(f"[Obscura47 Tray] Stopping {role}...", flush=True)
 
     def _run_component(self, role: str):
-        """Run a component (node or exit) in a daemon thread."""
+        """Run a component in a daemon thread."""
         try:
             if role == "node":
                 from src.core.node import ObscuraNode
@@ -185,12 +170,9 @@ class Obscura47Tray:
                 node.run()
                 while role in self._running_roles and not self._stop_event.is_set():
                     time.sleep(1)
-            elif role == "exit":
-                from src.core.exit_node import ExitNode
-                from src.utils.config import EXIT_LISTEN_PORT
-
-                exit_node = ExitNode(port=EXIT_LISTEN_PORT)
-                exit_node.start_server()
+            elif role == "proxy":
+                from src.core.proxy import start_proxy
+                start_proxy()
         except Exception as exc:
             print(f"[Obscura47 Tray] [{role}] Error: {exc}", flush=True)
         finally:
@@ -199,12 +181,10 @@ class Obscura47Tray:
     def _open_dashboard(self):
         """Open the Tkinter GUI dashboard (app.py) in a subprocess."""
         if self._dashboard_process and self._dashboard_process.poll() is None:
-            # Dashboard already running
             print("[Obscura47 Tray] Dashboard is already open.", flush=True)
             return
 
         try:
-            # Launch app.py as a subprocess
             script_path = os.path.join(os.path.dirname(__file__), "app.py")
             self._dashboard_process = subprocess.Popen(
                 [sys.executable, script_path],
@@ -221,12 +201,10 @@ class Obscura47Tray:
             try:
                 self._get_peer_counts()
 
-                # Update icon based on running status
                 is_running = bool(self._running_roles)
                 if self._tray_icon:
                     self._tray_icon.icon = self._create_icon(running=is_running)
 
-                # Update menu
                 self._update_menu()
             except Exception as exc:
                 print(f"[Obscura47 Tray] Poll error: {exc}", flush=True)
@@ -238,11 +216,9 @@ class Obscura47Tray:
         print("[Obscura47 Tray] Shutting down...", flush=True)
         self._stop_event.set()
 
-        # Stop all roles
         for role in list(self._running_roles):
             self._stop_role(role)
 
-        # Close dashboard if open
         if self._dashboard_process and self._dashboard_process.poll() is None:
             self._dashboard_process.terminate()
             try:
@@ -250,7 +226,6 @@ class Obscura47Tray:
             except subprocess.TimeoutExpired:
                 self._dashboard_process.kill()
 
-        # Remove tray icon
         if self._tray_icon:
             self._tray_icon.stop()
 
@@ -259,19 +234,15 @@ class Obscura47Tray:
     def _quit(self):
         """Menu action to quit."""
         self._on_quit()
-        # Stop the main loop
         if self._tray_icon:
             self._tray_icon.stop()
 
     def run(self):
         """Start the tray application."""
-        print(
-            f"[Obscura47 Tray] Starting as {self._initial_role}...",
-            flush=True,
-        )
+        print("[Obscura47 Tray] Starting...", flush=True)
 
-        # Auto-start the initial role(s)
-        self._set_role(self._initial_role)
+        # Auto-connect on launch
+        self._connect()
 
         # Start the polling thread
         poll_thread = threading.Thread(target=self._poll_status, daemon=True)
@@ -299,20 +270,7 @@ class Obscura47Tray:
 
 def main():
     """Entry point."""
-    role = DEFAULT_ROLE
-
-    # Parse command-line argument
-    if len(sys.argv) > 1:
-        role = sys.argv[1].lower()
-        if role not in ["node", "exit", "node+exit"]:
-            print(
-                f"[Obscura47 Tray] Invalid role: {role}. Using default: {DEFAULT_ROLE}",
-                flush=True,
-            )
-            role = DEFAULT_ROLE
-
-    # Run the tray app
-    tray_app = Obscura47Tray(initial_role=role)
+    tray_app = Obscura47Tray()
     tray_app.run()
 
 
