@@ -157,9 +157,16 @@ class WSServer:
         def _reverse_send(data: str):
             """Send data back to this connected peer (fire-and-forget)."""
             try:
-                asyncio.run_coroutine_threadsafe(websocket.send(data), loop)
-            except Exception:
-                pass
+                future = asyncio.run_coroutine_threadsafe(websocket.send(data), loop)
+                # Add a callback to catch send errors
+                def _check(f):
+                    try:
+                        f.result()
+                    except Exception as exc:
+                        log.error("_reverse_send failed: %s", exc)
+                future.add_done_callback(_check)
+            except Exception as exc:
+                log.error("_reverse_send schedule failed: %s", exc)
 
         try:
             async for message in websocket:
