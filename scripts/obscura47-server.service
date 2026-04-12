@@ -1,0 +1,28 @@
+[Unit]
+Description=Obscura47 Server (Registry + Exit Node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=obscura
+Group=obscura
+WorkingDirectory=/opt/obscura47
+ExecStart=/opt/obscura47/venv/bin/python server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/obscura47 /home/obscura/.obscura47
+PrivateTmp=yes
+
+# Environment
+EnvironmentFile=/opt/obscura47/.env
+
+[Install]
+WantedBy=multi-user.target
