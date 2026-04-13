@@ -43,8 +43,12 @@ async function api(path, adminKey, options = {}) {
 
   const response = await fetch(path, { ...options, headers });
   const text = await response.text();
+  if (!response.ok) {
+    let detail;
+    try { detail = JSON.parse(text)?.detail; } catch (_) {}
+    throw new Error(detail || text || `Request failed with ${response.status}`);
+  }
   const data = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(data.detail || `Request failed with ${response.status}`);
   return data;
 }
 
