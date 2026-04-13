@@ -64,6 +64,7 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except (AttributeError, OSError):
                 pass
+            _suppress_icmp_connreset(sock)
             sock.bind(("", multicast_port))
 
             mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
@@ -130,6 +131,20 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
     except Exception as e:
         log.error(f"Error setting up discovery listener: {e}")
 
+def _suppress_icmp_connreset(sock):
+    """
+    On Windows, UDP sockets raise WinError 10054 (WSAECONNRESET) when an ICMP
+    'port unreachable' is received. Suppress this so multicast observers don't
+    get stuck in an error loop. No-op on other platforms.
+    """
+    SIO_UDP_CONNRESET = getattr(socket, "SIO_UDP_CONNRESET", None)
+    if SIO_UDP_CONNRESET is not None:
+        try:
+            sock.ioctl(SIO_UDP_CONNRESET, False)
+        except Exception:
+            pass
+
+
 def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
     """
     Passive discovery listener: observes discovery responses on a multicast
@@ -137,51 +152,59 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
     This is useful for roles that should not announce themselves on a given
     channel (e.g., proxy observing nodes/exits).
     """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                pass
-            sock.bind(("", multicast_port))
-
-            mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-            log.info(f"Observing discovery on {MULTICAST_GROUP}:{multicast_port}")
-
-            advertised_ip = get_local_ip()
-
-            while True:
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
-                    data, addr = sock.recvfrom(1024)
-                    message = json.loads(data.decode())
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except (AttributeError, OSError):
+                    pass
+                _suppress_icmp_connreset(sock)
+                sock.bind(("", multicast_port))
 
-                    if message.get("type") == "discovery_response":
-                        new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
-                        if "pub" in message:
-                            new_peer["pub"] = message["pub"]
-                        if new_peer["host"] != advertised_ip:
-                            # TOFU: reject if public key changed
-                            if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
-                                continue
-                            # Update or insert
-                            for idx, p in enumerate(list(peers)):
-                                if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
-                                    peers[idx]["ts"] = new_peer["ts"]
-                                    break
-                            else:
-                                peers.append(new_peer)
-                                log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
+                mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-                        # Expire old peers
-                        cutoff = time.time() - PEER_EXPIRY_SECONDS
-                        peers[:] = [p for p in peers if p.get("ts", 0) >= cutoff]
-                except json.JSONDecodeError:
-                    continue
-                except Exception as e:
-                    log.warning(f"Error in observe_discovery: {e}")
-                    time.sleep(1)
-    except Exception as e:
-        log.error(f"Error setting up passive discovery observer: {e}")
+                log.info(f"Observing discovery on {MULTICAST_GROUP}:{multicast_port}")
+
+                advertised_ip = get_local_ip()
+
+                while True:
+                    try:
+                        data, addr = sock.recvfrom(1024)
+                        message = json.loads(data.decode())
+
+                        if message.get("type") == "discovery_response":
+                            new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
+                            if "pub" in message:
+                                new_peer["pub"] = message["pub"]
+                            if new_peer["host"] != advertised_ip:
+                                # TOFU: reject if public key changed
+                                if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
+                                    continue
+                                # Update or insert
+                                for idx, p in enumerate(list(peers)):
+                                    if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
+                                        peers[idx]["ts"] = new_peer["ts"]
+                                        break
+                                else:
+                                    peers.append(new_peer)
+                                    log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
+
+                            # Expire old peers
+                            cutoff = time.time() - PEER_EXPIRY_SECONDS
+                            peers[:] = [p for p in peers if p.get("ts", 0) >= cutoff]
+                    except json.JSONDecodeError:
+                        continue
+                    except OSError as e:
+                        # On Windows, WinError 10054 can permanently corrupt the socket state.
+                        # Break inner loop to recreate the socket.
+                        log.warning(f"Socket error in observe_discovery (port {multicast_port}): {e} — recreating socket")
+                        break
+                    except Exception as e:
+                        log.warning(f"Error in observe_discovery: {e}")
+                        time.sleep(1)
+        except Exception as e:
+            log.error(f"Error setting up passive discovery observer: {e}")
+        time.sleep(2)
