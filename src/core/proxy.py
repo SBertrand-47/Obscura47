@@ -148,21 +148,29 @@ def exit_health_monitor():
         time.sleep(EXIT_HEALTH_INTERVAL)
 
 def choose_best_exit():
-    candidates = [(p['host'], p['port']) for p in list(exit_peers)]
+    now = time.time()
+    # Only consider IPv4 exits — the entire codebase uses AF_INET sockets.
+    # IPv6 addresses contain ':'; skip them to avoid guaranteed connection failures.
+    candidates = [
+        (p['host'], p['port']) for p in list(exit_peers)
+        if ':' not in p['host']
+    ]
     if not candidates:
         return None
-    now = time.time()
     def score(key):
         stats = exit_health.get(key)
         if not stats:
-            return (float('inf'), -1)
-        # Hard skip if under backoff
+            return (0.0, 0.0)  # unseen — prefer over known-bad exits
         if stats.get('backoff_until', 0.0) > now:
-            return (float('inf'), -1)
+            return None  # in backoff, exclude
         total = stats['ok'] + stats['fail']
         success_ratio = (stats['ok'] / total) if total else 0.0
         return (stats['rtt_ms'], -success_ratio)
-    best = min(candidates, key=lambda k: score(k))
+    # Drop exits that are currently in backoff
+    available = [k for k in candidates if score(k) is not None]
+    if not available:
+        return None
+    best = min(available, key=lambda k: score(k))
     # Return the full peer dict so downstream hops have pub, ws_port, etc.
     for p in exit_peers:
         if p['host'] == best[0] and p['port'] == best[1]:
