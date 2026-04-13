@@ -117,9 +117,7 @@ def exit_health_monitor():
                 start = time.time()
                 ok = False
                 try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(EXIT_CONNECT_TIMEOUT)
-                        s.connect((host, port))
+                    with socket.create_connection((host, port), timeout=EXIT_CONNECT_TIMEOUT) as s:
                         ok = True
                 except Exception:
                     ok = False
@@ -149,12 +147,7 @@ def exit_health_monitor():
 
 def choose_best_exit():
     now = time.time()
-    # Only consider IPv4 exits — the entire codebase uses AF_INET sockets.
-    # IPv6 addresses contain ':'; skip them to avoid guaranteed connection failures.
-    candidates = [
-        (p['host'], p['port']) for p in list(exit_peers)
-        if ':' not in p['host']
-    ]
+    candidates = [(p['host'], p['port']) for p in list(exit_peers)]
     if not candidates:
         return None
     def score(key):
