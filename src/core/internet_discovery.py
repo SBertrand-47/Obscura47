@@ -18,6 +18,10 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Public IP as seen by the registry — set on first successful registration.
+# Used to filter self out of the peer lists returned by the registry.
+_my_public_ip: str | None = None
+
 # Cloudflare (and some WAFs) return 403 for urllib's default User-Agent (Python-urllib/x.x).
 _REGISTRY_UA = "Obscura47/1.0 (registry-client)"
 
@@ -73,7 +77,9 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
         if result.get("ok"):
             # Registered (heartbeat or no-auth)
-            log.info(f"Registered as {role} with registry (your_ip={result.get('your_ip')})")
+            global _my_public_ip
+            _my_public_ip = result.get("your_ip") or _my_public_ip
+            log.info(f"Registered as {role} with registry (your_ip={_my_public_ip})")
             return result
 
         # Challenge-response flow
@@ -97,7 +103,9 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
                 verify_result = json.loads(verify_resp.read())
 
             if verify_result.get("ok"):
-                log.info(f"Verified as {role} with registry (your_ip={verify_result.get('your_ip')})")
+                global _my_public_ip
+                _my_public_ip = verify_result.get("your_ip") or _my_public_ip
+                log.info(f"Verified as {role} with registry (your_ip={_my_public_ip})")
                 return verify_result
             else:
                 log.error(f"Verification failed: {verify_result}")
@@ -160,6 +168,9 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
     now = time.time()
     for p in remote:
         if role_filter and p.get("role") != role_filter:
+            continue
+        # Skip ourselves — the registry returns all peers including this machine.
+        if _my_public_ip and p.get("host") == _my_public_ip:
             continue
         # Don't duplicate
         exists = any(
