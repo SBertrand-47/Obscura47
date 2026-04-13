@@ -18,7 +18,7 @@ StandardError=journal
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/obscura47 /home/obscura/.obscura47
+ReadWritePaths=/var/lib/obscura47
 PrivateTmp=yes
 
 # Environment

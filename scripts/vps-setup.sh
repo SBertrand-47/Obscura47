@@ -7,15 +7,24 @@
 set -euo pipefail
 
 APP_DIR="/opt/obscura47"
+DATA_DIR="/var/lib/obscura47"
 APP_USER="obscura"
 REPO_URL="https://github.com/SBertrand-47/Obscura47.git"
 
 echo "=== Obscura47 VPS Setup ==="
 
-# Create system user (no login shell)
+# Create system user (no login shell). Use DATA_DIR as home so any path that
+# resolves via expanduser("~") lands somewhere writable under ProtectSystem=strict.
 if ! id "$APP_USER" &>/dev/null; then
-    useradd --system --shell /usr/sbin/nologin --home-dir "$APP_DIR" "$APP_USER"
+    useradd --system --shell /usr/sbin/nologin --home-dir "$DATA_DIR" "$APP_USER"
     echo "[+] Created user: $APP_USER"
+else
+    # Correct the home dir if a prior install pointed it at APP_DIR
+    current_home="$(getent passwd "$APP_USER" | cut -d: -f6)"
+    if [ "$current_home" != "$DATA_DIR" ]; then
+        usermod --home "$DATA_DIR" "$APP_USER"
+        echo "[*] Updated $APP_USER home: $current_home -> $DATA_DIR"
+    fi
 fi
 
 # Clone or update repo
@@ -38,11 +47,9 @@ fi
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
 echo "[+] Dependencies installed"
 
-# Create data directories
-mkdir -p /var/lib/obscura47
-mkdir -p /home/$APP_USER/.obscura47/audit
-chown -R "$APP_USER:$APP_USER" /var/lib/obscura47
-chown -R "$APP_USER:$APP_USER" /home/$APP_USER/.obscura47
+# Create data directories (all writable state lives under DATA_DIR)
+mkdir -p "$DATA_DIR/audit"
+chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 # Create .env if it doesn't exist
@@ -65,11 +72,10 @@ OBSCURA_EXIT_DENY_PRIVATE_IPS=true
 OBSCURA_EXIT_EGRESS_AUDIT_ENABLED=true
 OBSCURA_AUDIT_RETENTION_DAYS=14
 
-# Database
+# Data paths (all under /var/lib/obscura47 for ProtectSystem=strict compatibility)
 OBSCURA_REGISTRY_DB_PATH=/var/lib/obscura47/registry.db
-
-# Key paths
-OBSCURA_EXIT_KEY_PATH=/home/obscura/.obscura47/exit_key.pem
+OBSCURA_EXIT_KEY_PATH=/var/lib/obscura47/exit_key.pem
+OBSCURA_AUDIT_LOG_DIR=/var/lib/obscura47/audit
 
 # TLS (uncomment and set paths when you have certs)
 # OBSCURA_REGISTRY_TLS_CERT=/etc/letsencrypt/live/db.monmedjs.com/fullchain.pem
