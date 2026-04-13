@@ -4,7 +4,7 @@ const STORAGE_KEY = "obscura47_admin_key";
 const REFRESH_MS = 10000;
 
 function formatAge(seconds) {
-  if (!Number.isFinite(seconds)) return "unknown";
+  if (!Number.isFinite(seconds)) return "—";
   if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h`;
@@ -13,11 +13,9 @@ function formatAge(seconds) {
 function shortId(value) {
   if (!value) return "unknown";
   if (value.length <= 18) return value;
-  return `${value.slice(0, 10)}...${value.slice(-6)}`;
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
 }
 
-// First 8 hex of SHA-256(pub). Cryptographic — safe for operators to
-// use as a visual cue that a key actually changed.
 async function sha256Fingerprint(pub) {
   if (!pub) return "no key";
   const bytes = new TextEncoder().encode(pub);
@@ -25,7 +23,7 @@ async function sha256Fingerprint(pub) {
   const hex = Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-  return `fp-${hex.slice(0, 8)}`;
+  return `fp:${hex.slice(0, 8)}`;
 }
 
 async function enrichPeers(peers) {
@@ -43,25 +41,26 @@ async function api(path, adminKey, options = {}) {
   if (adminKey) headers.Authorization = `Bearer ${adminKey}`;
   if (options.body) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(path, {
-    ...options,
-    headers,
-  });
+  const response = await fetch(path, { ...options, headers });
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    throw new Error(data.detail || `Request failed with ${response.status}`);
-  }
+  if (!response.ok) throw new Error(data.detail || `Request failed with ${response.status}`);
   return data;
 }
 
-function Stat({ label, value }) {
+// ── Sub-components ────────────────────────────────────────────
+
+function Stat({ label, value, accent }) {
   return (
-    <div className="stat">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className={`stat ${accent || ""}`}>
+      <div className="stat-label">{label}</div>
+      <div className="stat-value">{value}</div>
     </div>
   );
+}
+
+function RoleBadge({ role }) {
+  return <span className={`role-badge ${role}`}>{role}</span>;
 }
 
 function StatusPill({ peer, ttl }) {
@@ -69,6 +68,23 @@ function StatusPill({ peer, ttl }) {
   const pending = peer.role === "exit" && !peer.approved;
   const label = pending ? "pending" : stale ? "stale" : "online";
   return <span className={`pill ${label}`}>{label}</span>;
+}
+
+function Transport({ peer }) {
+  if (!peer.ws_port) return <span className="transport">tcp</span>;
+  const proto = peer.ws_tls ? "wss" : "ws";
+  return <span className={`transport ${proto}`}>{proto}:{peer.ws_port}</span>;
+}
+
+function LiveIndicator({ lastRefresh }) {
+  if (!lastRefresh) return null;
+  const age = Math.round((Date.now() - lastRefresh) / 1000);
+  return (
+    <div className="live-indicator">
+      <span className="live-dot" />
+      {age < 5 ? "just now" : `${age}s ago`}
+    </div>
+  );
 }
 
 function AdminKeyForm({ adminKey, setAdminKey, onRefresh, loading }) {
@@ -89,13 +105,11 @@ function AdminKeyForm({ adminKey, setAdminKey, onRefresh, loading }) {
           type="password"
           autoComplete="current-password"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(e) => setDraft(e.target.value)}
           placeholder="OBSCURA_REGISTRY_ADMIN_KEY"
         />
       </label>
-      <button type="submit" disabled={loading}>
-        Connect
-      </button>
+      <button type="submit" disabled={loading}>Connect</button>
       <button type="button" className="secondary" onClick={() => onRefresh()} disabled={loading || !adminKey}>
         Refresh
       </button>
@@ -107,19 +121,20 @@ function PendingExits({ exits, ttl, onApprove, onReject, busyId }) {
   if (!exits.length) {
     return <div className="empty">No pending exit nodes.</div>;
   }
-
   return (
     <div className="pending-list">
       {exits.map((peer) => (
         <article className="item" key={peer.peer_id}>
           <div>
             <div className="item-title">{peer.host}:{peer.port}</div>
-            <div className="muted">{shortId(peer.peer_id)} · {peer.fp || "…"} · seen {formatAge(peer.time_since_heartbeat)} ago</div>
-            {peer.ws_port ? (
-              <div className="muted">{peer.ws_tls ? "wss" : "ws"}://{peer.host}:{peer.ws_port}</div>
-            ) : null}
+            <div className="item-meta">
+              <span>{shortId(peer.peer_id)}</span>
+              <span>{peer.fp || "…"}</span>
+              {peer.ws_port && <span>{peer.ws_tls ? "wss" : "ws"}:{peer.ws_port}</span>}
+              <span>seen {formatAge(peer.time_since_heartbeat)} ago</span>
+            </div>
           </div>
-          <div className="actions">
+          <div className="item-actions">
             <StatusPill peer={peer} ttl={ttl} />
             <button onClick={() => onApprove(peer.peer_id)} disabled={busyId === peer.peer_id}>
               Approve
@@ -135,6 +150,9 @@ function PendingExits({ exits, ttl, onApprove, onReject, busyId }) {
 }
 
 function PeerTable({ peers, ttl, onRemove, busyId }) {
+  if (!peers.length) {
+    return <div className="empty">No peers registered.</div>;
+  }
   return (
     <div className="table-wrap">
       <table>
@@ -145,19 +163,19 @@ function PeerTable({ peers, ttl, onRemove, busyId }) {
             <th>Status</th>
             <th>Transport</th>
             <th>Last seen</th>
-            <th>Action</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           {peers.map((peer) => (
             <tr key={peer.peer_id}>
               <td>
-                <strong>{peer.host}:{peer.port}</strong>
-                <span>{shortId(peer.peer_id)} · {peer.fp || "…"}</span>
+                <div className="peer-host">{peer.host}:{peer.port}</div>
+                <div className="peer-meta">{shortId(peer.peer_id)} · {peer.fp || "…"}</div>
               </td>
-              <td>{peer.role}</td>
+              <td><RoleBadge role={peer.role} /></td>
               <td><StatusPill peer={peer} ttl={ttl} /></td>
-              <td>{peer.ws_port ? `${peer.ws_tls ? "wss" : "ws"}:${peer.ws_port}` : "tcp only"}</td>
+              <td><Transport peer={peer} /></td>
               <td>{formatAge(peer.time_since_heartbeat)} ago</td>
               <td>
                 <button className="secondary" onClick={() => onRemove(peer.peer_id)} disabled={busyId === peer.peer_id}>
@@ -172,18 +190,23 @@ function PeerTable({ peers, ttl, onRemove, busyId }) {
   );
 }
 
+// ── App ───────────────────────────────────────────────────────
+
 export default function App() {
   const [adminKey, setAdminKey] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState("");
+  const [lastRefresh, setLastRefresh] = useState(null);
 
   const sortedPeers = useMemo(() => {
     const peers = data?.peers || [];
     return [...peers].sort((a, b) => {
-      if (a.role === "exit" && !a.approved && !(b.role === "exit" && !b.approved)) return -1;
-      if (b.role === "exit" && !b.approved && !(a.role === "exit" && !a.approved)) return 1;
+      const aPending = a.role === "exit" && !a.approved;
+      const bPending = b.role === "exit" && !b.approved;
+      if (aPending && !bPending) return -1;
+      if (bPending && !aPending) return 1;
       return a.time_since_heartbeat - b.time_since_heartbeat;
     });
   }, [data]);
@@ -199,6 +222,7 @@ export default function App() {
       next.peers = await enrichPeers(next.peers || []);
       next.pending_exits = await enrichPeers(next.pending_exits || []);
       setData(next);
+      setLastRefresh(Date.now());
       setError("");
     } catch (err) {
       setError(err.message);
@@ -244,7 +268,6 @@ export default function App() {
     if (adminKey) load(adminKey);
   }, [adminKey, load]);
 
-  // Poll while an admin key is set and the tab is visible.
   useEffect(() => {
     if (!adminKey) return undefined;
     const id = setInterval(() => {
@@ -256,37 +279,42 @@ export default function App() {
   const summary = data?.summary || {};
   const network = data?.network || {};
   const ttl = data?.peer_ttl || 120;
+  const killActive = network.kill_active;
 
   return (
     <main>
       <header className="topbar">
-        <div>
-          <p className="eyebrow">Obscura47</p>
-          <h1>Registry Control</h1>
-        </div>
-        <div className="topbar-status">
-          <div className={`network-state ${network.kill_active ? "danger" : ""}`}>
-            {network.kill_active ? "Kill switch active" : "Network accepting peers"}
+        <div className="topbar-left">
+          <div className="topbar-icon">⬡</div>
+          <div className="topbar-title">
+            <p className="eyebrow">Obscura47</p>
+            <h1>Registry Control</h1>
           </div>
-          {network.kill_active ? (
+        </div>
+        <div className="topbar-right">
+          <LiveIndicator lastRefresh={lastRefresh} />
+          <div className={`network-state ${killActive ? "danger" : ""}`}>
+            {killActive ? "Kill switch active" : "Network live"}
+          </div>
+          {killActive && (
             <button className="secondary" onClick={revive} disabled={loading || !adminKey}>
-              Revive network
+              Revive
             </button>
-          ) : null}
+          )}
         </div>
       </header>
 
       <AdminKeyForm adminKey={adminKey} setAdminKey={setAdminKey} onRefresh={load} loading={loading} />
 
-      {error ? <div className="error">{error}</div> : null}
+      {error && <div className="error">{error}</div>}
 
-      <section className="stats">
-        <Stat label="Total peers" value={summary.total ?? "-"} />
-        <Stat label="Live" value={summary.live ?? "-"} />
-        <Stat label="Stale" value={summary.stale ?? "-"} />
-        <Stat label="Pending exits" value={summary.pending_exits ?? "-"} />
-        <Stat label="Approved exits" value={summary.approved_exits ?? "-"} />
-      </section>
+      <div className="stats">
+        <Stat label="Total peers" value={summary.total ?? "—"} />
+        <Stat label="Live" value={summary.live ?? "—"} accent="accent" />
+        <Stat label="Stale" value={summary.stale ?? "—"} />
+        <Stat label="Pending exits" value={summary.pending_exits ?? "—"} accent={summary.pending_exits > 0 ? "pending" : ""} />
+        <Stat label="Approved exits" value={summary.approved_exits ?? "—"} accent="accent" />
+      </div>
 
       <section>
         <div className="section-head">
@@ -294,7 +322,7 @@ export default function App() {
             <p className="eyebrow">Approval queue</p>
             <h2>Pending Exit Nodes</h2>
           </div>
-          <span className="muted">Only approved exits are returned to proxies.</span>
+          <span className="section-tag">Approved only · proxies see exits</span>
         </div>
         <PendingExits
           exits={data?.pending_exits || []}
@@ -311,7 +339,7 @@ export default function App() {
             <p className="eyebrow">Registry</p>
             <h2>Known Peers</h2>
           </div>
-          <span className="muted">Stale threshold: {ttl}s</span>
+          <span className="section-tag">TTL {ttl}s</span>
         </div>
         <PeerTable
           peers={sortedPeers}
