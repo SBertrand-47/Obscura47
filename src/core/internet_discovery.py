@@ -55,6 +55,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
     Register this node with the bootstrap registry.
     If pub + priv_key are provided, performs ECDSA challenge-response auth.
     """
+    global _my_public_ip
     body: dict = {"role": role, "port": port}
     if pub:
         body["pub"] = pub
@@ -77,7 +78,6 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
         if result.get("ok"):
             # Registered (heartbeat or no-auth)
-            global _my_public_ip
             _my_public_ip = result.get("your_ip") or _my_public_ip
             log.info(f"Registered as {role} with registry (your_ip={_my_public_ip})")
             return result
@@ -103,7 +103,6 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
                 verify_result = json.loads(verify_resp.read())
 
             if verify_result.get("ok"):
-                global _my_public_ip
                 _my_public_ip = verify_result.get("your_ip") or _my_public_ip
                 log.info(f"Verified as {role} with registry (your_ip={_my_public_ip})")
                 return verify_result
