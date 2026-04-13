@@ -86,6 +86,12 @@ main {
   min-height: 84px;
 }
 
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 h1,
 h2,
 p {

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "obscura47_admin_key";
+const REFRESH_MS = 10000;
 
 function formatAge(seconds) {
   if (!Number.isFinite(seconds)) return "unknown";
@@ -15,13 +16,23 @@ function shortId(value) {
   return `${value.slice(0, 10)}...${value.slice(-6)}`;
 }
 
-function fingerprint(pub) {
+// First 8 hex of SHA-256(pub). Cryptographic — safe for operators to
+// use as a visual cue that a key actually changed.
+async function sha256Fingerprint(pub) {
   if (!pub) return "no key";
-  let hash = 0;
-  for (let i = 0; i < pub.length; i += 1) {
-    hash = (hash * 31 + pub.charCodeAt(i)) >>> 0;
-  }
-  return `fp-${hash.toString(16).padStart(8, "0")}`;
+  const bytes = new TextEncoder().encode(pub);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `fp-${hex.slice(0, 8)}`;
+}
+
+async function enrichPeers(peers) {
+  if (!Array.isArray(peers)) return peers;
+  return Promise.all(
+    peers.map(async (peer) => ({ ...peer, fp: await sha256Fingerprint(peer.pub) })),
+  );
 }
 
 async function api(path, adminKey, options = {}) {
@@ -103,7 +114,7 @@ function PendingExits({ exits, ttl, onApprove, onReject, busyId }) {
         <article className="item" key={peer.peer_id}>
           <div>
             <div className="item-title">{peer.host}:{peer.port}</div>
-            <div className="muted">{shortId(peer.peer_id)} · {fingerprint(peer.pub)} · seen {formatAge(peer.time_since_heartbeat)} ago</div>
+            <div className="muted">{shortId(peer.peer_id)} · {peer.fp || "…"} · seen {formatAge(peer.time_since_heartbeat)} ago</div>
             {peer.ws_port ? (
               <div className="muted">{peer.ws_tls ? "wss" : "ws"}://{peer.host}:{peer.ws_port}</div>
             ) : null}
@@ -142,7 +153,7 @@ function PeerTable({ peers, ttl, onRemove, busyId }) {
             <tr key={peer.peer_id}>
               <td>
                 <strong>{peer.host}:{peer.port}</strong>
-                <span>{shortId(peer.peer_id)} · {fingerprint(peer.pub)}</span>
+                <span>{shortId(peer.peer_id)} · {peer.fp || "…"}</span>
               </td>
               <td>{peer.role}</td>
               <td><StatusPill peer={peer} ttl={ttl} /></td>
@@ -177,22 +188,24 @@ export default function App() {
     });
   }, [data]);
 
-  async function load(key = adminKey) {
+  const load = useCallback(async (key = adminKey, { silent = false } = {}) => {
     if (!key) {
-      setError("Enter the registry admin key.");
+      if (!silent) setError("Enter the registry admin key.");
       return;
     }
-    setLoading(true);
-    setError("");
+    if (!silent) setLoading(true);
     try {
       const next = await api("/admin/dashboard/data", key);
+      next.peers = await enrichPeers(next.peers || []);
+      next.pending_exits = await enrichPeers(next.pending_exits || []);
       setData(next);
+      setError("");
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  }
+  }, [adminKey]);
 
   async function act(peerId, path) {
     setBusyId(peerId);
@@ -207,9 +220,38 @@ export default function App() {
     }
   }
 
+  async function revive() {
+    setError("");
+    try {
+      await api("/admin/revive", adminKey, { method: "POST" });
+      await load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function confirmRemove(peerId) {
+    if (!window.confirm(`Remove peer ${peerId}? This drops it from the registry.`)) return;
+    act(peerId, `/admin/remove/${encodeURIComponent(peerId)}`);
+  }
+
+  function confirmReject(peerId) {
+    if (!window.confirm(`Reject exit ${peerId}? The node will not receive traffic.`)) return;
+    act(peerId, `/admin/reject/${encodeURIComponent(peerId)}`);
+  }
+
   useEffect(() => {
     if (adminKey) load(adminKey);
-  }, []);
+  }, [adminKey, load]);
+
+  // Poll while an admin key is set and the tab is visible.
+  useEffect(() => {
+    if (!adminKey) return undefined;
+    const id = setInterval(() => {
+      if (!document.hidden) load(adminKey, { silent: true });
+    }, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [adminKey, load]);
 
   const summary = data?.summary || {};
   const network = data?.network || {};
@@ -222,8 +264,15 @@ export default function App() {
           <p className="eyebrow">Obscura47</p>
           <h1>Registry Control</h1>
         </div>
-        <div className={`network-state ${network.kill_active ? "danger" : ""}`}>
-          {network.kill_active ? "Kill switch active" : "Network accepting peers"}
+        <div className="topbar-status">
+          <div className={`network-state ${network.kill_active ? "danger" : ""}`}>
+            {network.kill_active ? "Kill switch active" : "Network accepting peers"}
+          </div>
+          {network.kill_active ? (
+            <button className="secondary" onClick={revive} disabled={loading || !adminKey}>
+              Revive network
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -252,7 +301,7 @@ export default function App() {
           ttl={ttl}
           busyId={busyId}
           onApprove={(peerId) => act(peerId, `/admin/approve/${encodeURIComponent(peerId)}`)}
-          onReject={(peerId) => act(peerId, `/admin/reject/${encodeURIComponent(peerId)}`)}
+          onReject={confirmReject}
         />
       </section>
 
@@ -268,7 +317,7 @@ export default function App() {
           peers={sortedPeers}
           ttl={ttl}
           busyId={busyId}
-          onRemove={(peerId) => act(peerId, `/admin/remove/${encodeURIComponent(peerId)}`)}
+          onRemove={confirmRemove}
         />
       </section>
     </main>
