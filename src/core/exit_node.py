@@ -343,7 +343,7 @@ class ExitNode:
     def _is_private_ip(host: str) -> bool:
         """Return True if *host* resolves to a private/reserved IP address."""
         try:
-            addr = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+            addr = socket.getaddrinfo(host, None, socket.AF_UNSPEC)[0][4][0]
             return ipaddress.ip_address(addr).is_private
         except Exception:
             return False
@@ -373,8 +373,7 @@ class ExitNode:
                 self.send_stream_close(return_path, request_id)
                 return
 
-            out = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            out.connect((host, port))
+            out = socket.create_connection((host, port))
             # Store the live socket and flush any queued data frames
             if info:
                 info['sock'] = out

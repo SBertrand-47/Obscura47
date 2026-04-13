@@ -257,10 +257,8 @@ class Router:
         entry = self._tunnel_sockets.get(key)
         try:
             if entry is None:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock = socket.create_connection((next_node['host'], next_node['port']), timeout=SOCKET_CONNECT_TIMEOUT)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                sock.settimeout(SOCKET_CONNECT_TIMEOUT)
-                sock.connect((next_node['host'], next_node['port']))
                 sock.settimeout(None)
                 entry = {'sock': sock, 'last': time.time(), 'q': []}
                 self._tunnel_sockets[key] = entry
@@ -315,10 +313,7 @@ class Router:
 
         # Fall back to TCP
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(SOCKET_CONNECT_TIMEOUT)
-                sock.connect((next_node['host'], next_node['port']))
-                sock.settimeout(None)
+            with socket.create_connection((next_node['host'], next_node['port']), timeout=SOCKET_CONNECT_TIMEOUT) as sock:
                 sock.send((frame_json + "\n").encode())
                 log.info("Sent encrypted message to %s:%s (TCP)", next_node['host'], next_node['port'])
         except Exception as e:
@@ -366,10 +361,7 @@ def _send_raw_frame(next_hop: dict, envelope: dict, ws_client=None) -> bool:
 
     # Fall back to TCP
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(SOCKET_CONNECT_TIMEOUT)
-            sock.connect((next_hop['host'], next_hop['port']))
-            sock.settimeout(None)
+        with socket.create_connection((next_hop['host'], next_hop['port']), timeout=SOCKET_CONNECT_TIMEOUT) as sock:
             sock.send((frame_json + "\n").encode())
         log.info("Sent raw frame to %s:%s (TCP)", next_hop['host'], next_hop['port'])
         return True
@@ -420,10 +412,8 @@ def _send_frame_via_route(route, envelope, ws_client=None):
             if is_tunnel:
                 entry = TUNNEL_SOCKETS.get(key)
                 if entry is None:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock = socket.create_connection((first_hop['host'], first_hop['port']), timeout=SOCKET_CONNECT_TIMEOUT)
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    sock.settimeout(SOCKET_CONNECT_TIMEOUT)
-                    sock.connect((first_hop['host'], first_hop['port']))
                     sock.settimeout(None)
                     entry = {'sock': sock, 'last': time.time(), 'q': []}
                     TUNNEL_SOCKETS[key] = entry
@@ -450,10 +440,7 @@ def _send_frame_via_route(route, envelope, ws_client=None):
                         entry['q'][0] = chunk[sent:]
                         time.sleep(0.01)
             else:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(SOCKET_CONNECT_TIMEOUT)
-                    sock.connect((first_hop['host'], first_hop['port']))
-                    sock.settimeout(None)
+                with socket.create_connection((first_hop['host'], first_hop['port']), timeout=SOCKET_CONNECT_TIMEOUT) as sock:
                     sock.send((frame_json + "\n").encode())
             log.info("Sent frame to %s:%s (TCP)", first_hop['host'], first_hop['port'])
             if is_tunnel and envelope.get('type') == 'close':
