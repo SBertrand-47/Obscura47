@@ -7,11 +7,161 @@ Exit node status requires admin approval.
 
 import sys
 import os
+import json
+import platform
+import argparse
 import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import messagebox
+
+# ── Autostart / settings helpers ──────────────────────────────────────────────
+
+_SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".obscura47_settings.json")
+_APP_SCRIPT    = os.path.abspath(__file__)
+_PYTHON_EXEC   = sys.executable
+
+
+def _load_settings() -> dict:
+    try:
+        with open(_SETTINGS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_settings(s: dict):
+    with open(_SETTINGS_PATH, "w") as f:
+        json.dump(s, f)
+
+
+def _autostart_cmd(background: bool) -> list[str]:
+    """Return the command list that should be registered for autostart."""
+    exe = _PYTHON_EXEC
+    # On Windows prefer pythonw.exe so no console window appears
+    if platform.system() == "Windows":
+        exe = exe.replace("python.exe", "pythonw.exe")
+    cmd = [exe, _APP_SCRIPT]
+    if background:
+        cmd.append("--background")
+    return cmd
+
+
+def setup_autostart(background: bool = True):
+    """Register Obscura47 to launch at login (current user only)."""
+    cmd = _autostart_cmd(background)
+    s = platform.system()
+    if s == "Windows":
+        _autostart_win_set(cmd)
+    elif s == "Darwin":
+        _autostart_mac_set(cmd)
+    else:
+        _autostart_linux_set(cmd)
+
+
+def remove_autostart():
+    """Remove Obscura47 from login items."""
+    s = platform.system()
+    if s == "Windows":
+        _autostart_win_del()
+    elif s == "Darwin":
+        _autostart_mac_del()
+    else:
+        _autostart_linux_del()
+
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+
+def _autostart_win_set(cmd: list[str]):
+    import winreg
+    value = " ".join(f'"{a}"' for a in cmd)
+    key = winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Run",
+        0, winreg.KEY_SET_VALUE,
+    )
+    winreg.SetValueEx(key, "Obscura47", 0, winreg.REG_SZ, value)
+    winreg.CloseKey(key)
+
+
+def _autostart_win_del():
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE,
+        )
+        winreg.DeleteValue(key, "Obscura47")
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+
+_MAC_PLIST = os.path.expanduser("~/Library/LaunchAgents/com.obscura47.app.plist")
+
+
+def _autostart_mac_set(cmd: list[str]):
+    os.makedirs(os.path.dirname(_MAC_PLIST), exist_ok=True)
+    args_xml = "\n".join(f"        <string>{a}</string>" for a in cmd)
+    plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.obscura47.app</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
+"""
+    with open(_MAC_PLIST, "w") as f:
+        f.write(plist)
+
+
+def _autostart_mac_del():
+    try:
+        os.remove(_MAC_PLIST)
+    except Exception:
+        pass
+
+
+# ── Linux (XDG autostart) ─────────────────────────────────────────────────────
+
+_LINUX_DESKTOP = os.path.expanduser("~/.config/autostart/obscura47.desktop")
+
+
+def _autostart_linux_set(cmd: list[str]):
+    os.makedirs(os.path.dirname(_LINUX_DESKTOP), exist_ok=True)
+    exec_str = " ".join(f'"{a}"' for a in cmd)
+    content = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Obscura47\n"
+        f"Exec={exec_str}\n"
+        "Hidden=false\n"
+        "NoDisplay=false\n"
+        "X-GNOME-Autostart-enabled=true\n"
+    )
+    with open(_LINUX_DESKTOP, "w") as f:
+        f.write(content)
+
+
+def _autostart_linux_del():
+    try:
+        os.remove(_LINUX_DESKTOP)
+    except Exception:
+        pass
 
 # Ensure UTF-8 on Windows
 try:
@@ -37,13 +187,16 @@ BORDER       = "#30363d"
 class ObscuraApp(tk.Tk):
     """Main application window."""
 
-    def __init__(self):
+    def __init__(self, background: bool = False):
         super().__init__()
 
         self.title("Obscura47")
         self.configure(bg=BG)
         self.resizable(False, False)
-        self.geometry("520x720")
+        self.geometry("520x760")
+
+        # ── Persisted settings ─────────────────────────────────────
+        self._settings = _load_settings()
 
         # ── State ─────────────────────────────────────────────────
         self._threads: dict[str, threading.Thread] = {}
@@ -68,6 +221,12 @@ class ObscuraApp(tk.Tk):
 
         # Graceful shutdown
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # ── Background / autostart startup behaviour ───────────────
+        if background or self._settings.get("start_minimized", False):
+            # Minimise to taskbar immediately, then auto-connect
+            self.after(100, self.iconify)
+            self.after(200, self._connect)
 
     # ── UI construction ───────────────────────────────────────────
 
@@ -171,6 +330,36 @@ class ObscuraApp(tk.Tk):
         )
         self._exit_request_btn.pack(pady=(6, 0))
 
+        # ── Settings panel ────────────────────────────────────────
+        settings_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+                                  highlightthickness=1)
+        settings_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
+
+        tk.Label(settings_frame, text="Startup", font=self._label_font,
+                 fg=TEXT, bg=BG_CARD).pack(anchor="w", padx=14, pady=(4, 2))
+
+        chk_row = tk.Frame(settings_frame, bg=BG_CARD)
+        chk_row.pack(anchor="w", padx=14, pady=(0, 4))
+
+        self._autostart_var = tk.BooleanVar(
+            value=self._settings.get("autostart", False))
+        self._minimized_var = tk.BooleanVar(
+            value=self._settings.get("start_minimized", False))
+
+        tk.Checkbutton(
+            chk_row, text="Start on login", variable=self._autostart_var,
+            bg=BG_CARD, fg=TEXT_DIM, activebackground=BG_CARD,
+            activeforeground=TEXT, selectcolor=BG, font=self._small_font,
+            command=self._on_autostart_toggle,
+        ).pack(side="left", padx=(0, 20))
+
+        tk.Checkbutton(
+            chk_row, text="Start minimized", variable=self._minimized_var,
+            bg=BG_CARD, fg=TEXT_DIM, activebackground=BG_CARD,
+            activeforeground=TEXT, selectcolor=BG, font=self._small_font,
+            command=self._on_minimized_toggle,
+        ).pack(side="left")
+
         # ── Log area ─────────────────────────────────────────────
         log_label = tk.Label(self, text="Activity Log", font=self._label_font,
                              fg=TEXT_DIM, bg=BG, anchor="w")
@@ -188,6 +377,30 @@ class ObscuraApp(tk.Tk):
         self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._log("Welcome to Obscura47. Press Connect to join the network.")
+
+    def _on_autostart_toggle(self):
+        enabled = self._autostart_var.get()
+        self._settings["autostart"] = enabled
+        _save_settings(self._settings)
+        try:
+            if enabled:
+                setup_autostart(background=self._minimized_var.get())
+                self._log("Auto-start on login enabled.")
+            else:
+                remove_autostart()
+                self._log("Auto-start on login disabled.")
+        except Exception as e:
+            self._log(f"Could not update auto-start: {e}")
+
+    def _on_minimized_toggle(self):
+        self._settings["start_minimized"] = self._minimized_var.get()
+        _save_settings(self._settings)
+        # Re-register autostart so the --background flag is added/removed
+        if self._autostart_var.get():
+            try:
+                setup_autostart(background=self._minimized_var.get())
+            except Exception as e:
+                self._log(f"Could not update auto-start: {e}")
 
     def _build_status_card(self, parent, role: str, label: str, desc: str):
         """Build a read-only status card (no individual start/stop buttons)."""
@@ -417,5 +630,12 @@ class ObscuraApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    app = ObscuraApp()
+    _parser = argparse.ArgumentParser(description="Obscura47")
+    _parser.add_argument(
+        "--background", action="store_true",
+        help="Start minimized and connect automatically (used by autostart)",
+    )
+    _args, _ = _parser.parse_known_args()
+
+    app = ObscuraApp(background=_args.background)
     app.mainloop()
