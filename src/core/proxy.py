@@ -135,7 +135,8 @@ def exit_health_monitor():
                     fails = stats['fail']
                     if fails >= EXIT_BLACKLIST_FAILS:
                         # exponential backoff capping
-                        backoff = min(EXIT_FAIL_BACKOFF_BASE * (2 ** (fails - EXIT_BLACKLIST_FAILS)), EXIT_FAIL_BACKOFF_MAX)
+                        exp = min(fails - EXIT_BLACKLIST_FAILS, 20)  # cap exponent to avoid int-too-large overflow
+                        backoff = min(EXIT_FAIL_BACKOFF_BASE * (2 ** exp), EXIT_FAIL_BACKOFF_MAX)
                         stats['backoff_until'] = time.time() + backoff
                 else:
                     # reset backoff on success
