@@ -126,7 +126,7 @@ PROXY_KEY_PATH = getenv_str("OBSCURA_PROXY_KEY_PATH", os.path.join(os.path.expan
 # Bootstrap registry (internet discovery)
 REGISTRY_HOST = getenv_str("OBSCURA_REGISTRY_HOST", "0.0.0.0")
 REGISTRY_PORT = getenv_int("OBSCURA_REGISTRY_PORT", 8470)
-REGISTRY_URL = getenv_str("OBSCURA_REGISTRY_URL", "http://localhost:8470")
+REGISTRY_URL = getenv_str("OBSCURA_REGISTRY_URL", "https://db.monmedjs.com")
 REGISTRY_PEER_TTL = getenv_int("OBSCURA_REGISTRY_PEER_TTL", 120)  # seconds before a peer expires
 REGISTRY_HEARTBEAT_INTERVAL = getenv_int("OBSCURA_REGISTRY_HEARTBEAT_INTERVAL", 30)
 
