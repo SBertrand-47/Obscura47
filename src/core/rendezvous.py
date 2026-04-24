@@ -37,8 +37,8 @@ def fetch_descriptor(addr: str) -> dict[str, Any] | None:
     return desc
 
 
-def dial_hidden_service(addr: str, proxy_pub_pem: str) -> tuple[list[dict], str] | None:
-    """Open an HS session; returns (route, request_id) for the proxy to drive."""
+def dial_hidden_service(addr: str, proxy_pub_pem: str) -> tuple[list[dict], str, str] | None:
+    """Open an HS session; returns (route, request_id, service_pub) for the proxy to drive."""
     desc = fetch_descriptor(addr)
     if not desc:
         return None
@@ -51,6 +51,7 @@ def dial_hidden_service(addr: str, proxy_pub_pem: str) -> tuple[list[dict], str]
     mp = intros[0]
     route = [mp]
     request_id = f"C{time.time_ns()}"
+    service_pub = desc.get('pubkey') or ''
 
     envelope = {
         'type': 'hs_connect',
@@ -61,14 +62,16 @@ def dial_hidden_service(addr: str, proxy_pub_pem: str) -> tuple[list[dict], str]
     if not send_hs_frame(route, envelope):
         log.warning("hs_connect send failed for %s", addr)
         return None
-    return route, request_id
+    return route, request_id, service_pub
 
 
-def send_hs_chunk(route: list[dict], request_id: str, chunk_b64: str) -> bool:
+def send_hs_chunk(route: list[dict], request_id: str, sealed_chunk: str) -> bool:
+    """Send an hs_data frame. ``sealed_chunk`` is the service-pub-sealed
+    payload string; the meeting point treats it as opaque."""
     envelope = {
         'type': 'hs_data',
         'request_id': request_id,
-        'chunk': chunk_b64,
+        'chunk': sealed_chunk,
     }
     return bool(send_hs_frame(route, envelope))
 
