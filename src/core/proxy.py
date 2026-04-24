@@ -13,7 +13,7 @@ from src.core.rendezvous import dial_hidden_service, send_hs_chunk, close_hs
 from src.utils.onion_addr import is_obscura_address
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
-from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv
+from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv, onion_encrypt_for_peer
 from src.core.ws_transport import WSClient
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
@@ -88,6 +88,9 @@ def log_selected_exit(prefix: str, destination: dict):
 
 pending_requests = {}  # request_id -> client_socket
 pending_meta = {}       # request_id -> {'started': ts, 'bytes_up': int, 'bytes_down': int, 'last_activity': ts, 'exit': hostport}
+# request_id -> service pubkey PEM for active .obscura sessions. Used to
+# seal hs_data chunks so the meeting point can't observe payloads.
+hs_session_pub = {}
 pending_lock = threading.Lock()
 
 def listen_for_clients():
@@ -206,9 +209,18 @@ def _handle_exit_response_data(raw_data):
     if client_socket:
         try:
             if typ in ("data", "hs_data"):
-                chunk_b64 = packet.get("chunk", "")
-                if chunk_b64:
-                    decoded = base64.b64decode(chunk_b64)
+                chunk_field = packet.get("chunk", "")
+                if chunk_field:
+                    if typ == "hs_data":
+                        # Sealed end-to-end by the host for our proxy pubkey;
+                        # the meeting point sees only ciphertext.
+                        unsealed = onion_decrypt_with_priv(_proxy_priv, chunk_field)
+                        if unsealed is None:
+                            log.warning(f"HS chunk decrypt failed | request_id={request_id}")
+                            return
+                        decoded = base64.b64decode(unsealed)
+                    else:
+                        decoded = base64.b64decode(chunk_field)
                     client_socket.sendall(decoded)
                     meta['bytes_down'] += len(decoded)
                     meta['last_activity'] = time.time()
@@ -222,6 +234,7 @@ def _handle_exit_response_data(raw_data):
                 with pending_lock:
                     summary = pending_meta.pop(request_id, None)
                     pending_requests.pop(request_id, None)
+                    hs_session_pub.pop(request_id, None)
                 if summary:
                     dur = max(0.0, time.time() - summary.get('started', time.time()))
                     if JSON_LOGS:
@@ -542,7 +555,12 @@ def _handle_hs_connect(client_socket, addr: str, port: int):
             client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             client_socket.close()
             return
-        route, request_id = dialed
+        route, request_id, service_pub = dialed
+        if not service_pub:
+            log.warning(f"HS descriptor for {addr} missing pubkey; refusing to dial")
+            client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
         with pending_lock:
             pending_requests[request_id] = client_socket
             pending_meta[request_id] = {
@@ -550,6 +568,7 @@ def _handle_hs_connect(client_socket, addr: str, port: int):
                 'started': time.time(), 'last_activity': time.time(),
                 'exit': f"hs:{addr}",
             }
+            hs_session_pub[request_id] = service_pub
         client_socket.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
 
         def upstream():
@@ -558,7 +577,12 @@ def _handle_hs_connect(client_socket, addr: str, port: int):
                     chunk = client_socket.recv(8192)
                     if not chunk:
                         break
-                    send_hs_chunk(route, request_id, base64.b64encode(chunk).decode())
+                    # Seal for the service pubkey so the meeting point can't
+                    # observe the plaintext chunk.
+                    sealed = onion_encrypt_for_peer(
+                        service_pub, base64.b64encode(chunk).decode()
+                    )
+                    send_hs_chunk(route, request_id, sealed)
                     with pending_lock:
                         if request_id in pending_meta:
                             pending_meta[request_id]['bytes_up'] += len(chunk)

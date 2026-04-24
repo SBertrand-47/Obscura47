@@ -87,7 +87,11 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
     from src.core import rendezvous as rv_mod
     from src.core.hidden_service import HiddenServiceHost
     from src.core.node import ObscuraNode
-    from src.core.encryptions import ecc_generate_keypair, onion_decrypt_with_priv
+    from src.core.encryptions import (
+        ecc_generate_keypair,
+        onion_decrypt_with_priv,
+        onion_encrypt_for_peer,
+    )
     from src.core.router import set_proxy_ws_client, set_reverse_frame_callback
     from src.utils.onion_addr import verify_descriptor
 
@@ -155,7 +159,13 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
             inner = json.loads(inner_json)
             typ = inner.get("type")
             if typ == "hs_data":
-                received_chunks.append(base64.b64decode(inner.get("chunk", "")))
+                sealed = inner.get("chunk", "")
+                # Host sealed the chunk for our client keypair; meeting
+                # point only saw ciphertext.
+                unsealed = onion_decrypt_with_priv(client_priv, sealed)
+                if unsealed is None:
+                    return
+                received_chunks.append(base64.b64decode(unsealed))
             elif typ == "hs_close":
                 received_close.set()
 
@@ -188,12 +198,17 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         # 5. Dial the hidden service using rendezvous functions.
         dialed = rv_mod.dial_hidden_service(host.address, client_pub)
         assert dialed is not None, "dial_hidden_service returned None"
-        route, request_id = dialed
+        route, request_id, service_pub = dialed
+        assert service_pub == host.pub_pem
         time.sleep(0.3)  # let hs_incoming propagate to host + local connect
 
-        # 6. Send data through the circuit.
+        # 6. Send data through the circuit, sealed for the service pubkey so
+        # the meeting point only relays ciphertext.
         payload = b"ping-obscura-hs-smoke"
-        rv_mod.send_hs_chunk(route, request_id, base64.b64encode(payload).decode())
+        sealed_up = onion_encrypt_for_peer(
+            service_pub, base64.b64encode(payload).decode()
+        )
+        rv_mod.send_hs_chunk(route, request_id, sealed_up)
 
         # 7. Wait for echo reply to traverse back.
         deadline = time.time() + 10
