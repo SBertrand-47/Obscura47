@@ -8,9 +8,12 @@ local target.
 v1 simplifications:
 - Single meeting point per service (Tor v3 uses 3 for DoS resistance).
 - Meeting point splices intro + rendezvous in one relay.
-- No end-to-end encryption between client and host yet — meeting point
-  sees plaintext payloads. TODO: wrap chunks with onion_encrypt_for_peer
-  once basic flow is stable.
+
+Payload confidentiality: hs_data chunks between client and host are
+sealed with onion_encrypt_for_peer so the meeting point only sees
+opaque ciphertext. Client→host uses the service pubkey (from the
+descriptor); host→client uses the client's ephemeral pubkey handed to
+the host in hs_incoming.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import Any
 from src.core.encryptions import (
     ecc_load_or_create_keypair,
     onion_decrypt_with_priv,
+    onion_encrypt_for_peer,
 )
 from src.core.router import (
     _send_frame_via_route,
@@ -64,8 +68,10 @@ class HiddenServiceHost:
         self.intro_route: list[dict] | None = None
         self.intro_request_id: str | None = None
 
-        # session_id -> local TCP socket to the target app.
-        self._sessions: dict[str, socket.socket] = {}
+        # session_id -> (local TCP socket, client_pub PEM) for the target app.
+        # client_pub is used to seal host→client hs_data so the meeting point
+        # can't observe payloads.
+        self._sessions: dict[str, tuple[socket.socket, str]] = {}
         self._sessions_lock = threading.Lock()
 
         self._stopped = threading.Event()
@@ -115,7 +121,9 @@ class HiddenServiceHost:
 
     def _handle_incoming(self, inner: dict):
         session_id = inner.get('session_id')
-        if not session_id:
+        client_pub = inner.get('client_pub')
+        if not session_id or not client_pub:
+            log.warning("Host: hs_incoming missing session_id or client_pub")
             return
         try:
             sock = socket.create_connection((self.target_host, self.target_port), timeout=5)
@@ -125,7 +133,7 @@ class HiddenServiceHost:
             self._send_close(session_id)
             return
         with self._sessions_lock:
-            self._sessions[session_id] = sock
+            self._sessions[session_id] = (sock, client_pub)
         log.info("HS session %s opened → local %s:%s",
                  session_id, self.target_host, self.target_port)
         threading.Thread(target=self._pump_local_to_circuit,
@@ -133,12 +141,17 @@ class HiddenServiceHost:
 
     def _handle_data(self, inner: dict):
         session_id = inner.get('session_id')
-        chunk_b64 = inner.get('chunk')
-        if not session_id or not chunk_b64:
+        sealed = inner.get('chunk')
+        if not session_id or not sealed:
             return
         with self._sessions_lock:
-            sock = self._sessions.get(session_id)
-        if not sock:
+            entry = self._sessions.get(session_id)
+        if not entry:
+            return
+        sock, _ = entry
+        chunk_b64 = onion_decrypt_with_priv(self.priv, sealed)
+        if chunk_b64 is None:
+            log.warning("HS chunk decrypt failed session=%s", session_id)
             return
         try:
             sock.sendall(base64.b64decode(chunk_b64))
@@ -153,8 +166,9 @@ class HiddenServiceHost:
 
     def _close_session(self, session_id: str, *, notify: bool):
         with self._sessions_lock:
-            sock = self._sessions.pop(session_id, None)
-        if sock:
+            entry = self._sessions.pop(session_id, None)
+        if entry:
+            sock, _ = entry
             try:
                 sock.close()
             except Exception:
@@ -180,11 +194,17 @@ class HiddenServiceHost:
     def _send_data(self, session_id: str, chunk: bytes):
         if not self.intro_route or not self.intro_request_id:
             return
+        with self._sessions_lock:
+            entry = self._sessions.get(session_id)
+        if not entry:
+            return
+        _, client_pub = entry
+        sealed = onion_encrypt_for_peer(client_pub, base64.b64encode(chunk).decode())
         envelope = {
             'type': 'hs_data',
             'request_id': self.intro_request_id,
             'session_id': session_id,
-            'chunk': base64.b64encode(chunk).decode(),
+            'chunk': sealed,
         }
         send_hs_frame(self.intro_route, envelope)
 
