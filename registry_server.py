@@ -226,6 +226,15 @@ async def init_db():
     await DB.execute("""
         INSERT OR IGNORE INTO network_status (id, kill_active) VALUES (1, 0)
     """)
+    # Hidden-service descriptors (plaintext signed blobs)
+    await DB.execute("""
+        CREATE TABLE IF NOT EXISTS hs_descriptors (
+            addr TEXT PRIMARY KEY,
+            descriptor TEXT NOT NULL,
+            expires REAL NOT NULL,
+            updated REAL NOT NULL
+        )
+    """)
     await DB.commit()
     print(f"[registry] SQLite database initialized at {DB_PATH}")
 
@@ -817,6 +826,65 @@ async def admin_list_peers(request: Request, authorization: str | None = Header(
         "total_peers": len(all_peers),
         "peers": [AdminPeerInfo(**p) for p in all_peers],
     }
+
+
+# ── Hidden services ──────────────────────────────────────────────
+
+from src.utils.onion_addr import verify_descriptor as _verify_hs_desc
+
+
+@app.post("/hs/descriptor")
+async def publish_hs_descriptor(request: Request):
+    """Publish a signed hidden-service descriptor. Body is the descriptor JSON."""
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, detail="Rate limit exceeded")
+    try:
+        desc = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="Invalid JSON")
+    if not isinstance(desc, dict):
+        raise HTTPException(400, detail="Descriptor must be a JSON object")
+    if not _verify_hs_desc(desc):
+        raise HTTPException(400, detail="Descriptor failed verification")
+    addr = desc["addr"]
+    expires = float(desc["expires"])
+    now = time.time()
+    await DB.execute(
+        "INSERT OR REPLACE INTO hs_descriptors (addr, descriptor, expires, updated) VALUES (?, ?, ?, ?)",
+        (addr, json.dumps(desc), expires, now),
+    )
+    await DB.commit()
+    return {"ok": True, "addr": addr, "expires": expires}
+
+
+@app.get("/hs/descriptor/{addr}")
+async def fetch_hs_descriptor(addr: str):
+    """Fetch the most recent signed descriptor for a `.obscura` address."""
+    now = time.time()
+    # Opportunistically drop expired entries
+    await DB.execute("DELETE FROM hs_descriptors WHERE expires < ?", (now,))
+    await DB.commit()
+    async with DB.execute(
+        "SELECT descriptor FROM hs_descriptors WHERE addr = ? AND expires >= ?",
+        (addr, now),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(404, detail="Descriptor not found")
+    return json.loads(row[0])
+
+
+@app.get("/hs/list")
+async def list_hs_descriptors():
+    """Lab observability: list all live hidden services."""
+    now = time.time()
+    async with DB.execute(
+        "SELECT addr, expires, updated FROM hs_descriptors WHERE expires >= ? ORDER BY updated DESC",
+        (now,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    return [{"addr": r[0], "expires": r[1], "updated": r[2]} for r in rows]
 
 
 @app.get("/admin/dashboard/data")
