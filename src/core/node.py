@@ -4,7 +4,7 @@ import json
 import time
 import sys
 from src.core.router import Router
-from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair
+from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer, WSClient
@@ -36,6 +36,16 @@ class ObscuraNode:
         self.peers = []
         # Load or create persistent node ECDH keypair for onion layer
         self.priv_key, self.pub_pem = ecc_load_or_create_keypair(NODE_KEY_PATH)
+
+        # Hidden-service meeting-point state (this node acts as intro + rendezvous).
+        # hs_services:  service_addr -> host's circuit request_id
+        # hs_sessions:  session_id (=client's request_id) -> service_addr
+        # hs_pubs:      request_id -> public key of the circuit endpoint (host or client),
+        #               used to encrypt reverse payloads so intermediate hops can't peek.
+        self._hs_services: dict[str, str] = {}
+        self._hs_sessions: dict[str, str] = {}
+        self._hs_pubs: dict[str, str] = {}
+        self._hs_lock = threading.Lock()
 
         # Reverse-channel registry: request_id -> send_back callable
         # When a tunnel CONNECT arrives on an inbound connection, we record
@@ -184,6 +194,12 @@ class ObscuraNode:
             log.warning("Invalid next_hop format; dropping")
             return
 
+        # Hidden-service envelope — same route/request_id shape as tunnels,
+        # terminates at this node (meeting point) instead of opening TCP.
+        if isinstance(layer, dict) and layer.get('type') in ('hs_establish', 'hs_connect', 'hs_data', 'hs_close') and isinstance(layer.get('route'), list):
+            self._process_hs_frame(layer, send_back)
+            return
+
         # Tunnel envelope (type + route) — walk the route and forward
         if isinstance(layer, dict) and layer.get('type') in ('connect', 'data', 'close') and isinstance(layer.get('route'), list):
             route = layer['route']
@@ -206,6 +222,145 @@ class ObscuraNode:
             return
 
         log.warning("Unrecognized frame shape; dropping")
+
+    def _process_hs_frame(self, layer: dict, send_back):
+        """Process a hidden-service frame: forward if route non-empty, else handle as meeting point."""
+        route = layer['route']
+        typ = layer['type']
+        req_id = layer.get('request_id', '')
+
+        # Store inbound reverse channel on first contact (establish/connect).
+        if typ in ('hs_establish', 'hs_connect') and send_back and req_id:
+            with self._reverse_lock:
+                self._reverse_channels[req_id] = send_back
+
+        if route:
+            next_hop = route.pop(0)
+            self.router.forward_message(next_hop, layer)
+            return
+
+        # Terminal — this node is the meeting point.
+        if typ == 'hs_establish':
+            self._hs_terminal_establish(layer)
+        elif typ == 'hs_connect':
+            self._hs_terminal_connect(layer)
+        elif typ == 'hs_data':
+            self._hs_terminal_data(layer)
+        elif typ == 'hs_close':
+            self._hs_terminal_close(layer)
+
+    def _hs_send_reverse(self, target_request_id: str, inner: dict) -> bool:
+        """Send an inner payload back along the reverse channel of a circuit.
+
+        Mirrors the exit-node reverse flow: encrypt the inner JSON for the
+        endpoint's public key, wrap as a reverse_data frame, write via the
+        stored send_back.  Intermediate hops forward the frame unchanged.
+        """
+        with self._reverse_lock:
+            send_fn = self._reverse_channels.get(target_request_id)
+        pub = self._hs_pubs.get(target_request_id)
+        if not send_fn or not pub:
+            log.warning("No reverse path for hs request_id=%s", target_request_id)
+            return False
+        encrypted = onion_encrypt_for_peer(pub, json.dumps(inner))
+        frame = {
+            'type': 'reverse_close' if inner.get('type') == 'hs_close' else 'reverse_data',
+            'request_id': target_request_id,
+            'encrypted_response': encrypted,
+        }
+        try:
+            send_fn(json.dumps(frame))
+            return True
+        except Exception as e:
+            log.error("hs reverse send error | %s", e)
+            return False
+
+    def _hs_terminal_establish(self, layer: dict):
+        service_addr = layer.get('service_addr')
+        host_pub = layer.get('pub')
+        req_id = layer.get('request_id', '')
+        if not service_addr or not host_pub or not req_id:
+            log.warning("Malformed hs_establish; dropping")
+            return
+        with self._hs_lock:
+            self._hs_services[service_addr] = req_id
+            self._hs_pubs[req_id] = host_pub
+        log.info("HS established: %s at this meeting point (req=%s)", service_addr, req_id)
+
+    def _hs_terminal_connect(self, layer: dict):
+        service_addr = layer.get('service_addr')
+        session_id = layer.get('request_id', '')
+        client_pub = layer.get('pub')
+        if not service_addr or not session_id or not client_pub:
+            log.warning("Malformed hs_connect; dropping")
+            return
+        with self._hs_lock:
+            host_req = self._hs_services.get(service_addr)
+            if not host_req:
+                log.info("HS %s not registered here; rejecting", service_addr)
+                self._hs_pubs[session_id] = client_pub
+                self._hs_send_reverse(session_id, {
+                    'type': 'hs_close',
+                    'request_id': session_id,
+                    'reason': 'not_found',
+                })
+                return
+            self._hs_sessions[session_id] = service_addr
+            self._hs_pubs[session_id] = client_pub
+        # Notify the host about the new session on its intro circuit.
+        self._hs_send_reverse(host_req, {
+            'type': 'hs_incoming',
+            'session_id': session_id,
+            'service_addr': service_addr,
+            'client_pub': client_pub,
+        })
+        log.info("HS session opened: %s session=%s", service_addr, session_id)
+
+    def _hs_terminal_data(self, layer: dict):
+        req_id = layer.get('request_id', '')
+        chunk = layer.get('chunk')
+        session_id = layer.get('session_id')
+        if chunk is None:
+            return
+        # From client side: no session_id in layer, use request_id to look up session.
+        if session_id is None:
+            with self._hs_lock:
+                service_addr = self._hs_sessions.get(req_id)
+                host_req = self._hs_services.get(service_addr) if service_addr else None
+            if not host_req:
+                log.warning("hs_data from unknown client session %s", req_id)
+                return
+            self._hs_send_reverse(host_req, {
+                'type': 'hs_data',
+                'session_id': req_id,
+                'chunk': chunk,
+            })
+        else:
+            # From host side: route back to the client identified by session_id.
+            # Include request_id so the client-side dispatcher can match the
+            # frame to its pending socket (mirrors exit-tunnel reverse shape).
+            self._hs_send_reverse(session_id, {
+                'type': 'hs_data',
+                'request_id': session_id,
+                'chunk': chunk,
+            })
+
+    def _hs_terminal_close(self, layer: dict):
+        req_id = layer.get('request_id', '')
+        session_id = layer.get('session_id')
+        with self._hs_lock:
+            if session_id is None:
+                # Client-initiated close — look up the session by its circuit id.
+                service_addr = self._hs_sessions.pop(req_id, None)
+                host_req = self._hs_services.get(service_addr) if service_addr else None
+                target = host_req
+                notify = {'type': 'hs_close', 'session_id': req_id}
+            else:
+                self._hs_sessions.pop(session_id, None)
+                target = session_id
+                notify = {'type': 'hs_close', 'request_id': session_id}
+        if target:
+            self._hs_send_reverse(target, notify)
 
     def listen_for_nodes(self):
         """Continuously listen for other nodes' discovery responses."""

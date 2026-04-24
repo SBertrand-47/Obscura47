@@ -6,6 +6,11 @@ TCP traffic through 4-7 encrypted hops using onion layering, with dual transport
 challenge-response auth, guard-node pinning, and bidirectional reverse channels
 for NAT traversal.
 
+It also supports **`.obscura` hidden services**: you can publish a local site or
+TCP service under a self-authenticating address derived from its public key, so
+other participants on the network can reach it without it ever touching the
+clearnet.
+
 **Want to help the network grow?** Clone, run one command, and you're
 contributing bandwidth as a relay node. No configuration needed.
 
@@ -87,6 +92,9 @@ python tray_app.py node+exit         # Tray mode, relay + exit
 - **Health monitoring**: configurable node health checks, exit scoring with
   RTT-based selection and exponential backoff
 - **Tunnel controls**: per-circuit byte/time caps, per-IP limits, idle sweepers
+- **Hidden services**: publish a local TCP service at `<pubkey-hash>.obscura`,
+  reachable only through the network via signed descriptors and onion
+  rendezvous — no clearnet exposure
 
 ## Installation
 
@@ -105,6 +113,7 @@ python join_network.py              # Interactive menu
 python join_network.py node         # Relay node
 python join_network.py exit         # Exit node
 python join_network.py node+exit    # Both
+python join_network.py host ./site  # Publish a directory as a .obscura site
 ```
 
 ### 2. System Tray (background)
@@ -205,6 +214,48 @@ before they receive traffic. Only run an exit if you understand the implications
 traffic is encrypted through 4-7 hops before reaching the exit. Configure your
 browser to use `127.0.0.1:9047` as an HTTP proxy.
 
+**As a host**, you publish a local TCP service (an HTTP site, an API, anything
+TCP) at a `.obscura` address derived from a public key you control. The host
+keeps an onion circuit open to a meeting-point relay and publishes a signed
+descriptor to the registry so clients can find it. Incoming sessions from the
+network are bridged to your local service.
+
+## Hidden Services (`.obscura`)
+
+A hidden service has an address of the form `<16 base32 chars>.obscura`, which
+is the truncated SHA-256 of the service's public key. The name *is* the
+identity: the registry cannot forge a descriptor for an address it does not
+hold the private key for.
+
+**Publishing a service.** The host generates (or loads) a keypair, picks a
+meeting-point relay, opens an onion circuit to it, and registers a signed
+descriptor at the registry listing the meeting point. The descriptor is
+short-lived (1 hour) and re-published periodically.
+
+```bash
+# Serve a directory (spawns a quiet local http.server, points Obscura at it)
+python join_network.py host ./mysite
+
+# Or publish an existing local service
+python join_network.py host 127.0.0.1:8000
+```
+
+On startup the host prints its `.obscura` address — share it with whoever
+should reach the service.
+
+**Reaching a service.** With a local proxy running, any `.obscura` hostname is
+resolved by fetching its descriptor, dialing the meeting point through an onion
+circuit, and streaming bytes over the resulting session.
+
+```bash
+python join_network.py proxy
+curl -x http://127.0.0.1:9047 http://<your-address>.obscura/
+```
+
+The meeting-point relay splices the host and client circuits by session id;
+neither endpoint learns the other's IP. The service key stays on the host; a
+lost key means a lost address.
+
 ## Running the Tests
 
 ```bash
@@ -250,6 +301,8 @@ src/
     proxy.py            # HTTP CONNECT termination + tunnel orchestration
     node.py             # Relay node (dual-protocol TCP + WebSocket)
     exit_node.py        # Exit node (egress, reverse channel responses)
+    hidden_service.py   # `.obscura` hidden-service host
+    rendezvous.py       # Client-side hidden-service dial
     router.py           # Route building, onion layering, frame dispatch
     guards.py           # First-hop guard pinning
     encryptions.py      # ECDH P-256 + AES-GCM + ECDSA primitives
@@ -260,6 +313,7 @@ src/
   utils/
     config.py           # Env var loading (single source of truth)
     logger.py
+    onion_addr.py       # .obscura address derivation + descriptor signing
 registry_server.py      # Standalone FastAPI + SQLite registry
 app.py                  # Desktop GUI (Tkinter)
 tray_app.py             # System tray background mode

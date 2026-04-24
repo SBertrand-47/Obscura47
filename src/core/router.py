@@ -398,7 +398,7 @@ def _send_frame_via_route(route, envelope, ws_client=None):
     frame_json = json.dumps({"encrypted_data": encrypted})
 
     # Detect tunnel frame and reuse persistent socket to first hop
-    is_tunnel = isinstance(envelope, dict) and envelope.get('type') in ('connect', 'data', 'close') and envelope.get('request_id')
+    is_tunnel = isinstance(envelope, dict) and envelope.get('type') in ('connect', 'data', 'close', 'hs_establish', 'hs_connect', 'hs_data', 'hs_close') and envelope.get('request_id')
     key = (envelope['request_id'], first_hop['host'], first_hop['port']) if is_tunnel else None
 
     while attempt < FRAME_RETRY_ATTEMPTS:
@@ -443,7 +443,7 @@ def _send_frame_via_route(route, envelope, ws_client=None):
                 with socket.create_connection((first_hop['host'], first_hop['port']), timeout=SOCKET_CONNECT_TIMEOUT) as sock:
                     sock.send((frame_json + "\n").encode())
             log.info("Sent frame to %s:%s (TCP)", first_hop['host'], first_hop['port'])
-            if is_tunnel and envelope.get('type') == 'close':
+            if is_tunnel and envelope.get('type') in ('close', 'hs_close'):
                 try:
                     ent = TUNNEL_SOCKETS.pop(key, None)
                     if ent and ent.get('sock'):
@@ -516,6 +516,20 @@ def send_tunnel_data(destination, route, request_id: str, chunk_b64: str):
         "route": remaining,
     }
     _send_frame_via_route([route[0]], envelope)
+
+def send_hs_frame(route, envelope: dict):
+    """Send a hidden-service control/data frame along a pre-built onion route.
+
+    The route is walked the same way as tunnel frames; the terminal node
+    (meeting point) handles the frame instead of opening a TCP connection.
+    """
+    if not route:
+        return False
+    remaining = list(route[1:])
+    envelope = dict(envelope)
+    envelope['route'] = remaining
+    return _send_frame_via_route([route[0]], envelope)
+
 
 def close_tunnel(destination, route, request_id: str):
     if not route:
