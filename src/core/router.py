@@ -398,7 +398,7 @@ def _send_frame_via_route(route, envelope, ws_client=None):
     frame_json = json.dumps({"encrypted_data": encrypted})
 
     # Detect tunnel frame and reuse persistent socket to first hop
-    is_tunnel = isinstance(envelope, dict) and envelope.get('type') in ('connect', 'data', 'close', 'hs_establish', 'hs_connect', 'hs_data', 'hs_close') and envelope.get('request_id')
+    is_tunnel = isinstance(envelope, dict) and envelope.get('type') in ('connect', 'data', 'close', 'hs_establish', 'hs_introduce', 'rv_establish', 'rv_join', 'hs_data', 'hs_close') and envelope.get('request_id')
     key = (envelope['request_id'], first_hop['host'], first_hop['port']) if is_tunnel else None
 
     while attempt < FRAME_RETRY_ATTEMPTS:
