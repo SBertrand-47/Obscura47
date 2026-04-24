@@ -9,7 +9,7 @@ import os
 import base64
 from src.utils.logger import get_logger
 from src.core.router import build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback, set_proxy_ws_client
-from src.core.rendezvous import dial_hidden_service, send_hs_chunk, close_hs
+from src.core.rendezvous import dial_hidden_service, send_hs_chunk, close_hs, notify_rv_ready
 from src.utils.onion_addr import is_obscura_address
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
@@ -201,6 +201,13 @@ def _handle_exit_response_data(raw_data):
         log.debug(json.dumps({"event":"exit_frame","type":typ,"request_id":request_id}))
     else:
         log.debug(f"Exit frame | type={typ} | request_id={request_id}")
+
+    # rv_ready fires before the client socket is registered — dial is
+    # still blocking waiting for it — so handle it before the pending
+    # lookup.
+    if typ == "rv_ready":
+        notify_rv_ready(request_id)
+        return
 
     with pending_lock:
         client_socket = pending_requests.get(request_id)
@@ -550,7 +557,10 @@ def handle_connect(client_socket):
 def _handle_hs_connect(client_socket, addr: str, port: int):
     """Dial an `.obscura` address and bridge the browser socket to the HS tunnel."""
     try:
-        dialed = dial_hidden_service(addr, _proxy_pub_pem)
+        # Pass the locally observed relays so the client can pick a
+        # rendezvous point without another registry round-trip.
+        dialed = dial_hidden_service(
+            addr, _proxy_pub_pem, peers=list(relay_peers))
         if not dialed:
             client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             client_socket.close()
