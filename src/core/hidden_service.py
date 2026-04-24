@@ -1,25 +1,33 @@
 """Obscura hidden-service host.
 
 Runs inside its own process. Given a local TCP target and a service keypair,
-establishes an onion circuit to a meeting-point relay, publishes a signed
-descriptor to the registry, and bridges incoming onion sessions to the
-local target.
+establishes onion circuits to several intro points, publishes a signed
+descriptor to the registry, and bridges incoming rendezvous sessions to
+the local target.
 
-v1 simplifications:
-- Single meeting point per service (Tor v3 uses 3 for DoS resistance).
-- Meeting point splices intro + rendezvous in one relay.
+Role split (Tor v3 style):
 
-Payload confidentiality: hs_data chunks between client and host are
-sealed with onion_encrypt_for_peer so the meeting point only sees
-opaque ciphertext. Client→host uses the service pubkey (from the
-descriptor); host→client uses the client's ephemeral pubkey handed to
-the host in hs_incoming.
+- Intro points: N relays the host holds open circuits to. Each intro
+  point advertises the service to clients via the descriptor. When a
+  client introduces, the intro point relays a sealed blob to the host
+  but never carries session data. Introduce blobs are encrypted to the
+  service pubkey so the intro point can't read them.
+- Rendezvous point: a separate relay chosen by the client. The host
+  opens a fresh circuit to the rendezvous point per session and joins
+  it by presenting the client's cookie. The rendezvous point splices
+  the two circuits so hs_data flows between them.
+
+Payload confidentiality: hs_data chunks are sealed with
+onion_encrypt_for_peer so the rendezvous point only relays ciphertext.
+Client→host uses the service pubkey; host→client uses the client's
+ephemeral pubkey delivered inside the introduce blob.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import os
 import random
 import socket
 import threading
@@ -33,7 +41,6 @@ from src.core.encryptions import (
     onion_encrypt_for_peer,
 )
 from src.core.router import (
-    _send_frame_via_route,
     send_hs_frame,
     set_proxy_ws_client,
     set_reverse_frame_callback,
@@ -56,6 +63,9 @@ from src.utils.onion_addr import (
 log = get_logger(__name__)
 
 
+INTRO_POINT_COUNT = 3
+
+
 class HiddenServiceHost:
     def __init__(self, target_host: str, target_port: int, key_path: str):
         self.target_host = target_host
@@ -63,20 +73,22 @@ class HiddenServiceHost:
         self.priv, self.pub_pem = ecc_load_or_create_keypair(key_path)
         self.address = address_from_pubkey(self.pub_pem)
 
-        # Intro-circuit state — single meeting point for v1.
-        self.meeting_point: dict[str, Any] | None = None
-        self.intro_route: list[dict] | None = None
-        self.intro_request_id: str | None = None
+        # Intro-circuit state: one circuit per intro point. Maps intro
+        # request_id -> {'peer': peer_dict, 'route': [peer]}.
+        self._intro_circuits: dict[str, dict[str, Any]] = {}
+        self._intro_peers: list[dict[str, Any]] = []
 
-        # session_id -> (local TCP socket, client_pub PEM) for the target app.
-        # client_pub is used to seal host→client hs_data so the meeting point
-        # can't observe payloads.
-        self._sessions: dict[str, tuple[socket.socket, str]] = {}
+        # Rendezvous session state:
+        # rv_req_id (host's circuit to the rv point) -> {
+        #   'sock': local TCP socket,
+        #   'client_pub': PEM str, 'route': [rv_peer],
+        #   'ready': threading.Event(),
+        # }
+        self._sessions: dict[str, dict[str, Any]] = {}
         self._sessions_lock = threading.Lock()
 
         self._stopped = threading.Event()
 
-        # Host owns its own WSClient so reverse frames flow through our handler.
         self.ws_client = WSClient(
             self.priv, self.pub_pem,
             queue_max=CHANNEL_QUEUE_MAX,
@@ -99,7 +111,6 @@ class HiddenServiceHost:
         self._handle_reverse(frame)
 
     def _handle_reverse(self, frame: dict):
-        """Decrypt the inner HS payload and dispatch to the right session handler."""
         encrypted = frame.get('encrypted_response')
         if not encrypted:
             return
@@ -112,153 +123,235 @@ class HiddenServiceHost:
         except Exception:
             return
         typ = inner.get('type')
-        if typ == 'hs_incoming':
-            self._handle_incoming(inner)
+        if typ == 'hs_introduce':
+            self._handle_introduce(inner)
+        elif typ == 'rv_ready':
+            self._handle_rv_ready(inner)
         elif typ == 'hs_data':
             self._handle_data(inner)
         elif typ == 'hs_close':
             self._handle_close(inner)
 
-    def _handle_incoming(self, inner: dict):
-        session_id = inner.get('session_id')
-        client_pub = inner.get('client_pub')
-        if not session_id or not client_pub:
-            log.warning("Host: hs_incoming missing session_id or client_pub")
+    # ── Intro → rendezvous ────────────────────────────────────────
+
+    def _handle_introduce(self, inner: dict):
+        """An intro point forwarded a client's sealed introduce blob."""
+        blob = inner.get('introduce_payload')
+        if not blob:
+            return
+        payload_json = onion_decrypt_with_priv(self.priv, blob)
+        if not payload_json:
+            log.warning("Host: introduce blob decrypt failed")
             return
         try:
-            sock = socket.create_connection((self.target_host, self.target_port), timeout=5)
+            payload = json.loads(payload_json)
+        except Exception:
+            return
+        rv_point = payload.get('rv_point')
+        cookie = payload.get('cookie')
+        client_pub = payload.get('client_pub')
+        if not rv_point or not cookie or not client_pub:
+            log.warning("Host: malformed introduce payload")
+            return
+
+        threading.Thread(
+            target=self._open_rv_session,
+            args=(rv_point, cookie, client_pub),
+            daemon=True,
+        ).start()
+
+    def _open_rv_session(self, rv_point: dict, cookie: str, client_pub: str):
+        rv_req_id = f"R{time.time_ns()}"
+        route = [rv_point]
+        ready = threading.Event()
+        with self._sessions_lock:
+            self._sessions[rv_req_id] = {
+                'sock': None,
+                'client_pub': client_pub,
+                'route': route,
+                'ready': ready,
+            }
+
+        envelope = {
+            'type': 'rv_join',
+            'request_id': rv_req_id,
+            'cookie': cookie,
+            'pub': self.pub_pem,
+        }
+        if not send_hs_frame(route, envelope):
+            log.warning("rv_join send failed for session %s", rv_req_id)
+            self._drop_session(rv_req_id)
+            return
+
+        # Wait for the rendezvous to confirm the splice before dialling local.
+        if not ready.wait(timeout=10):
+            log.warning("rv_ready not received for session %s", rv_req_id)
+            self._drop_session(rv_req_id)
+            return
+
+        try:
+            sock = socket.create_connection(
+                (self.target_host, self.target_port), timeout=5)
         except Exception as e:
-            log.error("Host: failed to connect local target %s:%s | %s",
-                      self.target_host, self.target_port, e)
-            self._send_close(session_id)
+            log.error("Host: local target connect failed | %s", e)
+            self._send_close(rv_req_id)
+            self._drop_session(rv_req_id)
+            return
+
+        with self._sessions_lock:
+            entry = self._sessions.get(rv_req_id)
+            if entry is None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return
+            entry['sock'] = sock
+
+        log.info("HS session %s → local %s:%s",
+                 rv_req_id, self.target_host, self.target_port)
+        threading.Thread(
+            target=self._pump_local_to_circuit,
+            args=(rv_req_id, sock),
+            daemon=True,
+        ).start()
+
+    def _handle_rv_ready(self, inner: dict):
+        rv_req_id = inner.get('request_id')
+        if not rv_req_id:
             return
         with self._sessions_lock:
-            self._sessions[session_id] = (sock, client_pub)
-        log.info("HS session %s opened → local %s:%s",
-                 session_id, self.target_host, self.target_port)
-        threading.Thread(target=self._pump_local_to_circuit,
-                         args=(session_id, sock), daemon=True).start()
+            entry = self._sessions.get(rv_req_id)
+        if entry:
+            entry['ready'].set()
+
+    # ── Data plane on rv circuits ─────────────────────────────────
 
     def _handle_data(self, inner: dict):
-        session_id = inner.get('session_id')
+        rv_req_id = inner.get('request_id')
         sealed = inner.get('chunk')
-        if not session_id or not sealed:
+        if not rv_req_id or not sealed:
             return
         with self._sessions_lock:
-            entry = self._sessions.get(session_id)
-        if not entry:
+            entry = self._sessions.get(rv_req_id)
+        if not entry or not entry.get('sock'):
             return
-        sock, _ = entry
         chunk_b64 = onion_decrypt_with_priv(self.priv, sealed)
         if chunk_b64 is None:
-            log.warning("HS chunk decrypt failed session=%s", session_id)
+            log.warning("HS chunk decrypt failed session=%s", rv_req_id)
             return
         try:
-            sock.sendall(base64.b64decode(chunk_b64))
+            entry['sock'].sendall(base64.b64decode(chunk_b64))
         except Exception as e:
-            log.warning("HS local write error session=%s | %s", session_id, e)
-            self._close_session(session_id, notify=True)
+            log.warning("HS local write error session=%s | %s", rv_req_id, e)
+            self._close_session(rv_req_id, notify=True)
 
     def _handle_close(self, inner: dict):
-        session_id = inner.get('session_id')
-        if session_id:
-            self._close_session(session_id, notify=False)
+        rv_req_id = inner.get('request_id')
+        if rv_req_id:
+            self._close_session(rv_req_id, notify=False)
 
-    def _close_session(self, session_id: str, *, notify: bool):
+    def _close_session(self, rv_req_id: str, *, notify: bool):
         with self._sessions_lock:
-            entry = self._sessions.pop(session_id, None)
-        if entry:
-            sock, _ = entry
+            entry = self._sessions.pop(rv_req_id, None)
+        if entry and entry.get('sock'):
             try:
-                sock.close()
+                entry['sock'].close()
             except Exception:
                 pass
         if notify:
-            self._send_close(session_id)
+            self._send_close(rv_req_id)
 
-    def _pump_local_to_circuit(self, session_id: str, sock: socket.socket):
-        """Read from the local app socket and send as hs_data along the intro circuit."""
+    def _drop_session(self, rv_req_id: str):
+        with self._sessions_lock:
+            self._sessions.pop(rv_req_id, None)
+
+    def _pump_local_to_circuit(self, rv_req_id: str, sock: socket.socket):
         try:
             while not self._stopped.is_set():
                 chunk = sock.recv(8192)
                 if not chunk:
                     break
-                self._send_data(session_id, chunk)
+                self._send_data(rv_req_id, chunk)
         except Exception as e:
-            log.warning("HS pump error session=%s | %s", session_id, e)
+            log.warning("HS pump error session=%s | %s", rv_req_id, e)
         finally:
-            self._close_session(session_id, notify=True)
+            self._close_session(rv_req_id, notify=True)
 
-    # ── Outbound on the intro circuit ──────────────────────────────
-
-    def _send_data(self, session_id: str, chunk: bytes):
-        if not self.intro_route or not self.intro_request_id:
-            return
+    def _send_data(self, rv_req_id: str, chunk: bytes):
         with self._sessions_lock:
-            entry = self._sessions.get(session_id)
+            entry = self._sessions.get(rv_req_id)
         if not entry:
             return
-        _, client_pub = entry
-        sealed = onion_encrypt_for_peer(client_pub, base64.b64encode(chunk).decode())
+        sealed = onion_encrypt_for_peer(
+            entry['client_pub'], base64.b64encode(chunk).decode())
         envelope = {
             'type': 'hs_data',
-            'request_id': self.intro_request_id,
-            'session_id': session_id,
+            'request_id': rv_req_id,
             'chunk': sealed,
         }
-        send_hs_frame(self.intro_route, envelope)
+        send_hs_frame(entry['route'], envelope)
 
-    def _send_close(self, session_id: str):
-        if not self.intro_route or not self.intro_request_id:
+    def _send_close(self, rv_req_id: str):
+        with self._sessions_lock:
+            entry = self._sessions.get(rv_req_id)
+        if not entry:
             return
         envelope = {
             'type': 'hs_close',
-            'request_id': self.intro_request_id,
-            'session_id': session_id,
+            'request_id': rv_req_id,
         }
-        send_hs_frame(self.intro_route, envelope)
+        send_hs_frame(entry['route'], envelope)
 
     # ── Startup ───────────────────────────────────────────────────
 
-    def _pick_meeting_point(self, peers: list[dict]) -> dict | None:
+    def _pick_intro_points(self, peers: list[dict], count: int) -> list[dict]:
         candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
-        return random.choice(candidates) if candidates else None
+        if not candidates:
+            return []
+        random.shuffle(candidates)
+        return candidates[:count]
 
     def establish(self, peers: list[dict] | None = None) -> bool:
-        """Build an intro circuit to a meeting point and register with it."""
+        """Open intro circuits to several relays so clients have a choice."""
         if peers is None:
             peers = fetch_peers_from_registry()
-        mp = self._pick_meeting_point(peers)
-        if not mp:
-            log.error("No suitable meeting point among peers")
+        intros = self._pick_intro_points(peers, INTRO_POINT_COUNT)
+        if not intros:
+            log.error("No suitable intro points among peers")
             return False
-        # Single-hop circuit for v1: meeting point *is* the terminal.
-        # Multi-hop can be layered on later by padding with extra relays.
-        self.meeting_point = mp
-        self.intro_route = [mp]
-        self.intro_request_id = f"H{time.time_ns()}"
-        envelope = {
-            'type': 'hs_establish',
-            'request_id': self.intro_request_id,
-            'service_addr': self.address,
-            'pub': self.pub_pem,
-        }
-        ok = send_hs_frame(self.intro_route, envelope)
-        if ok:
-            log.info("HS %s established at meeting point %s:%s",
-                     self.address, mp.get('host'), mp.get('port'))
-        return bool(ok)
+
+        established = 0
+        for peer in intros:
+            req_id = f"H{time.time_ns()}"
+            route = [peer]
+            envelope = {
+                'type': 'hs_establish',
+                'request_id': req_id,
+                'service_addr': self.address,
+                'pub': self.pub_pem,
+            }
+            if send_hs_frame(route, envelope):
+                self._intro_circuits[req_id] = {'peer': peer, 'route': route}
+                self._intro_peers.append(peer)
+                established += 1
+                log.info("HS %s established at intro %s:%s",
+                         self.address, peer.get('host'), peer.get('port'))
+            else:
+                log.warning("Intro establish failed at %s:%s",
+                            peer.get('host'), peer.get('port'))
+
+        return established > 0
 
     def publish_descriptor(self) -> bool:
-        """Publish a signed descriptor listing our meeting point."""
-        if not self.meeting_point:
+        if not self._intro_peers:
             return False
         intro = [{
-            'host': self.meeting_point.get('host'),
-            'port': self.meeting_point.get('port'),
-            'ws_port': self.meeting_point.get('ws_port'),
-            'pub': self.meeting_point.get('pub'),
-        }]
+            'host': p.get('host'),
+            'port': p.get('port'),
+            'ws_port': p.get('ws_port'),
+            'pub': p.get('pub'),
+        } for p in self._intro_peers]
         desc = build_descriptor(
             self.priv, self.pub_pem,
             port=self.target_port,
@@ -275,15 +368,14 @@ class HiddenServiceHost:
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()
-            log.info("Descriptor published for %s", self.address)
+            log.info("Descriptor published for %s (%d intros)",
+                     self.address, len(intro))
             return True
         except Exception as e:
             log.error("Failed to publish descriptor: %s", e)
             return False
 
     def run(self):
-        # Register global reverse-frame callback so TCP tunnel readers
-        # dispatch inbound reverse frames to this host.
         set_reverse_frame_callback(self._on_tcp_reverse)
         set_proxy_ws_client(self.ws_client)
 
@@ -295,7 +387,6 @@ class HiddenServiceHost:
         log.info("Hidden service %s serving → %s:%s",
                  self.address, self.target_host, self.target_port)
 
-        # Periodic re-publish so the descriptor doesn't expire.
         def republish_loop():
             while not self._stopped.is_set():
                 time.sleep(max(60, DESCRIPTOR_TTL // 2))

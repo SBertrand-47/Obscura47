@@ -1,7 +1,7 @@
-"""Unit tests for hidden-service terminal handling in ObscuraNode.
+"""Unit tests for hidden-service relay handling in ObscuraNode.
 
-Exercises the meeting-point logic directly by calling the internal
-handlers — no real sockets or circuits.
+Exercises the intro-point and rendezvous-point logic directly by
+calling the internal handlers — no real sockets or circuits.
 """
 import json
 import types
@@ -17,21 +17,19 @@ class FakeNode:
     def __init__(self):
         import threading
         self._hs_services = {}
-        self._hs_sessions = {}
         self._hs_pubs = {}
+        self._rv_cookies = {}
+        self._rv_pairs = {}
         self._hs_lock = threading.Lock()
         self._reverse_channels = {}
         self._reverse_lock = threading.Lock()
         self.sent = []  # list of (target_request_id, inner_dict)
 
-    # Copy the real methods by binding them to this fake.
     def register_channel(self, req_id, pub):
-        """Helper — simulate an established circuit."""
         self._reverse_channels[req_id] = lambda s: self._capture(req_id, s)
         self._hs_pubs[req_id] = pub
 
     def _capture(self, req_id, raw):
-        """Store reverse frames emitted by the node under test."""
         frame = json.loads(raw)
         self.sent.append((req_id, frame))
 
@@ -39,11 +37,13 @@ class FakeNode:
 def _bind_hs(fake):
     from src.core import node as node_mod
     for name in (
-        '_hs_send_reverse', '_hs_terminal_establish', '_hs_terminal_connect',
-        '_hs_terminal_data', '_hs_terminal_close', '_process_hs_frame',
+        '_hs_send_reverse',
+        '_hs_terminal_establish', '_hs_terminal_introduce',
+        '_rv_terminal_establish', '_rv_terminal_join',
+        '_rv_terminal_data', '_rv_terminal_close',
+        '_process_hs_frame',
     ):
         setattr(fake, name, types.MethodType(getattr(node_mod.ObscuraNode, name), fake))
-    # forward_message is unused for terminal-only tests, but stub it.
     fake.router = types.SimpleNamespace(forward_message=lambda *a, **k: None)
 
 
@@ -60,84 +60,117 @@ def fake():
 
 
 def test_establish_registers_service(fake):
-    host_priv, host_pub = ecc_generate_keypair()
+    _, host_pub = ecc_generate_keypair()
     fake.register_channel('HOST1', host_pub)
     fake._hs_terminal_establish({
-        'type': 'hs_establish',
-        'request_id': 'HOST1',
-        'service_addr': 'svc.obscura',
-        'pub': host_pub,
+        'type': 'hs_establish', 'request_id': 'HOST1',
+        'service_addr': 'svc.obscura', 'pub': host_pub,
     })
     assert fake._hs_services['svc.obscura'] == 'HOST1'
 
 
-def test_connect_notifies_host(fake):
+def test_introduce_is_relayed_to_host(fake):
     host_priv, host_pub = ecc_generate_keypair()
-    _, client_pub = ecc_generate_keypair()
     fake.register_channel('HOST1', host_pub)
     fake._hs_terminal_establish({
         'type': 'hs_establish', 'request_id': 'HOST1',
         'service_addr': 'svc.obscura', 'pub': host_pub,
     })
-    fake.register_channel('CLIENT1', client_pub)
-    fake._hs_terminal_connect({
-        'type': 'hs_connect', 'request_id': 'CLIENT1',
-        'service_addr': 'svc.obscura', 'pub': client_pub,
+    fake._hs_terminal_introduce({
+        'type': 'hs_introduce', 'request_id': 'INTRO1',
+        'service_addr': 'svc.obscura',
+        'introduce_payload': 'OPAQUE_SEALED_BLOB',
     })
-    # Host should have received an hs_incoming notification.
     assert len(fake.sent) == 1
     target, frame = fake.sent[0]
     assert target == 'HOST1'
     inner = _decode_reverse(frame, host_priv)
-    assert inner['type'] == 'hs_incoming'
-    assert inner['session_id'] == 'CLIENT1'
-    assert inner['service_addr'] == 'svc.obscura'
-    assert inner['client_pub'] == client_pub
+    assert inner == {
+        'type': 'hs_introduce',
+        'service_addr': 'svc.obscura',
+        'introduce_payload': 'OPAQUE_SEALED_BLOB',
+    }
 
 
-def test_connect_to_unknown_service_closes_client(fake):
-    _, client_pub = ecc_generate_keypair()
-    client_priv, _ = ecc_generate_keypair()  # unrelated
-    fake.register_channel('CLIENT1', client_pub)
-    fake._hs_terminal_connect({
-        'type': 'hs_connect', 'request_id': 'CLIENT1',
-        'service_addr': 'missing.obscura', 'pub': client_pub,
+def test_introduce_to_unknown_service_is_dropped(fake):
+    fake._hs_terminal_introduce({
+        'type': 'hs_introduce', 'request_id': 'INTRO1',
+        'service_addr': 'missing.obscura',
+        'introduce_payload': 'BLOB',
     })
-    assert len(fake.sent) == 1
-    _, frame = fake.sent[0]
-    assert frame['type'] == 'reverse_close'
+    assert fake.sent == []
 
 
-def test_data_client_to_host_and_back(fake):
+def test_rv_join_splices_and_notifies_both_sides(fake):
     host_priv, host_pub = ecc_generate_keypair()
     client_priv, client_pub = ecc_generate_keypair()
-    fake.register_channel('HOST1', host_pub)
     fake.register_channel('CLIENT1', client_pub)
-    fake._hs_terminal_establish({
-        'type': 'hs_establish', 'request_id': 'HOST1',
-        'service_addr': 'svc.obscura', 'pub': host_pub,
+
+    fake._rv_terminal_establish({
+        'type': 'rv_establish', 'request_id': 'CLIENT1',
+        'cookie': 'COOKIE123', 'pub': client_pub,
     })
-    fake._hs_terminal_connect({
-        'type': 'hs_connect', 'request_id': 'CLIENT1',
-        'service_addr': 'svc.obscura', 'pub': client_pub,
+    assert fake._rv_cookies['COOKIE123'] == 'CLIENT1'
+
+    fake.register_channel('HOST_RV1', host_pub)
+    fake._rv_terminal_join({
+        'type': 'rv_join', 'request_id': 'HOST_RV1',
+        'cookie': 'COOKIE123', 'pub': host_pub,
+    })
+    # Cookie consumed, pair recorded both directions.
+    assert 'COOKIE123' not in fake._rv_cookies
+    assert fake._rv_pairs['CLIENT1'] == 'HOST_RV1'
+    assert fake._rv_pairs['HOST_RV1'] == 'CLIENT1'
+
+    # rv_ready delivered to both sides.
+    by_target = {target: frame for target, frame in fake.sent}
+    assert set(by_target.keys()) == {'CLIENT1', 'HOST_RV1'}
+    client_inner = _decode_reverse(by_target['CLIENT1'], client_priv)
+    host_inner = _decode_reverse(by_target['HOST_RV1'], host_priv)
+    assert client_inner == {'type': 'rv_ready', 'request_id': 'CLIENT1'}
+    assert host_inner == {'type': 'rv_ready', 'request_id': 'HOST_RV1'}
+
+
+def test_rv_join_with_unknown_cookie_is_dropped(fake):
+    _, host_pub = ecc_generate_keypair()
+    fake.register_channel('HOST_RV1', host_pub)
+    fake._rv_terminal_join({
+        'type': 'rv_join', 'request_id': 'HOST_RV1',
+        'cookie': 'UNKNOWN', 'pub': host_pub,
+    })
+    assert fake._rv_pairs == {}
+    assert fake.sent == []
+
+
+def test_data_splices_in_both_directions(fake):
+    host_priv, host_pub = ecc_generate_keypair()
+    client_priv, client_pub = ecc_generate_keypair()
+    fake.register_channel('CLIENT1', client_pub)
+    fake.register_channel('HOST_RV1', host_pub)
+    fake._rv_terminal_establish({
+        'type': 'rv_establish', 'request_id': 'CLIENT1',
+        'cookie': 'CK', 'pub': client_pub,
+    })
+    fake._rv_terminal_join({
+        'type': 'rv_join', 'request_id': 'HOST_RV1',
+        'cookie': 'CK', 'pub': host_pub,
     })
     fake.sent.clear()
 
     # Client → host
-    fake._hs_terminal_data({
+    fake._rv_terminal_data({
         'type': 'hs_data', 'request_id': 'CLIENT1', 'chunk': 'Zm9v',
     })
     assert len(fake.sent) == 1
     target, frame = fake.sent[0]
-    assert target == 'HOST1'
+    assert target == 'HOST_RV1'
     inner = _decode_reverse(frame, host_priv)
-    assert inner == {'type': 'hs_data', 'session_id': 'CLIENT1', 'chunk': 'Zm9v'}
+    assert inner == {'type': 'hs_data', 'request_id': 'HOST_RV1', 'chunk': 'Zm9v'}
     fake.sent.clear()
 
     # Host → client
-    fake._hs_terminal_data({
-        'type': 'hs_data', 'request_id': 'HOST1',
-        'session_id': 'CLIENT1', 'chunk': 'YmFy',
+    fake._rv_terminal_data({
+        'type': 'hs_data', 'request_id': 'HOST_RV1', 'chunk': 'YmFy',
     })
     assert len(fake.sent) == 1
     target, frame = fake.sent[0]
@@ -146,26 +179,28 @@ def test_data_client_to_host_and_back(fake):
     assert inner == {'type': 'hs_data', 'request_id': 'CLIENT1', 'chunk': 'YmFy'}
 
 
-def test_client_close_notifies_host(fake):
+def test_close_propagates_to_paired_side(fake):
     host_priv, host_pub = ecc_generate_keypair()
     _, client_pub = ecc_generate_keypair()
-    fake.register_channel('HOST1', host_pub)
     fake.register_channel('CLIENT1', client_pub)
-    fake._hs_terminal_establish({
-        'type': 'hs_establish', 'request_id': 'HOST1',
-        'service_addr': 'svc.obscura', 'pub': host_pub,
+    fake.register_channel('HOST_RV1', host_pub)
+    fake._rv_terminal_establish({
+        'type': 'rv_establish', 'request_id': 'CLIENT1',
+        'cookie': 'CK', 'pub': client_pub,
     })
-    fake._hs_terminal_connect({
-        'type': 'hs_connect', 'request_id': 'CLIENT1',
-        'service_addr': 'svc.obscura', 'pub': client_pub,
+    fake._rv_terminal_join({
+        'type': 'rv_join', 'request_id': 'HOST_RV1',
+        'cookie': 'CK', 'pub': host_pub,
     })
     fake.sent.clear()
-    fake._hs_terminal_close({'type': 'hs_close', 'request_id': 'CLIENT1'})
+
+    fake._rv_terminal_close({'type': 'hs_close', 'request_id': 'CLIENT1'})
     assert len(fake.sent) == 1
     target, frame = fake.sent[0]
-    assert target == 'HOST1'
+    assert target == 'HOST_RV1'
     assert frame['type'] == 'reverse_close'
     inner = _decode_reverse(frame, host_priv)
-    assert inner == {'type': 'hs_close', 'session_id': 'CLIENT1'}
-    # Session cleaned up.
-    assert 'CLIENT1' not in fake._hs_sessions
+    assert inner == {'type': 'hs_close', 'request_id': 'HOST_RV1'}
+    # Pair removed both ways.
+    assert 'CLIENT1' not in fake._rv_pairs
+    assert 'HOST_RV1' not in fake._rv_pairs
