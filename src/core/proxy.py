@@ -9,6 +9,8 @@ import os
 import base64
 from src.utils.logger import get_logger
 from src.core.router import build_route47, start_tunnel, send_tunnel_data, close_tunnel, set_reverse_frame_callback, set_proxy_ws_client
+from src.core.rendezvous import dial_hidden_service, send_hs_chunk, close_hs
+from src.utils.onion_addr import is_obscura_address
 from src.core.discover import broadcast_discovery, listen_for_discovery, observe_discovery
 from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
 from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv
@@ -203,7 +205,7 @@ def _handle_exit_response_data(raw_data):
 
     if client_socket:
         try:
-            if typ == "data":
+            if typ in ("data", "hs_data"):
                 chunk_b64 = packet.get("chunk", "")
                 if chunk_b64:
                     decoded = base64.b64decode(chunk_b64)
@@ -211,7 +213,7 @@ def _handle_exit_response_data(raw_data):
                     meta['bytes_down'] += len(decoded)
                     meta['last_activity'] = time.time()
                     metrics['bytes_down'] += len(decoded)
-            elif typ == "close":
+            elif typ in ("close", "hs_close"):
                 try:
                     client_socket.shutdown(socket.SHUT_WR)
                 except Exception:
@@ -456,6 +458,12 @@ def handle_connect(client_socket):
         host, port_str = target.split(":")
         port = int(port_str)
 
+        # Hidden-service branch — dial a `.obscura` address via rendezvous
+        # instead of opening a clearnet exit tunnel.
+        if is_obscura_address(host):
+            _handle_hs_connect(client_socket, host, port)
+            return
+
         if not relay_peers and not exit_peers:
             client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
             client_socket.close()
@@ -525,6 +533,49 @@ def handle_connect(client_socket):
             client_socket.close()
         except Exception:
             pass
+
+def _handle_hs_connect(client_socket, addr: str, port: int):
+    """Dial an `.obscura` address and bridge the browser socket to the HS tunnel."""
+    try:
+        dialed = dial_hidden_service(addr, _proxy_pub_pem)
+        if not dialed:
+            client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
+        route, request_id = dialed
+        with pending_lock:
+            pending_requests[request_id] = client_socket
+            pending_meta[request_id] = {
+                'bytes_up': 0, 'bytes_down': 0,
+                'started': time.time(), 'last_activity': time.time(),
+                'exit': f"hs:{addr}",
+            }
+        client_socket.send(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        def upstream():
+            try:
+                while True:
+                    chunk = client_socket.recv(8192)
+                    if not chunk:
+                        break
+                    send_hs_chunk(route, request_id, base64.b64encode(chunk).decode())
+                    with pending_lock:
+                        if request_id in pending_meta:
+                            pending_meta[request_id]['bytes_up'] += len(chunk)
+                            pending_meta[request_id]['last_activity'] = time.time()
+                            metrics['bytes_up'] += len(chunk)
+            except Exception as e:
+                log.warning(f"HS upstream error | {e}")
+            finally:
+                close_hs(route, request_id)
+        threading.Thread(target=upstream, daemon=True).start()
+    except Exception as e:
+        log.error(f"HS CONNECT error: {e}")
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     start_proxy()
