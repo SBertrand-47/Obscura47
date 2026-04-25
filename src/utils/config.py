@@ -49,6 +49,11 @@ EXIT_LISTEN_PORT = getenv_int("OBSCURA_EXIT_LISTEN_PORT", 6000)
 
 DISCOVERY_INTERVAL = getenv_int("OBSCURA_DISCOVERY_INTERVAL", 10)
 
+# Hidden-service circuit length: number of relays (including the
+# terminal intro/rendezvous relay). 1 means single-hop (terminal only);
+# 3 matches a standard Tor-style guard + middle + terminal circuit.
+HS_CIRCUIT_HOPS = getenv_int("OBSCURA_HS_CIRCUIT_HOPS", 3)
+
 # Discovery/peer management
 PEER_EXPIRY_SECONDS = getenv_int("OBSCURA_PEER_EXPIRY_SECONDS", 30)
 

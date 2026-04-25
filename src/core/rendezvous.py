@@ -30,8 +30,8 @@ from typing import Any
 
 from src.core.encryptions import onion_encrypt_for_peer
 from src.core.internet_discovery import fetch_peers_from_registry
-from src.core.router import send_hs_frame
-from src.utils.config import REGISTRY_URL
+from src.core.router import build_hs_route, send_hs_frame
+from src.utils.config import HS_CIRCUIT_HOPS, REGISTRY_URL
 from src.utils.logger import get_logger
 from src.utils.onion_addr import verify_descriptor
 
@@ -136,10 +136,13 @@ def dial_hidden_service(
             log.warning("No rendezvous point available distinct from intro")
             return None
 
+    # Shared relay pool for padding both the rv and intro circuits.
+    relay_pool = [p for p in peers if p.get('pub')]
+
     # 1. Rendezvous circuit: establish with a cookie.
     cookie = base64.b64encode(os.urandom(16)).decode()
     rv_req_id = f"C{time.time_ns()}"
-    rv_route = [rv_point]
+    rv_route = build_hs_route(relay_pool, rv_point, HS_CIRCUIT_HOPS)
     ready = threading.Event()
     register_ready_event(rv_req_id, ready)
 
@@ -168,13 +171,14 @@ def dial_hidden_service(
     sealed_introduce = onion_encrypt_for_peer(service_pub, payload)
 
     intro_req_id = f"I{time.time_ns()}"
+    intro_route = build_hs_route(relay_pool, intro_point, HS_CIRCUIT_HOPS)
     intro_env = {
         'type': 'hs_introduce',
         'request_id': intro_req_id,
         'service_addr': addr,
         'introduce_payload': sealed_introduce,
     }
-    if not send_hs_frame([intro_point], intro_env):
+    if not send_hs_frame(intro_route, intro_env):
         pop_ready_event(rv_req_id)
         log.warning("hs_introduce send failed for %s", addr)
         return None
