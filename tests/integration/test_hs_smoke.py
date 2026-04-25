@@ -27,6 +27,8 @@ INTRO_PORT = 15101
 INTRO_WS_PORT = 15102
 RV_PORT = 15111
 RV_WS_PORT = 15112
+MIDDLE_PORT = 15121
+MIDDLE_WS_PORT = 15122
 ECHO_PORT = 18180
 
 
@@ -117,9 +119,10 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
 
     echo_sock = _start_echo_server(ECHO_PORT)
     try:
-        # 1. Start two nodes — one for intro, one for rendezvous. Each
-        # ObscuraNode binds its WS server at construction, so we patch
-        # the module-level NODE_WS_PORT between the two to avoid collision.
+        # 1. Start three nodes — intro, rendezvous, and a middle relay
+        # used to pad multi-hop HS circuits. Each ObscuraNode binds its
+        # WS server at construction, so we patch the module-level
+        # NODE_WS_PORT between constructions to avoid port collisions.
         from src.core import node as node_mod
         monkeypatch.setattr(node_mod, "NODE_WS_PORT", INTRO_WS_PORT)
         intro_node = ObscuraNode(port=INTRO_PORT)
@@ -131,6 +134,11 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         rv_node.run()
         assert _wait_for_port("127.0.0.1", RV_PORT, 5.0)
 
+        monkeypatch.setattr(node_mod, "NODE_WS_PORT", MIDDLE_WS_PORT)
+        middle_node = ObscuraNode(port=MIDDLE_PORT)
+        middle_node.run()
+        assert _wait_for_port("127.0.0.1", MIDDLE_PORT, 5.0)
+
         intro_peer = {
             "host": "127.0.0.1", "port": INTRO_PORT, "pub": intro_node.pub_pem,
             "ws_port": INTRO_WS_PORT, "role": "node", "ts": time.time(),
@@ -139,6 +147,11 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
             "host": "127.0.0.1", "port": RV_PORT, "pub": rv_node.pub_pem,
             "ws_port": RV_WS_PORT, "role": "node", "ts": time.time(),
         }
+        middle_peer = {
+            "host": "127.0.0.1", "port": MIDDLE_PORT, "pub": middle_node.pub_pem,
+            "ws_port": MIDDLE_WS_PORT, "role": "node", "ts": time.time(),
+        }
+        all_peers = [intro_peer, rv_peer, middle_peer]
 
         # 2. Start hidden-service host.
         host = HiddenServiceHost(
@@ -201,21 +214,25 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         set_reverse_frame_callback(dispatch)
         set_proxy_ws_client(host.ws_client)
 
-        # 4. Establish intros + publish descriptor.
-        # With only one intro peer available in the test, the host will
-        # register on just that one; the descriptor advertises it.
+        # 4. Establish intros + publish descriptor. We only want
+        # intro_peer acting as an intro point here; the other two are
+        # available as middle relays for multi-hop padding.
         assert host.establish(peers=[intro_peer])
+        host._relay_pool = all_peers
         assert host.publish_descriptor()
         time.sleep(0.3)
 
         # 5. Dial the hidden service — rv must be distinct from intro.
         dialed = rv_mod.dial_hidden_service(
-            host.address, client_pub, peers=[intro_peer, rv_peer])
+            host.address, client_pub, peers=all_peers)
         assert dialed is not None, "dial_hidden_service returned None"
         route, request_id, service_pub = dialed
         assert service_pub == host.pub_pem
-        # The rendezvous should land on rv_node, not intro_node.
-        assert route[0]["port"] == RV_PORT
+        # Multi-hop circuit: at least one middle relay before the terminal.
+        # The terminal must be whichever non-intro relay was chosen as rv.
+        assert len(route) >= 2, f"expected multi-hop rv circuit, got {route!r}"
+        assert route[-1]["port"] != INTRO_PORT
+        rv_terminal_port = route[-1]["port"]
         time.sleep(0.3)
 
         # 6. Send sealed data through the rendezvous circuit.
