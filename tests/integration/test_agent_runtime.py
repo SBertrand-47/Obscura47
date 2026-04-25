@@ -139,6 +139,13 @@ def test_agent_runtime_serves_http_over_obscura(isolated_env, monkeypatch, tmp_p
     def _greet(args, _req):
         return {"hello": args.get("name", "world")}
 
+    @tools.tool("whoami", description="echo the authenticated caller")
+    def _whoami(_args, req):
+        return {
+            "caller_pub": req.caller_pub,
+            "caller_fingerprint": req.caller_fingerprint,
+        }
+
     runtime = AgentRuntime(
         name="smoketest",
         key_path=str(tmp_path / "agent.pem"),
@@ -280,5 +287,25 @@ def test_agent_runtime_serves_http_over_obscura(isolated_env, monkeypatch, tmp_p
         body = body[: body.rfind(b"}") + 1] if b"}" in body else body
         envelope = json.loads(body)
         assert envelope == {"ok": True, "result": {"hello": "agents"}}
+
+        from src.utils.identity import fingerprint_pubkey
+        whoami_payload = json.dumps({"args": {}}).encode()
+        whoami_req = (
+            f"POST {DEFAULT_PREFIX}tools/whoami HTTP/1.1\r\n"
+            f"Host: {runtime.address}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(whoami_payload)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode("ascii") + whoami_payload
+        got = http_roundtrip(whoami_req, sentinel=b"\"caller_fingerprint\"")
+        head, _, body = got.partition(b"\r\n\r\n")
+        assert head.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+        body = body[: body.rfind(b"}") + 1] if b"}" in body else body
+        envelope = json.loads(body)
+        assert envelope["ok"] is True
+        result = envelope["result"]
+        assert result["caller_pub"] == client_pub
+        assert result["caller_fingerprint"] == fingerprint_pubkey(client_pub)
     finally:
         runtime.stop()
