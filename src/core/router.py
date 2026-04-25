@@ -237,9 +237,18 @@ class Router:
             return
         encrypted = onion_encrypt_for_peer(next_pub, payload)
 
-        # Persistent tunnel frames reuse a per-request socket to next hop
-        if isinstance(message_content, dict) and message_content.get('type') in ('connect', 'data', 'close') and message_content.get('request_id'):
-            self._send_to_next_hop_persistent(next_node, encrypted, message_content['request_id'], is_close=(message_content.get('type') == 'close'))
+        # Persistent tunnel frames (both exit and hidden-service) reuse a
+        # per-request socket to next hop so reverse frames have a path back.
+        PERSISTENT_TYPES = (
+            'connect', 'data', 'close',
+            'hs_establish', 'hs_introduce',
+            'rv_establish', 'rv_join',
+            'hs_data', 'hs_close',
+        )
+        if isinstance(message_content, dict) and message_content.get('type') in PERSISTENT_TYPES and message_content.get('request_id'):
+            is_close = message_content.get('type') in ('close', 'hs_close')
+            self._send_to_next_hop_persistent(
+                next_node, encrypted, message_content['request_id'], is_close=is_close)
             return
         self.send_to_next_hop(next_node, encrypted)
 
@@ -318,6 +327,29 @@ class Router:
                 log.info("Sent encrypted message to %s:%s (TCP)", next_node['host'], next_node['port'])
         except Exception as e:
             log.error("Error sending to %s: %s", next_node, e)
+
+def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
+    """Build an onion route ending at ``terminal``, padded with middle relays.
+
+    Returns a list of peer dicts of length up to ``hops``, with
+    ``terminal`` as the final hop. Middle hops are sampled from
+    ``peers`` excluding the terminal (by host:port). Returns just
+    ``[terminal]`` if no suitable padding relays exist.
+    """
+    if hops <= 1 or not peers:
+        return [terminal]
+    t_key = (terminal.get('host'), terminal.get('port'))
+    pool = [
+        p for p in peers
+        if p.get('host') and p.get('port') and p.get('pub')
+        and (p.get('host'), p.get('port')) != t_key
+    ]
+    middle_count = min(max(hops - 1, 0), len(pool))
+    if middle_count == 0:
+        return [terminal]
+    middles = random.sample(pool, middle_count)
+    return middles + [terminal]
+
 
 def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     """

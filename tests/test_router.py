@@ -3,7 +3,7 @@ import json
 import pytest
 
 from src.core import router as router_mod
-from src.core.router import Router, build_route47, _try_ws_send
+from src.core.router import Router, build_hs_route, build_route47, _try_ws_send
 from src.core.encryptions import ecc_generate_keypair, onion_decrypt_with_priv
 
 
@@ -41,6 +41,27 @@ class TestRouteBuilding:
         peers = [{"host": "10.0.0.1", "port": 5001}, {"host": "10.0.0.2", "port": 5002}]
         route = build_route47(peers, min_hops=4, max_hops=7)
         assert len(route) == 2
+
+    def test_build_hs_route_terminates_at_terminal(self):
+        terminal = {"host": "10.0.0.9", "port": 5009, "pub": "P9"}
+        peers = [{"host": f"10.0.0.{i}", "port": 5000 + i, "pub": f"P{i}"}
+                 for i in range(5)] + [terminal]
+        route = build_hs_route(peers, terminal, hops=3)
+        assert len(route) == 3
+        assert route[-1] is terminal
+        # Middles must exclude the terminal.
+        middle_keys = {(p["host"], p["port"]) for p in route[:-1]}
+        assert (terminal["host"], terminal["port"]) not in middle_keys
+
+    def test_build_hs_route_single_hop(self):
+        terminal = {"host": "10.0.0.1", "port": 5001, "pub": "P1"}
+        route = build_hs_route([terminal], terminal, hops=3)
+        assert route == [terminal]
+
+    def test_build_hs_route_hops_one_returns_terminal_only(self):
+        terminal = {"host": "10.0.0.1", "port": 5001, "pub": "P1"}
+        peers = [{"host": "10.0.0.2", "port": 5002, "pub": "P2"}, terminal]
+        assert build_hs_route(peers, terminal, hops=1) == [terminal]
 
 
 # ── WebSocket preference logic ────────────────────────────────────
