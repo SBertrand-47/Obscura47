@@ -41,6 +41,7 @@ from src.core.encryptions import (
     onion_encrypt_for_peer,
 )
 from src.core.router import (
+    build_hs_route,
     send_hs_frame,
     set_proxy_ws_client,
     set_reverse_frame_callback,
@@ -51,6 +52,7 @@ from src.utils.config import (
     REGISTRY_URL,
     CHANNEL_QUEUE_MAX,
     CHANNEL_IDLE_CLOSE_SECONDS,
+    HS_CIRCUIT_HOPS,
     TLS_VERIFY,
 )
 from src.utils.logger import get_logger
@@ -74,9 +76,11 @@ class HiddenServiceHost:
         self.address = address_from_pubkey(self.pub_pem)
 
         # Intro-circuit state: one circuit per intro point. Maps intro
-        # request_id -> {'peer': peer_dict, 'route': [peer]}.
+        # request_id -> {'peer': peer_dict, 'route': [peer...]}.
         self._intro_circuits: dict[str, dict[str, Any]] = {}
         self._intro_peers: list[dict[str, Any]] = []
+        # Relay pool used to pad both intro and rv circuits with middle hops.
+        self._relay_pool: list[dict[str, Any]] = []
 
         # Rendezvous session state:
         # rv_req_id (host's circuit to the rv point) -> {
@@ -162,7 +166,7 @@ class HiddenServiceHost:
 
     def _open_rv_session(self, rv_point: dict, cookie: str, client_pub: str):
         rv_req_id = f"R{time.time_ns()}"
-        route = [rv_point]
+        route = build_hs_route(self._relay_pool, rv_point, HS_CIRCUIT_HOPS)
         ready = threading.Event()
         with self._sessions_lock:
             self._sessions[rv_req_id] = {
@@ -316,7 +320,8 @@ class HiddenServiceHost:
         """Open intro circuits to several relays so clients have a choice."""
         if peers is None:
             peers = fetch_peers_from_registry()
-        intros = self._pick_intro_points(peers, INTRO_POINT_COUNT)
+        self._relay_pool = [p for p in peers if p.get('pub')]
+        intros = self._pick_intro_points(self._relay_pool, INTRO_POINT_COUNT)
         if not intros:
             log.error("No suitable intro points among peers")
             return False
@@ -324,7 +329,7 @@ class HiddenServiceHost:
         established = 0
         for peer in intros:
             req_id = f"H{time.time_ns()}"
-            route = [peer]
+            route = build_hs_route(self._relay_pool, peer, HS_CIRCUIT_HOPS)
             envelope = {
                 'type': 'hs_establish',
                 'request_id': req_id,
@@ -335,8 +340,9 @@ class HiddenServiceHost:
                 self._intro_circuits[req_id] = {'peer': peer, 'route': route}
                 self._intro_peers.append(peer)
                 established += 1
-                log.info("HS %s established at intro %s:%s",
-                         self.address, peer.get('host'), peer.get('port'))
+                log.info("HS %s established at intro %s:%s via %d hop(s)",
+                         self.address, peer.get('host'), peer.get('port'),
+                         len(route))
             else:
                 log.warning("Intro establish failed at %s:%s",
                             peer.get('host'), peer.get('port'))
