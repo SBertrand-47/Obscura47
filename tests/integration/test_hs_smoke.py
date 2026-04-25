@@ -2,11 +2,9 @@
 
 Spins up on localhost:
     - a local echo TCP server (the agent's hosted service)
-    - one ObscuraNode (relay / meeting point)
+    - two ObscuraNodes: one acting as intro point, one as rendezvous
     - a HiddenServiceHost pointed at the echo server
-    - a minimal in-process client that emulates the proxy's HS-dial path:
-      calls rendezvous.dial_hidden_service, pumps bytes, decrypts reverse
-      frames with an ephemeral client keypair.
+    - a minimal in-process client that emulates the proxy's HS-dial path.
 
 The test deliberately skips the HTTP CONNECT proxy to keep the
 reverse-frame global-callbacks unambiguous. A separate proxy-level test
@@ -25,8 +23,12 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-NODE_PORT = 15101
-NODE_WS_PORT = 15102
+INTRO_PORT = 15101
+INTRO_WS_PORT = 15102
+RV_PORT = 15111
+RV_WS_PORT = 15112
+MIDDLE_PORT = 15121
+MIDDLE_WS_PORT = 15122
 ECHO_PORT = 18180
 
 
@@ -77,13 +79,10 @@ def isolated_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OBSCURA_NODE_KEY_PATH", str(tmp_path / "node.pem"))
     monkeypatch.setenv("OBSCURA_REGISTRY_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("OBSCURA_DISCOVERY_INTERVAL", "3600")
-    monkeypatch.setenv("OBSCURA_NODE_LISTEN_PORT", str(NODE_PORT))
-    monkeypatch.setenv("OBSCURA_NODE_WS_PORT", str(NODE_WS_PORT))
     yield
 
 
 def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
-    from src.core import hidden_service as hs_mod
     from src.core import rendezvous as rv_mod
     from src.core.hidden_service import HiddenServiceHost
     from src.core.node import ObscuraNode
@@ -93,24 +92,21 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         onion_encrypt_for_peer,
     )
     from src.core.router import set_proxy_ws_client, set_reverse_frame_callback
-    from src.utils.onion_addr import verify_descriptor
+    from src.utils.onion_addr import verify_descriptor, build_descriptor, DESCRIPTOR_TTL
 
     # ── In-memory descriptor registry ─────────────────────────────
     store: dict[str, dict] = {}
 
     def fake_publish(self):
-        if not self.meeting_point:
+        if not self._intro_peers:
             return False
-        from src.utils.onion_addr import build_descriptor, DESCRIPTOR_TTL
-        intro = [{
-            "host": self.meeting_point.get("host"),
-            "port": self.meeting_point.get("port"),
-            "ws_port": self.meeting_point.get("ws_port"),
-            "pub": self.meeting_point.get("pub"),
-        }]
+        intros = [{
+            "host": p.get("host"), "port": p.get("port"),
+            "ws_port": p.get("ws_port"), "pub": p.get("pub"),
+        } for p in self._intro_peers]
         store[self.address] = build_descriptor(
             self.priv, self.pub_pem, port=self.target_port,
-            intro_points=intro, ttl=DESCRIPTOR_TTL,
+            intro_points=intros, ttl=DESCRIPTOR_TTL,
         )
         return True
 
@@ -123,19 +119,39 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
 
     echo_sock = _start_echo_server(ECHO_PORT)
     try:
-        # 1. Start meeting-point relay.
-        node = ObscuraNode(port=NODE_PORT)
-        node.run()
-        assert _wait_for_port("127.0.0.1", NODE_PORT, 5.0)
+        # 1. Start three nodes — intro, rendezvous, and a middle relay
+        # used to pad multi-hop HS circuits. Each ObscuraNode binds its
+        # WS server at construction, so we patch the module-level
+        # NODE_WS_PORT between constructions to avoid port collisions.
+        from src.core import node as node_mod
+        monkeypatch.setattr(node_mod, "NODE_WS_PORT", INTRO_WS_PORT)
+        intro_node = ObscuraNode(port=INTRO_PORT)
+        intro_node.run()
+        assert _wait_for_port("127.0.0.1", INTRO_PORT, 5.0)
 
-        node_peer = {
-            "host": "127.0.0.1",
-            "port": NODE_PORT,
-            "pub": node.pub_pem,
-            "ws_port": NODE_WS_PORT,
-            "role": "node",
-            "ts": time.time(),
+        monkeypatch.setattr(node_mod, "NODE_WS_PORT", RV_WS_PORT)
+        rv_node = ObscuraNode(port=RV_PORT)
+        rv_node.run()
+        assert _wait_for_port("127.0.0.1", RV_PORT, 5.0)
+
+        monkeypatch.setattr(node_mod, "NODE_WS_PORT", MIDDLE_WS_PORT)
+        middle_node = ObscuraNode(port=MIDDLE_PORT)
+        middle_node.run()
+        assert _wait_for_port("127.0.0.1", MIDDLE_PORT, 5.0)
+
+        intro_peer = {
+            "host": "127.0.0.1", "port": INTRO_PORT, "pub": intro_node.pub_pem,
+            "ws_port": INTRO_WS_PORT, "role": "node", "ts": time.time(),
         }
+        rv_peer = {
+            "host": "127.0.0.1", "port": RV_PORT, "pub": rv_node.pub_pem,
+            "ws_port": RV_WS_PORT, "role": "node", "ts": time.time(),
+        }
+        middle_peer = {
+            "host": "127.0.0.1", "port": MIDDLE_PORT, "pub": middle_node.pub_pem,
+            "ws_port": MIDDLE_WS_PORT, "role": "node", "ts": time.time(),
+        }
+        all_peers = [intro_peer, rv_peer, middle_peer]
 
         # 2. Start hidden-service host.
         host = HiddenServiceHost(
@@ -158,10 +174,11 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
                 return
             inner = json.loads(inner_json)
             typ = inner.get("type")
-            if typ == "hs_data":
+            req_id = inner.get("request_id", "")
+            if typ == "rv_ready":
+                rv_mod.notify_rv_ready(req_id)
+            elif typ == "hs_data":
                 sealed = inner.get("chunk", "")
-                # Host sealed the chunk for our client keypair; meeting
-                # point only saw ciphertext.
                 unsealed = onion_decrypt_with_priv(client_priv, sealed)
                 if unsealed is None:
                     return
@@ -169,11 +186,18 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
             elif typ == "hs_close":
                 received_close.set()
 
-        # Dispatcher: route inbound reverse frames to host or client based on
-        # the outer request_id (host's intro circuit vs. client's circuit).
+        # Dispatcher: route inbound reverse frames to host or client based
+        # on the outer request_id. The host owns all intro-circuit ids and
+        # all rv-join ids it creates. Everything else belongs to the client.
+        def owned_by_host(req_id: str) -> bool:
+            if req_id in host._intro_circuits:
+                return True
+            with host._sessions_lock:
+                return req_id in host._sessions
+
         def dispatch(frame):
             req_id = frame.get("request_id", "")
-            if req_id == host.intro_request_id:
+            if owned_by_host(req_id):
                 host._on_tcp_reverse(frame)
             else:
                 client_reverse_handler(frame)
@@ -190,24 +214,31 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         set_reverse_frame_callback(dispatch)
         set_proxy_ws_client(host.ws_client)
 
-        # 4. Establish + publish.
-        assert host.establish(peers=[node_peer])
+        # 4. Establish intros + publish descriptor. We only want
+        # intro_peer acting as an intro point here; the other two are
+        # available as middle relays for multi-hop padding.
+        assert host.establish(peers=[intro_peer])
+        host._relay_pool = all_peers
         assert host.publish_descriptor()
         time.sleep(0.3)
 
-        # 5. Dial the hidden service using rendezvous functions.
-        dialed = rv_mod.dial_hidden_service(host.address, client_pub)
+        # 5. Dial the hidden service — rv must be distinct from intro.
+        dialed = rv_mod.dial_hidden_service(
+            host.address, client_pub, peers=all_peers)
         assert dialed is not None, "dial_hidden_service returned None"
         route, request_id, service_pub = dialed
         assert service_pub == host.pub_pem
-        time.sleep(0.3)  # let hs_incoming propagate to host + local connect
+        # Multi-hop circuit: at least one middle relay before the terminal.
+        # The terminal must be whichever non-intro relay was chosen as rv.
+        assert len(route) >= 2, f"expected multi-hop rv circuit, got {route!r}"
+        assert route[-1]["port"] != INTRO_PORT
+        rv_terminal_port = route[-1]["port"]
+        time.sleep(0.3)
 
-        # 6. Send data through the circuit, sealed for the service pubkey so
-        # the meeting point only relays ciphertext.
+        # 6. Send sealed data through the rendezvous circuit.
         payload = b"ping-obscura-hs-smoke"
         sealed_up = onion_encrypt_for_peer(
-            service_pub, base64.b64encode(payload).decode()
-        )
+            service_pub, base64.b64encode(payload).decode())
         rv_mod.send_hs_chunk(route, request_id, sealed_up)
 
         # 7. Wait for echo reply to traverse back.

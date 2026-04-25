@@ -256,6 +256,51 @@ The meeting-point relay splices the host and client circuits by session id;
 neither endpoint learns the other's IP. The service key stays on the host; a
 lost key means a lost address.
 
+### Reference HTTP App Harness
+
+Most useful hidden services are HTTP APIs. `src/agent` ships a small reference
+harness that wires a local HTTP application to a `.obscura` address in one
+step, plus a matching client that dials other `.obscura` services through the
+local Obscura proxy.
+
+```python
+from src.agent import AgentApp, AgentClient, AgentRuntime, Response
+
+app = AgentApp()
+
+@app.get("/hello")
+def _hello(_req):
+    return Response(200, {"hello": "world"})
+
+runtime = AgentRuntime(name="demo", key_path="demo.pem", app=app)
+runtime.start()
+print(runtime.address)        # <16 chars>.obscura
+runtime.join()
+```
+
+Or from the command line, using the default `/`, `/health`, `/info` routes:
+
+```bash
+python -m src.agent --name demo --key demo.pem
+# In another shell, with `python -m src.main proxy` running:
+curl -x http://127.0.0.1:9047 http://<address>.obscura/health
+```
+
+`AgentClient` is the programmatic counterpart. It opens an HTTP CONNECT
+tunnel through the local Obscura proxy and speaks plain HTTP/1.1 to the
+remote `.obscura` host:
+
+```python
+client = AgentClient()                    # uses OBSCURA_PROXY_HOST/PORT
+resp = client.get("<address>.obscura", "/health")
+print(resp.status, resp.json())
+```
+
+The harness is intentionally minimal: it composes `HiddenServiceHost`, a
+stdlib `ThreadingHTTPServer`, and the rendezvous client into a single
+ergonomic surface. Use it as a starting point for hidden-service apps;
+swap the `AgentApp` for any other handler that can take a host/port.
+
 ## Running the Tests
 
 ```bash
@@ -310,6 +355,11 @@ src/
     registry.py         # Thin wrapper that runs registry_server.py
     internet_discovery.py  # Registry auth + peer fetch + kill switch monitor
     discover.py         # LAN multicast discovery
+  agent/                # Reference harness for hosting HTTP apps on .obscura
+    runtime.py          #   AgentRuntime: bind app + publish hidden service
+    app.py              #   AgentApp: tiny route-by-pattern HTTP framework
+    client.py           #   AgentClient: dial other .obscura services
+    __main__.py         #   `python -m src.agent` CLI
   utils/
     config.py           # Env var loading (single source of truth)
     logger.py
