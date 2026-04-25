@@ -11,15 +11,15 @@ import json
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-Handler = Callable[["Request"], "Response"]
-BeforeHandler = Callable[["Request"], "Response | None"]
+Handler = Callable[["Request"], "Response | StreamingResponse"]
+BeforeHandler = Callable[["Request"], "Response | StreamingResponse | None"]
 
 
 class Request:
@@ -80,6 +80,30 @@ class Response:
             content_type = "application/json"
         self.headers.setdefault("Content-Type", content_type)
         self.headers.setdefault("Content-Length", str(len(self.body)))
+
+
+class StreamingResponse:
+    """Outbound response whose body is produced lazily.
+
+    ``body_iter`` yields ``bytes`` (or ``str``, encoded as UTF-8) and
+    each chunk is written to the wire as soon as it's produced.
+    Content-Length is intentionally never set; clients should treat the
+    body as either chunk-streamed (with ``Transfer-Encoding: chunked``)
+    or terminated by ``Connection: close`` — by default we emit the
+    latter, which is enough for SSE.
+    """
+
+    def __init__(
+        self,
+        status: int = 200,
+        body_iter: Iterable[bytes | str] | None = None,
+        headers: dict[str, str] | None = None,
+        content_type: str = "application/octet-stream",
+    ):
+        self.status = int(status)
+        self.headers: dict[str, str] = dict(headers or {})
+        self.headers.setdefault("Content-Type", content_type)
+        self.body_iter: Iterable[bytes | str] = body_iter or iter(())
 
 
 class AgentApp:
@@ -147,7 +171,7 @@ class AgentApp:
             except Exception as e:
                 log.exception("agent route handler crashed")
                 return Response(500, {"error": str(e)})
-            if isinstance(resp, Response):
+            if isinstance(resp, (Response, StreamingResponse)):
                 return resp
             return Response(200, resp)
         return Response(404, {"error": "not_found", "path": bare_path})
@@ -178,7 +202,18 @@ def _make_handler(app: AgentApp) -> type[BaseHTTPRequestHandler]:
                 for k, v in resp.headers.items():
                     self.send_header(k, v)
                 self.end_headers()
-                if resp.body:
+                if isinstance(resp, StreamingResponse):
+                    for chunk in resp.body_iter:
+                        if isinstance(chunk, str):
+                            chunk = chunk.encode("utf-8")
+                        if not chunk:
+                            continue
+                        self.wfile.write(chunk)
+                        try:
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            return
+                elif resp.body:
                     self.wfile.write(resp.body)
             except (BrokenPipeError, ConnectionResetError):
                 return

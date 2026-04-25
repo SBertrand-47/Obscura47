@@ -23,6 +23,7 @@ import time
 from typing import Any
 
 from src.agent.app import AgentApp, Request, Response, serve_app
+from src.agent.tools import ParamSpec, ToolRegistry
 from src.core.hidden_service import HiddenServiceHost
 from src.core.router import set_proxy_ws_client, set_reverse_frame_callback
 from src.utils.logger import get_logger
@@ -56,6 +57,7 @@ class AgentRuntime:
         name: str,
         key_path: str,
         app: AgentApp | None = None,
+        tools: ToolRegistry | None = None,
         bind_host: str = "127.0.0.1",
         bind_port: int = 0,
     ):
@@ -71,10 +73,19 @@ class AgentRuntime:
         self._stopped = threading.Event()
         self._started_at: float = 0.0
 
+        installed_default_app = False
         if app is None:
             app = AgentApp()
             _install_default_routes(app, self)
+            installed_default_app = True
         self.app = app
+
+        if tools is None:
+            tools = ToolRegistry()
+            if installed_default_app:
+                _install_default_tools(tools, self)
+        self.tools = tools
+        self.tools.mount(self.app)
 
     @property
     def address(self) -> str:
@@ -185,7 +196,11 @@ def _install_default_routes(app: AgentApp, runtime: AgentRuntime) -> None:
     def _root(_req: Request) -> Response:
         return Response(200, {
             "agent": runtime.name,
-            "endpoints": ["/health", "/info"],
+            "endpoints": [
+                "/health",
+                "/info",
+                "/.well-known/obscura/tools",
+            ],
         })
 
     @app.get("/health")
@@ -206,3 +221,19 @@ def _install_default_routes(app: AgentApp, runtime: AgentRuntime) -> None:
             "address": address,
             "uptime_s": uptime,
         })
+
+
+def _install_default_tools(tools: ToolRegistry, runtime: AgentRuntime) -> None:
+    @tools.tool(
+        "ping",
+        description="Round-trip echo so callers can verify reachability.",
+        params=[ParamSpec("payload", type="any", required=False,
+                          description="optional value reflected back to the caller")],
+        returns="object",
+    )
+    def _ping(args: dict, _req: Request) -> dict:
+        return {
+            "agent": runtime.name,
+            "received": args.get("payload"),
+            "ts": time.time(),
+        }
