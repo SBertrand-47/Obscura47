@@ -55,6 +55,7 @@ from src.utils.config import (
     HS_CIRCUIT_HOPS,
     TLS_VERIFY,
 )
+from src.utils.identity import register_caller, unregister_caller
 from src.utils.logger import get_logger
 from src.utils.onion_addr import (
     address_from_pubkey,
@@ -202,15 +203,20 @@ class HiddenServiceHost:
             self._drop_session(rv_req_id)
             return
 
+        local_addr = sock.getsockname()[:2]
+        register_caller(local_addr, client_pub)
+
         with self._sessions_lock:
             entry = self._sessions.get(rv_req_id)
             if entry is None:
+                unregister_caller(local_addr)
                 try:
                     sock.close()
                 except Exception:
                     pass
                 return
             entry['sock'] = sock
+            entry['local_addr'] = local_addr
 
         log.info("HS session %s → local %s:%s",
                  rv_req_id, self.target_host, self.target_port)
@@ -258,11 +264,16 @@ class HiddenServiceHost:
     def _close_session(self, rv_req_id: str, *, notify: bool):
         with self._sessions_lock:
             entry = self._sessions.pop(rv_req_id, None)
-        if entry and entry.get('sock'):
-            try:
-                entry['sock'].close()
-            except Exception:
-                pass
+        if entry:
+            local_addr = entry.get('local_addr')
+            if local_addr is not None:
+                unregister_caller(local_addr)
+            sock = entry.get('sock')
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
         if notify:
             self._send_close(rv_req_id)
 
