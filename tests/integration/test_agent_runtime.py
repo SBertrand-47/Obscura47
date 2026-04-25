@@ -121,6 +121,8 @@ def test_agent_runtime_serves_http_over_obscura(isolated_env, monkeypatch, tmp_p
     }
     all_peers = [intro_peer, rv_peer, middle_peer]
 
+    from src.agent.tools import DEFAULT_PREFIX, PROTOCOL_VERSION, ToolRegistry
+
     app = AgentApp()
 
     @app.get("/ping")
@@ -131,10 +133,17 @@ def test_agent_runtime_serves_http_over_obscura(isolated_env, monkeypatch, tmp_p
     def _echo(req):
         return Response(200, {"received": req.json()})
 
+    tools = ToolRegistry()
+
+    @tools.tool("greet", description="say hi")
+    def _greet(args, _req):
+        return {"hello": args.get("name", "world")}
+
     runtime = AgentRuntime(
         name="smoketest",
         key_path=str(tmp_path / "agent.pem"),
         app=app,
+        tools=tools,
     )
     try:
         assert runtime.start(peers=[intro_peer]), "AgentRuntime.start failed"
@@ -196,49 +205,80 @@ def test_agent_runtime_serves_http_over_obscura(isolated_env, monkeypatch, tmp_p
 
         time.sleep(0.3)
 
-        dialed = rv_mod.dial_hidden_service(
-            runtime.address, client_pub, peers=all_peers)
-        assert dialed is not None, "dial_hidden_service returned None"
-        route, request_id, service_pub = dialed
-        assert service_pub == runtime.pub_pem
-        assert len(route) >= 2, f"expected multi-hop rv circuit, got {route!r}"
-        assert route[-1]["port"] != INTRO_PORT
-        time.sleep(0.3)
+        def http_roundtrip(request_bytes: bytes, sentinel: bytes,
+                           timeout: float = 10.0) -> bytes:
+            received_chunks.clear()
+            received_close.clear()
+            dialed_local = rv_mod.dial_hidden_service(
+                runtime.address, client_pub, peers=all_peers)
+            assert dialed_local is not None, "dial_hidden_service returned None"
+            route_local, request_id_local, service_pub_local = dialed_local
+            assert service_pub_local == runtime.pub_pem
+            assert len(route_local) >= 2, (
+                f"expected multi-hop rv circuit, got {route_local!r}"
+            )
+            assert route_local[-1]["port"] != INTRO_PORT
+            time.sleep(0.2)
 
-        http_request = (
+            sealed = onion_encrypt_for_peer(
+                service_pub_local,
+                base64.b64encode(request_bytes).decode(),
+            )
+            rv_mod.send_hs_chunk(route_local, request_id_local, sealed)
+
+            deadline = time.time() + timeout
+            got_bytes = b""
+            while time.time() < deadline:
+                got_bytes = b"".join(received_chunks)
+                if b"\r\n\r\n" in got_bytes and sentinel in got_bytes:
+                    break
+                time.sleep(0.05)
+            rv_mod.close_hs(route_local, request_id_local)
+            assert b"\r\n\r\n" in got_bytes, (
+                f"never received complete HTTP response: {got_bytes!r}"
+            )
+            return got_bytes
+
+        ping_req = (
             f"GET /ping HTTP/1.1\r\n"
             f"Host: {runtime.address}\r\n"
             f"Connection: close\r\n"
             f"\r\n"
         ).encode("ascii")
-
-        sealed_up = onion_encrypt_for_peer(
-            service_pub, base64.b64encode(http_request).decode())
-        rv_mod.send_hs_chunk(route, request_id, sealed_up)
-
-        deadline = time.time() + 10
-        got = b""
-        body = b""
-        while time.time() < deadline:
-            got = b"".join(received_chunks)
-            if b"\r\n\r\n" in got:
-                head, _, body = got.partition(b"\r\n\r\n")
-                if b"pong" in body:
-                    break
-            time.sleep(0.05)
-
-        assert b"\r\n\r\n" in got, f"never received complete HTTP response: {got!r}"
+        got = http_roundtrip(ping_req, sentinel=b"pong")
         head, _, body = got.partition(b"\r\n\r\n")
-        status_line = head.split(b"\r\n", 1)[0]
-        assert status_line.startswith(b"HTTP/1.1 200"), status_line
-
-        # ``Connection: close`` means the agent closes the upstream
-        # socket after writing the body, which finishes the HTTP body
-        # exactly. The body should be the JSON we returned.
+        assert head.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
         body = body[: body.find(b"}") + 1] if b"}" in body else body
-        payload = json.loads(body)
-        assert payload == {"pong": True, "agent": "smoketest"}
+        assert json.loads(body) == {"pong": True, "agent": "smoketest"}
 
-        rv_mod.close_hs(route, request_id)
+        manifest_req = (
+            f"GET {DEFAULT_PREFIX}tools HTTP/1.1\r\n"
+            f"Host: {runtime.address}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode("ascii")
+        got = http_roundtrip(manifest_req, sentinel=b"\"protocol\"")
+        head, _, body = got.partition(b"\r\n\r\n")
+        assert head.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+        body = body[: body.rfind(b"}") + 1] if b"}" in body else body
+        manifest = json.loads(body)
+        assert manifest["protocol"] == PROTOCOL_VERSION
+        assert any(t["name"] == "greet" for t in manifest["tools"])
+
+        invoke_payload = json.dumps({"args": {"name": "agents"}}).encode()
+        invoke_req = (
+            f"POST {DEFAULT_PREFIX}tools/greet HTTP/1.1\r\n"
+            f"Host: {runtime.address}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {len(invoke_payload)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode("ascii") + invoke_payload
+        got = http_roundtrip(invoke_req, sentinel=b"\"result\"")
+        head, _, body = got.partition(b"\r\n\r\n")
+        assert head.split(b"\r\n", 1)[0].startswith(b"HTTP/1.1 200")
+        body = body[: body.rfind(b"}") + 1] if b"}" in body else body
+        envelope = json.loads(body)
+        assert envelope == {"ok": True, "result": {"hello": "agents"}}
     finally:
         runtime.stop()

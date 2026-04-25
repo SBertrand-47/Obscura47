@@ -14,9 +14,25 @@ from __future__ import annotations
 
 import json
 import socket
-from typing import Any
+from typing import Any, Iterator
 
+from src.agent.tools import DEFAULT_PREFIX
 from src.utils.config import PROXY_HOST, PROXY_PORT
+
+
+class ToolCallError(Exception):
+    """Raised when a remote tool returns an ``ok: false`` envelope.
+
+    ``code`` and ``message`` come from the server's error envelope.
+    ``status`` is the underlying HTTP status (useful to distinguish
+    client-side framing failures from server-side rejections).
+    """
+
+    def __init__(self, code: str, message: str, *, status: int = 0):
+        super().__init__(f"[{code}] {message}")
+        self.code = code
+        self.message = message
+        self.status = int(status)
 
 
 class AgentResponse:
@@ -146,6 +162,204 @@ class AgentClient:
 
     def delete(self, addr: str, path: str = "/", port: int = 80, **kw: Any) -> AgentResponse:
         return self.request("DELETE", addr, path, port, **kw)
+
+    def list_tools(
+        self, addr: str, port: int = 80, prefix: str = DEFAULT_PREFIX,
+    ) -> dict[str, Any]:
+        """Fetch the remote agent's tool manifest.
+
+        Returns the parsed JSON document
+        (``{"protocol": ..., "tools": [...], "topics": [...]}``).
+        """
+        resp = self.get(addr, _join_prefix(prefix, "tools"), port=port)
+        if not resp.ok:
+            raise ToolCallError(
+                "manifest_unavailable",
+                f"GET tools manifest returned HTTP {resp.status}",
+                status=resp.status,
+            )
+        try:
+            return resp.json() or {}
+        except ValueError as e:
+            raise ToolCallError(
+                "bad_manifest", f"manifest was not valid JSON: {e}",
+                status=resp.status,
+            )
+
+    def call_tool(
+        self,
+        addr: str,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        port: int = 80,
+        prefix: str = DEFAULT_PREFIX,
+    ) -> Any:
+        """Invoke a remote tool and return its ``result``.
+
+        Raises :class:`ToolCallError` if the server returns
+        ``{"ok": false}`` or the response is not a recognisable envelope.
+        """
+        resp = self.post(
+            addr, _join_prefix(prefix, f"tools/{name}"),
+            port=port, body={"args": args or {}},
+        )
+        try:
+            envelope = resp.json()
+        except ValueError as e:
+            raise ToolCallError(
+                "bad_envelope", f"response was not JSON: {e}",
+                status=resp.status,
+            )
+        if not isinstance(envelope, dict):
+            raise ToolCallError(
+                "bad_envelope", "response envelope was not an object",
+                status=resp.status,
+            )
+        if envelope.get("ok") is True:
+            return envelope.get("result")
+        err = envelope.get("error") or {}
+        if not isinstance(err, dict):
+            err = {}
+        raise ToolCallError(
+            err.get("code") or "unknown",
+            err.get("message") or f"tool call failed (HTTP {resp.status})",
+            status=resp.status,
+        )
+
+    def subscribe(
+        self,
+        addr: str,
+        topic: str,
+        *,
+        port: int = 80,
+        prefix: str = DEFAULT_PREFIX,
+    ) -> Iterator[Any]:
+        """Iterate over events from a remote agent's SSE topic.
+
+        Yields decoded events (JSON if the frame parses, otherwise the
+        raw string). The iterator owns the underlying socket; closing
+        it (e.g. by exiting a ``for`` loop with ``break``) tears down
+        the subscription on both sides.
+        """
+        sock = socket.create_connection(
+            (self.proxy_host, self.proxy_port), timeout=self.timeout,
+        )
+        try:
+            sock.settimeout(self.timeout)
+            connect = (
+                f"CONNECT {addr}:{port} HTTP/1.1\r\n"
+                f"Host: {addr}:{port}\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(connect)
+            buf = _SocketBuffer(sock)
+            ack = buf.read_until(b"\r\n\r\n")
+            ack_status = ack.split(b"\r\n", 1)[0]
+            if not (
+                ack_status.startswith(b"HTTP/1.1 200")
+                or ack_status.startswith(b"HTTP/1.0 200")
+            ):
+                raise ConnectionError(f"proxy CONNECT refused: {ack_status!r}")
+
+            path = _join_prefix(prefix, f"subscribe/{topic}")
+            request = (
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {addr}\r\n"
+                f"Accept: text/event-stream\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(request)
+
+            head = buf.read_until(b"\r\n\r\n")
+            status, _headers = _parse_response_head(head)
+            if status != 200:
+                raise ToolCallError(
+                    "subscribe_failed",
+                    f"server returned HTTP {status}",
+                    status=status,
+                )
+
+            sock.settimeout(None)
+            yield from _iter_sse_events(buf)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+
+def _join_prefix(prefix: str, suffix: str) -> str:
+    if not prefix.startswith("/"):
+        prefix = "/" + prefix
+    if not prefix.endswith("/"):
+        prefix = prefix + "/"
+    return prefix + suffix.lstrip("/")
+
+
+def _iter_sse_events(buf: "_SocketBuffer") -> Iterator[Any]:
+    """Yield parsed events from a live SSE byte stream.
+
+    Reads bytes directly off the underlying socket, splitting on CRLF
+    or LF so we tolerate any compliant producer. Comments (``: ...``)
+    and named events without a ``data:`` field are skipped. Blank-line
+    terminators flush any accumulated ``data:`` lines as a single
+    event; ``data:`` payloads are JSON-decoded when possible, otherwise
+    yielded verbatim. The iterator returns when the socket closes.
+    """
+    data_lines: list[str] = []
+    pending: bytes = bytes(buf._buf)
+    buf._buf = b""
+    while True:
+        nl = _find_line_end(pending)
+        while nl is None:
+            try:
+                chunk = buf._sock.recv(4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            pending += chunk
+            nl = _find_line_end(pending)
+        end_idx, line_end_len = nl
+        line = pending[:end_idx]
+        pending = pending[end_idx + line_end_len:]
+
+        if line == b"":
+            if data_lines:
+                payload = "\n".join(data_lines)
+                data_lines = []
+                yield _decode_sse_payload(payload)
+            continue
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if text.startswith(":"):
+            continue
+        if text.startswith("data:"):
+            data_lines.append(text[5:].lstrip(" "))
+
+
+def _find_line_end(buf: bytes) -> tuple[int, int] | None:
+    """Locate the next CRLF or LF terminator in ``buf``.
+
+    Returns ``(index_of_terminator, terminator_length)`` or ``None`` if
+    no terminator is present yet. The line itself is ``buf[:index]``.
+    """
+    crlf = buf.find(b"\r\n")
+    lf = buf.find(b"\n")
+    if crlf == -1 and lf == -1:
+        return None
+    if crlf != -1 and (lf == -1 or crlf <= lf):
+        return crlf, 2
+    return lf, 1
+
+
+def _decode_sse_payload(payload: str) -> Any:
+    try:
+        return json.loads(payload)
+    except (ValueError, TypeError):
+        return payload
 
 
 class _SocketBuffer:

@@ -11,16 +11,32 @@ without writing the descriptor / rendezvous / circuit plumbing by
 hand.
 """
 
-from src.agent.app import AgentApp, Request, Response, serve_app
-from src.agent.client import AgentClient, AgentResponse
+from src.agent.app import AgentApp, Request, Response, StreamingResponse, serve_app
+from src.agent.client import AgentClient, AgentResponse, ToolCallError
 from src.agent.runtime import AgentRuntime
+from src.agent.tools import (
+    PROTOCOL_VERSION,
+    ParamSpec,
+    Tool,
+    ToolError,
+    ToolRegistry,
+    Topic,
+)
 
 __all__ = [
     "AgentApp",
     "AgentClient",
     "AgentResponse",
     "AgentRuntime",
+    "PROTOCOL_VERSION",
+    "ParamSpec",
     "Request",
     "Response",
+    "StreamingResponse",
+    "Tool",
+    "ToolCallError",
+    "ToolError",
+    "ToolRegistry",
+    "Topic",
     "serve_app",
 ]
