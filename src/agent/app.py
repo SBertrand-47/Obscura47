@@ -13,6 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterable
 
+from src.utils.identity import fingerprint_pubkey, lookup_caller
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -23,7 +24,15 @@ BeforeHandler = Callable[["Request"], "Response | StreamingResponse | None"]
 
 
 class Request:
-    """Inbound HTTP request handed to a route handler."""
+    """Inbound HTTP request handed to a route handler.
+
+    ``caller_pub`` is the PEM public key of whoever dialed the hidden
+    service for this connection, when it can be determined (i.e. the
+    request actually arrived through a `.obscura` rendezvous and the
+    host registered a caller mapping for the local socket). It's
+    ``None`` for purely local traffic — direct ``urllib`` hits during
+    tests or operator probes against the bound port.
+    """
 
     def __init__(
         self,
@@ -32,12 +41,22 @@ class Request:
         headers: dict[str, str],
         body: bytes,
         params: dict[str, str] | None = None,
+        caller_pub: str | None = None,
     ):
         self.method = method.upper()
         self.path = path
         self.headers = {k.lower(): v for k, v in headers.items()}
         self.body = body
         self.params: dict[str, str] = params or {}
+        self.caller_pub: str | None = caller_pub
+        self._caller_fingerprint: str | None | object = _UNSET
+
+    @property
+    def caller_fingerprint(self) -> str | None:
+        """SHA-256 hex fingerprint of ``caller_pub``, lazily computed."""
+        if self._caller_fingerprint is _UNSET:
+            self._caller_fingerprint = fingerprint_pubkey(self.caller_pub)
+        return self._caller_fingerprint  # type: ignore[return-value]
 
     def json(self) -> Any:
         if not self.body:
@@ -49,6 +68,9 @@ class Request:
 
     def text(self) -> str:
         return self.body.decode("utf-8", errors="replace")
+
+
+_UNSET: Any = object()
 
 
 class Response:
@@ -190,7 +212,11 @@ def _make_handler(app: AgentApp) -> type[BaseHTTPRequestHandler]:
             except ValueError:
                 length = 0
             body = self.rfile.read(length) if length > 0 else b""
-            req = Request(method, self.path, dict(self.headers), body)
+            caller_pub = lookup_caller(self.client_address)
+            req = Request(
+                method, self.path, dict(self.headers), body,
+                caller_pub=caller_pub,
+            )
             try:
                 resp = app.dispatch(req)
             except Exception as e:
