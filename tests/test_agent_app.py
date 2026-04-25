@@ -175,3 +175,73 @@ def test_serve_app_returns_404_over_http(served_app):
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(f"{served_app}/nope", timeout=2)
     assert exc_info.value.code == 404
+
+
+def test_request_caller_defaults_to_none():
+    req = _request("GET", "/x")
+    assert req.caller_pub is None
+    assert req.caller_fingerprint is None
+
+
+def test_request_caller_fingerprint_matches_pub_sha256():
+    pub = "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----\n"
+    req = Request("GET", "/x", {}, b"", caller_pub=pub)
+    import hashlib
+    assert req.caller_fingerprint == hashlib.sha256(pub.encode()).hexdigest()
+
+
+def test_serve_app_populates_caller_pub_from_registered_socket():
+    """When the host registers ``(client_host, client_port)`` in the
+    identity registry before the app handler builds the request, the
+    handler should surface that as ``req.caller_pub``."""
+    import socket
+
+    from src.utils.identity import (
+        clear_callers,
+        register_caller,
+        unregister_caller,
+    )
+
+    pub = "-----BEGIN PUBLIC KEY-----\nDIALER\n-----END PUBLIC KEY-----\n"
+    captured: dict = {}
+
+    app = AgentApp()
+
+    @app.get("/whoami")
+    def _whoami(req):
+        captured["caller_pub"] = req.caller_pub
+        captured["fp"] = req.caller_fingerprint
+        return Response(200, {"caller": req.caller_fingerprint})
+
+    server, _ = serve_app(app, "127.0.0.1", 0)
+    try:
+        host, port = server.server_address[:2]
+        clear_callers()
+        sock = socket.create_connection((host, port), timeout=2)
+        try:
+            local = sock.getsockname()[:2]
+            register_caller(local, pub)
+            sock.sendall(
+                b"GET /whoami HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            assert b"HTTP/1.1 200" in data
+            assert captured["caller_pub"] == pub
+            assert captured["fp"] is not None
+            assert captured["fp"] in data.decode("utf-8", "replace")
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            unregister_caller(local)
+    finally:
+        server.shutdown()
+        server.server_close()

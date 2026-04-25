@@ -231,9 +231,10 @@ def _install_default_tools(tools: ToolRegistry, runtime: AgentRuntime) -> None:
                           description="optional value reflected back to the caller")],
         returns="object",
     )
-    def _ping(args: dict, _req: Request) -> dict:
+    def _ping(args: dict, req: Request) -> dict:
         return {
             "agent": runtime.name,
             "received": args.get("payload"),
+            "caller": req.caller_fingerprint,
             "ts": time.time(),
         }
