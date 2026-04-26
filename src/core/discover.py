@@ -105,7 +105,11 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                         new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
                         if "pub" in message:
                             new_peer["pub"] = message["pub"]
-                        if new_peer["host"] != advertised_ip:
+                        is_self = (
+                            new_peer["host"] == advertised_ip
+                            and new_peer["port"] == local_port
+                        )
+                        if not is_self:
                             # TOFU: reject if public key changed
                             if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
                                 continue
@@ -179,18 +183,20 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                             new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
                             if "pub" in message:
                                 new_peer["pub"] = message["pub"]
-                            if new_peer["host"] != advertised_ip:
-                                # TOFU: reject if public key changed
-                                if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
-                                    continue
-                                # Update or insert
-                                for idx, p in enumerate(list(peers)):
-                                    if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
-                                        peers[idx]["ts"] = new_peer["ts"]
-                                        break
-                                else:
-                                    peers.append(new_peer)
-                                    log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
+                            # Passive observers should accept peers on the same
+                            # host when they advertise a different service port.
+                            # This lets a local proxy discover co-hosted relays
+                            # and exits instead of hiding them by IP alone.
+                            if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
+                                continue
+                            # Update or insert
+                            for idx, p in enumerate(list(peers)):
+                                if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
+                                    peers[idx]["ts"] = new_peer["ts"]
+                                    break
+                            else:
+                                peers.append(new_peer)
+                                log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
 
                             # Expire old peers
                             cutoff = time.time() - PEER_EXPIRY_SECONDS
