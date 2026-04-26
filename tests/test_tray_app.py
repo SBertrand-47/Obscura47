@@ -78,11 +78,13 @@ class TestBrowseDirectory:
     def test_browse_directory_shows_results(self, monkeypatch):
         app = tray_app.Obscura47Tray()
 
-        prompts = iter(["directory.obscura", "alpha"])
+        prompts = iter(["directory.obscura", "alpha", "alpha.obscura"])
         monkeypatch.setattr(app, "_prompt_text", lambda *args, **kwargs: next(prompts))
 
         dialogs = []
         monkeypatch.setattr(app, "_show_dialog", lambda title, message, error=False: dialogs.append((title, message, error)))
+        opened = []
+        monkeypatch.setattr(app, "_open_address_in_browser", lambda address: opened.append(address))
 
         monkeypatch.setattr("src.utils.visitor.ensure_proxy_running", lambda: True)
 
@@ -108,3 +110,50 @@ class TestBrowseDirectory:
         assert "Directory: directory.obscura" in dialogs[0][1]
         assert "alpha.obscura" in dialogs[0][1]
         assert "beta.obscura" in dialogs[0][1]
+        assert opened == ["alpha.obscura"]
+
+
+class TestHostedSites:
+    def test_show_hosted_sites_displays_address_target_and_mode(self, monkeypatch):
+        app = tray_app.Obscura47Tray()
+
+        class Site:
+            def __init__(self, name, address, target=None):
+                self.name = name
+                self.address = address
+                self.target = target
+
+        monkeypatch.setattr(app, "_get_hosted_sites", lambda: [Site("alpha", "alpha.obscura", "./site")])
+        monkeypatch.setattr("src.utils.daemon.daemon_installed", lambda name: True)
+
+        dialogs = []
+        monkeypatch.setattr(app, "_show_dialog", lambda title, message, error=False: dialogs.append((title, message, error)))
+
+        app._show_hosted_sites()
+
+        assert dialogs and dialogs[0][2] is False
+        assert "alpha.obscura" in dialogs[0][1]
+        assert "Target: ./site" in dialogs[0][1]
+        assert "Mode: background" in dialogs[0][1]
+
+    def test_open_hosted_site_resolves_name_and_opens_browser(self, monkeypatch):
+        app = tray_app.Obscura47Tray()
+
+        class Site:
+            def __init__(self, name, address):
+                self.name = name
+                self.address = address
+
+        monkeypatch.setattr(app, "_get_hosted_sites", lambda: [Site("alpha", "alpha.obscura")])
+        monkeypatch.setattr(app, "_prompt_text", lambda *args, **kwargs: "alpha")
+
+        opened = []
+        dialogs = []
+        monkeypatch.setattr(app, "_open_address_in_browser", lambda address: opened.append(address))
+        monkeypatch.setattr(app, "_show_dialog", lambda title, message, error=False: dialogs.append((title, message, error)))
+
+        app._open_hosted_site()
+
+        assert opened == ["alpha.obscura"]
+        assert dialogs and dialogs[0][2] is False
+        assert "Opened alpha.obscura" in dialogs[0][1]
