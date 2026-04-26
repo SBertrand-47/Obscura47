@@ -199,8 +199,9 @@ class ObscuraApp(tk.Tk):
 
         self.title("Obscura47")
         self.configure(bg=BG)
-        self.resizable(False, False)
+        self.resizable(False, True)
         self.geometry("520x760")
+        self.minsize(520, 400)
 
         # ── ttk styles (fix white-on-white buttons on macOS Aqua) ──
         style = ttk.Style(self)
@@ -270,8 +271,34 @@ class ObscuraApp(tk.Tk):
     # ── UI construction ───────────────────────────────────────────
 
     def _build_ui(self):
+        # ── Scrollable container ─────────────────────────────────
+        self._canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
+        self._scrollbar = tk.Scrollbar(self, orient="vertical",
+                                        command=self._canvas.yview)
+        self._inner = tk.Frame(self._canvas, bg=BG)
+
+        self._inner.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
+        )
+        self._canvas_window = self._canvas.create_window(
+            (0, 0), window=self._inner, anchor="nw",
+        )
+        self._canvas.configure(yscrollcommand=self._scrollbar.set)
+
+        self._scrollbar.pack(side="right", fill="y")
+        self._canvas.pack(side="left", fill="both", expand=True)
+
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
+        self._inner.bind_all("<MouseWheel>", self._on_mousewheel)
+        self._inner.bind_all("<Button-4>", self._on_mousewheel)
+        self._inner.bind_all("<Button-5>", self._on_mousewheel)
+
+        # All child widgets pack into self._inner instead of self
+        parent = self._inner
+
         # Header
-        header = tk.Frame(self, bg=BG)
+        header = tk.Frame(parent, bg=BG)
         header.pack(fill="x", pady=(24, 0))
 
         tk.Label(
@@ -284,7 +311,7 @@ class ObscuraApp(tk.Tk):
         ).pack()
 
         # ── Network status banner ─────────────────────────────────
-        self._banner_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        self._banner_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                                        highlightthickness=1)
         self._banner_frame.pack(fill="x", padx=24, pady=(18, 0), ipady=10)
 
@@ -305,7 +332,7 @@ class ObscuraApp(tk.Tk):
         self._status_detail.pack(side="right", padx=(0, 16))
 
         # ── Network peers panel ───────────────────────────────────
-        peers_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        peers_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                                highlightthickness=1)
         peers_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=8)
 
@@ -325,7 +352,7 @@ class ObscuraApp(tk.Tk):
             self._peer_labels[key] = num
 
         # ── Component status cards ────────────────────────────────
-        cards_frame = tk.Frame(self, bg=BG)
+        cards_frame = tk.Frame(parent, bg=BG)
         cards_frame.pack(fill="x", padx=24, pady=(14, 0))
 
         descriptions = {
@@ -337,7 +364,7 @@ class ObscuraApp(tk.Tk):
             self._build_status_card(cards_frame, role, label, desc)
 
         # ── Getting started hint ──────────────────────────────────
-        hint_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        hint_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                               highlightthickness=1)
         hint_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
 
@@ -353,20 +380,20 @@ class ObscuraApp(tk.Tk):
 
         # ── Connect button ────────────────────────────────────────
         self._connect_btn = ttk.Button(
-            self, text="\u25b6  Connect", style="Connect.TButton",
+            parent, text="\u25b6  Connect", style="Connect.TButton",
             cursor="hand2", command=self._toggle_connection,
         )
         self._connect_btn.pack(pady=(14, 0))
 
         # ── Request Exit Node status ──────────────────────────────
         self._exit_request_btn = ttk.Button(
-            self, text="Request Exit Node Status", style="Subtle.TButton",
+            parent, text="Request Exit Node Status", style="Subtle.TButton",
             cursor="hand2", command=self._request_exit_status,
         )
         self._exit_request_btn.pack(pady=(6, 0))
 
         # ── Quick actions ─────────────────────────────────────────
-        utility_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        utility_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                                  highlightthickness=1)
         utility_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=8)
 
@@ -391,7 +418,7 @@ class ObscuraApp(tk.Tk):
             ).pack(side="left", padx=(0, 8))
 
         # ── Settings panel ────────────────────────────────────────
-        settings_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        settings_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                                   highlightthickness=1)
         settings_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
 
@@ -421,13 +448,13 @@ class ObscuraApp(tk.Tk):
         ).pack(side="left")
 
         # ── Log area ─────────────────────────────────────────────
-        log_label = tk.Label(self, text="Activity Log", font=self._label_font,
+        log_label = tk.Label(parent, text="Activity Log", font=self._label_font,
                              fg=TEXT_DIM, bg=BG, anchor="w")
         log_label.pack(fill="x", padx=26, pady=(14, 2))
 
-        log_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+        log_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
                              highlightthickness=1)
-        log_frame.pack(fill="both", expand=True, padx=24, pady=(0, 20))
+        log_frame.pack(fill="x", padx=24, pady=(0, 20))
 
         self._log_text = tk.Text(
             log_frame, bg=BG_CARD, fg=TEXT_DIM, font=self._log_font,
@@ -437,6 +464,19 @@ class ObscuraApp(tk.Tk):
         self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         self._log("Welcome to Obscura47. Connect, then use Quick Actions to visit or publish sites.")
+
+    def _on_canvas_resize(self, event):
+        self._canvas.itemconfig(self._canvas_window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if event.num == 4:
+            self._canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self._canvas.yview_scroll(1, "units")
+        elif platform.system() == "Darwin":
+            self._canvas.yview_scroll(-event.delta, "units")
+        else:
+            self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
     def _on_autostart_toggle(self):
         enabled = self._autostart_var.get()
