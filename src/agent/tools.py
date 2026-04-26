@@ -41,10 +41,13 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator
 
 from src.agent.app import AgentApp, Request, Response, StreamingResponse
 from src.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from src.agent.observatory import Observer
 
 log = get_logger(__name__)
 
@@ -170,6 +173,7 @@ class ToolRegistry:
         self._tools: dict[str, Tool] = {}
         self._topics: dict[str, Topic] = {}
         self._lock = threading.Lock()
+        self.observer: "Observer | None" = None
 
     def register(
         self,
@@ -257,39 +261,91 @@ class ToolRegistry:
 
     def invoke(self, name: str, args: Any, request: Request) -> Response:
         """Run a tool by name and wrap the result/error into the envelope."""
+        observer = self.observer
+        session_id = getattr(request, "session_id", None)
+        caller = request.caller_fingerprint
+        started = time.time() if observer is not None else 0.0
+
+        def _emit_error(resp: Response, code: str, message: str) -> Response:
+            if observer is not None:
+                try:
+                    latency_ms = round((time.time() - started) * 1000, 3)
+                    observer.emit(
+                        "tool.error",
+                        session_id=session_id,
+                        tool=name,
+                        caller=caller,
+                        code=code,
+                        message=message,
+                        status=resp.status,
+                        latency_ms=latency_ms,
+                    )
+                except Exception:
+                    log.exception("observer emit (tool.error) failed")
+            return resp
+
         tool = self.get(name)
         if tool is None:
-            return Response(404, {
+            resp = Response(404, {
                 "ok": False,
                 "error": {"code": "not_found", "message": f"unknown tool {name!r}"},
             })
+            return _emit_error(resp, "not_found", f"unknown tool {name!r}")
         if args is None:
             args = {}
         if not isinstance(args, dict):
-            return Response(400, {
+            resp = Response(400, {
                 "ok": False,
                 "error": {"code": "bad_args", "message": "args must be an object"},
             })
+            return _emit_error(resp, "bad_args", "args must be an object")
         try:
             coerced = _validate_args(tool.params, args)
         except ToolError as e:
-            return Response(e.status, {
+            resp = Response(e.status, {
                 "ok": False,
                 "error": {"code": e.code, "message": e.message},
             })
+            return _emit_error(resp, e.code, e.message)
+        if observer is not None:
+            try:
+                observer.emit(
+                    "tool.invoke",
+                    session_id=session_id,
+                    tool=name,
+                    caller=caller,
+                    args_keys=sorted(coerced.keys()),
+                )
+            except Exception:
+                log.exception("observer emit (tool.invoke) failed")
         try:
             result = tool.handler(coerced, request)
         except ToolError as e:
-            return Response(e.status, {
+            resp = Response(e.status, {
                 "ok": False,
                 "error": {"code": e.code, "message": e.message},
             })
+            return _emit_error(resp, e.code, e.message)
         except Exception as e:
             log.exception("tool %s handler crashed", name)
-            return Response(500, {
+            resp = Response(500, {
                 "ok": False,
                 "error": {"code": "internal", "message": str(e) or repr(e)},
             })
+            return _emit_error(resp, "internal", str(e) or repr(e))
+        if observer is not None:
+            try:
+                latency_ms = round((time.time() - started) * 1000, 3)
+                observer.emit(
+                    "tool.result",
+                    session_id=session_id,
+                    tool=name,
+                    caller=caller,
+                    status=200,
+                    latency_ms=latency_ms,
+                )
+            except Exception:
+                log.exception("observer emit (tool.result) failed")
         return Response(200, {"ok": True, "result": result})
 
     def mount(self, app: AgentApp, prefix: str = DEFAULT_PREFIX) -> None:

@@ -10,11 +10,15 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from src.utils.identity import fingerprint_pubkey, lookup_caller
 from src.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from src.agent.observatory import Observer
 
 log = get_logger(__name__)
 
@@ -50,6 +54,7 @@ class Request:
         self.params: dict[str, str] = params or {}
         self.caller_pub: str | None = caller_pub
         self._caller_fingerprint: str | None | object = _UNSET
+        self.session_id: str | None = self.headers.get("x-obscura-session") or None
 
     @property
     def caller_fingerprint(self) -> str | None:
@@ -139,6 +144,7 @@ class AgentApp:
     def __init__(self):
         self._routes: list[tuple[str, re.Pattern[str], Handler]] = []
         self._before: list[BeforeHandler] = []
+        self.observer: "Observer | None" = None
 
     def route(self, method: str, pattern: str, handler: Handler) -> None:
         self._routes.append((method.upper(), re.compile(f"^{pattern}$"), handler))
@@ -172,6 +178,58 @@ class AgentApp:
         return fn
 
     def dispatch(self, req: Request) -> Response:
+        observer = self.observer
+        bare_path = req.path.split("?", 1)[0]
+        if observer is not None and req.session_id is None:
+            from src.agent.observatory import new_session_id
+
+            req.session_id = new_session_id()
+        started = time.time() if observer is not None else 0.0
+        if observer is not None:
+            try:
+                observer.emit(
+                    "request.in",
+                    session_id=req.session_id,
+                    method=req.method,
+                    path=bare_path,
+                    caller=req.caller_fingerprint,
+                    bytes_in=len(req.body or b""),
+                )
+            except Exception:
+                log.exception("observer emit (request.in) failed")
+        from src.agent.sandbox import set_current_session_id
+
+        prev_session = None
+        try:
+            from src.agent.sandbox import current_session_id
+
+            prev_session = current_session_id()
+            set_current_session_id(req.session_id)
+            resp = self._dispatch_inner(req, bare_path)
+        finally:
+            set_current_session_id(prev_session)
+        if observer is not None:
+            try:
+                latency_ms = round((time.time() - started) * 1000, 3)
+                body_len = 0
+                if isinstance(resp, Response):
+                    body_len = len(resp.body or b"")
+                observer.emit(
+                    "response.out",
+                    session_id=req.session_id,
+                    method=req.method,
+                    path=bare_path,
+                    status=resp.status,
+                    latency_ms=latency_ms,
+                    caller=req.caller_fingerprint,
+                    bytes_out=body_len,
+                    streaming=isinstance(resp, StreamingResponse),
+                )
+            except Exception:
+                log.exception("observer emit (response.out) failed")
+        return resp
+
+    def _dispatch_inner(self, req: Request, bare_path: str) -> Response:
         for fn in self._before:
             try:
                 early = fn(req)
@@ -180,7 +238,6 @@ class AgentApp:
                 return Response(500, {"error": str(e)})
             if early is not None:
                 return early
-        bare_path = req.path.split("?", 1)[0]
         for method, pat, handler in self._routes:
             if method != req.method:
                 continue

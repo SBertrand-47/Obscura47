@@ -64,7 +64,35 @@ def main(argv: list[str] | None = None) -> int:
         "--app", default=None,
         help="optional MODULE:ATTR pointing at an AgentApp or factory",
     )
+    parser.add_argument(
+        "--observatory", default=None,
+        help=(
+            "optional .obscura address of a collector to forward "
+            "observability events to"
+        ),
+    )
+    parser.add_argument(
+        "--observatory-jsonl", default=None,
+        help=(
+            "optional local JSONL path that mirrors every observability "
+            "event before it leaves the process"
+        ),
+    )
+
+    from src.agent.sandboxed_runtime import add_sandbox_arguments, policy_from_args
+
+    add_sandbox_arguments(parser)
     args = parser.parse_args(argv)
+
+    from src.agent.observatory import build_observer_from_flags
+
+    observer = build_observer_from_flags(
+        actor=args.name,
+        remote_addr=args.observatory,
+        jsonl_path=args.observatory_jsonl,
+    )
+
+    policy = policy_from_args(args)
 
     app = _load_app(args.app) if args.app else None
     runtime = AgentRuntime(
@@ -73,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         app=app,
         bind_host=args.bind,
         bind_port=args.port,
+        observer=observer,
+        policy=policy,
     )
 
     if not runtime.start():
