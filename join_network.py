@@ -14,6 +14,8 @@ Usage:
     python join_network.py host ./mysite --name myblog   # Named site (key at ~/.obscura47/sites/myblog.pem)
     python join_network.py host ./mysite --key /path.pem # Explicit key path
     python join_network.py host list          # List all hosted sites and their addresses
+    python join_network.py host enable ./mysite --name myblog   # Install per-site background service
+    python join_network.py host disable --name myblog           # Remove background service
 
 No build step required — runs directly from source.
 """
@@ -115,21 +117,41 @@ def run_role(role: str, arg: str | None = None,
         _run_host(arg, site_name=site_name, key_path=key_path)
 
 
+def _saved_target_for_site(site_name: str | None) -> str | None:
+    if not site_name:
+        return None
+    from src.utils.sites import load_site_config
+
+    config = load_site_config(site_name)
+    return config.target if config else None
+
+
 def _run_host(arg: str | None, site_name: str | None = None, key_path: str | None = None):
     """Publish a local directory or service as a `.obscura` hidden service."""
     from src.core.hidden_service import HiddenServiceHost
-    from src.utils.sites import load_or_create_site_key
+    from src.utils.sites import load_or_create_site_key, load_site_config, save_site_config
+
+    if not arg:
+        arg = _saved_target_for_site(site_name)
 
     if not arg:
         print("  [!] host mode needs a target: a directory path or host:port")
         print("      e.g.  python join_network.py host ./mysite")
         print("            python join_network.py host 127.0.0.1:8000")
+        if site_name:
+            print(f"            or save one first for site {site_name!r} and rerun with --name")
         sys.exit(1)
 
     target_host, target_port = _resolve_host_target(arg)
+    if site_name and not key_path:
+        config = load_site_config(site_name)
+        if config and config.key_path:
+            key_path = config.key_path
     _priv, _pub, resolved_key, _created = load_or_create_site_key(
         name=site_name, key=key_path,
     )
+    if site_name:
+        save_site_config(site_name, key_path=resolved_key, target=arg)
     host = HiddenServiceHost(target_host, target_port, resolved_key)
 
     label = site_name or os.path.basename(resolved_key).removesuffix(".pem")
@@ -179,6 +201,7 @@ def _resolve_host_target(arg: str) -> tuple[str, int]:
 
 def _host_list():
     """Print all `.obscura` sites in the sites directory."""
+    from src.utils.daemon import daemon_installed
     from src.utils.sites import list_sites, SITES_DIR
 
     sites = list(list_sites())
@@ -191,6 +214,12 @@ def _host_list():
     for s in sites:
         print(f"    {s.name:<20s} {s.address}")
         print(f"    {'':20s} key: {s.key_path}")
+        if s.target:
+            print(f"    {'':20s} target: {s.target}")
+        print(
+            f"    {'':20s} background service: "
+            f"{'installed' if daemon_installed(s.name) else 'not installed'}"
+        )
         print()
 
 
@@ -239,6 +268,68 @@ def _host_import_key(argv: list[str]):
     except (FileNotFoundError, FileExistsError) as e:
         print(f"  [!] {e}")
         sys.exit(1)
+
+
+def _host_enable(argv: list[str]):
+    from src.utils.daemon import install_daemon
+    from src.utils.onion_addr import address_from_pubkey
+    from src.utils.sites import load_or_create_site_key, load_site_config, save_site_config
+
+    name, key = _parse_host_flags(argv)
+    if not name:
+        print("  [!] --name is required for enable")
+        sys.exit(1)
+
+    positional = _strip_host_flags(argv)
+    target = positional[0] if positional else None
+    config = load_site_config(name)
+    if not key and config and config.key_path:
+        key = config.key_path
+    if not target:
+        target = config.target if config else None
+    if not target:
+        print("  [!] enable needs a target: directory path or host:port")
+        print("      e.g.  python join_network.py host enable ./mysite --name mysite")
+        print("      or remember one first with: python join_network.py host ./mysite --name mysite")
+        sys.exit(1)
+
+    try:
+        _, pub, key_path, _created = load_or_create_site_key(
+            name=name, key=key,
+        )
+        save_site_config(name, key_path=key_path, target=target)
+        reference = install_daemon(name, target, key_path=key_path)
+        print()
+        print(f"  Installed background service for {name!r}")
+        print(f"  .obscura address:  {address_from_pubkey(pub)}")
+        print(f"  target:            {target}")
+        print(f"  key file:          {key_path}")
+        print(f"  service:           {reference}")
+        print()
+    except RuntimeError as e:
+        print(f"  [!] {e}")
+        sys.exit(1)
+
+
+def _host_disable(argv: list[str]):
+    from src.utils.daemon import uninstall_daemon
+
+    name, _ = _parse_host_flags(argv)
+    if not name:
+        print("  [!] --name is required for disable")
+        sys.exit(1)
+
+    try:
+        removed = uninstall_daemon(name)
+    except RuntimeError as e:
+        print(f"  [!] {e}")
+        sys.exit(1)
+
+    if not removed:
+        print(f"  [!] no background service found for site {name!r}")
+        sys.exit(1)
+
+    print(f"  Removed background service for site {name!r}")
 
 
 def _host_rotate_key(argv: list[str]):
@@ -351,6 +442,22 @@ def _parse_host_flags(argv: list[str]) -> tuple[str | None, str | None]:
     return name, key
 
 
+def _strip_host_flags(argv: list[str]) -> list[str]:
+    """Return positional args after removing --name/--key flags and their values."""
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--name", "--key") and i + 1 < len(argv):
+            i += 2
+        elif arg.startswith("--name=") or arg.startswith("--key="):
+            i += 1
+        else:
+            positional.append(arg)
+            i += 1
+    return positional
+
+
 def main():
     signal.signal(signal.SIGINT, lambda s, f: (print("\n\n  Shutting down..."), sys.exit(0)))
 
@@ -370,17 +477,21 @@ def main():
         elif arg == "open":
             from src.utils.visitor import open_in_browser
             url = sys.argv[2] if len(sys.argv) >= 3 else ""
-            if url and not url.startswith("http"):
-                url = f"http://{url}"
             if open_in_browser(url=url):
                 print("  Browser launched with .obscura proxy routing.")
             else:
-                print("  [!] Could not open browser.")
+                print("  [!] Could not start the proxy or open the browser.")
             return
         elif arg == "host":
             sub = sys.argv[2].lower() if len(sys.argv) >= 3 else ""
             if sub == "list":
                 _host_list()
+                return
+            if sub == "enable":
+                _host_enable(sys.argv[3:])
+                return
+            if sub == "disable":
+                _host_disable(sys.argv[3:])
                 return
             if sub == "export-key":
                 _host_export_key(sys.argv[3:])
@@ -391,17 +502,26 @@ def main():
             if sub == "rotate-key":
                 _host_rotate_key(sys.argv[3:])
                 return
-            if not sub or sub.startswith("--"):
+            if not sub:
                 print("  [!] host mode needs a target argument")
                 print("      e.g.  python join_network.py host ./mysite")
                 print("            python join_network.py host list")
+                print("            python join_network.py host enable ./mysite --name mysite")
+                print("            python join_network.py host disable --name mysite")
                 print("            python join_network.py host export-key --name mysite")
                 print("            python join_network.py host import-key key.pem --name mysite")
                 print("            python join_network.py host rotate-key --name mysite")
                 sys.exit(1)
             roles = ["host"]
-            host_arg = sys.argv[2]
-            site_name, key_path = _parse_host_flags(sys.argv[3:])
+            if sub.startswith("--"):
+                host_arg = None
+                site_name, key_path = _parse_host_flags(sys.argv[2:])
+                if not site_name:
+                    print("  [!] host mode with saved config needs --name")
+                    sys.exit(1)
+            else:
+                host_arg = sys.argv[2]
+                site_name, key_path = _parse_host_flags(sys.argv[3:])
         elif arg in ROLES:
             roles = [arg]
         else:

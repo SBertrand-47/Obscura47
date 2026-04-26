@@ -109,20 +109,38 @@ class Obscura47Tray:
 
         # Hosted sites submenu
         hosted = self._get_hosted_sites()
+        site_items = []
         if hosted:
-            site_items = []
+            from src.utils.daemon import daemon_installed
+
             for s in hosted:
-                running = s.name in self._hosted_sites
-                label = f"{'*' if running else ' '} {s.name}  {s.address}"
+                status = "daemon" if daemon_installed(s.name) else "manual"
+                label = f"{s.name}  {s.address}  [{status}]"
                 site_items.append(pystray.MenuItem(label, action=None, enabled=False))
-            items.append(pystray.MenuItem(
-                f".obscura sites ({len(hosted)})",
-                pystray.Menu(*site_items),
-            ))
+            site_items.append(pystray.Menu.SEPARATOR)
         else:
-            items.append(
-                pystray.MenuItem(".obscura sites (none)", action=None, enabled=False)
+            site_items.append(
+                pystray.MenuItem("No hosted sites yet", action=None, enabled=False)
             )
+            site_items.append(pystray.Menu.SEPARATOR)
+
+        site_items.append(
+            pystray.MenuItem(
+                "Add .obscura site...",
+                action=lambda: self._add_hosted_site(),
+            )
+        )
+        if hosted:
+            site_items.append(
+                pystray.MenuItem(
+                    "Remove site daemon...",
+                    action=lambda: self._remove_hosted_site_daemon(),
+                )
+            )
+        items.append(pystray.MenuItem(
+            f".obscura sites ({len(hosted)})",
+            pystray.Menu(*site_items),
+        ))
 
         items.append(pystray.Menu.SEPARATOR)
 
@@ -293,12 +311,15 @@ class Obscura47Tray:
 
     def _open_visitor(self):
         try:
+            url = self._prompt_text(
+                "Open .obscura Address",
+                "Address or URL to open (leave blank for a new tab):",
+            )
+            if url is None:
+                return
             from src.utils.visitor import open_in_browser
-            if "proxy" not in self._running_roles:
-                self._start_role("proxy")
-                import time
-                time.sleep(1)
-            open_in_browser()
+            if not open_in_browser(url=url):
+                raise RuntimeError("proxy startup or browser launch failed")
             print("[Obscura47 Tray] Browser opened with .obscura routing.", flush=True)
         except Exception as exc:
             print(f"[Obscura47 Tray] Failed to open browser: {exc}", flush=True)
@@ -309,6 +330,100 @@ class Obscura47Tray:
             return list(list_sites())
         except Exception:
             return []
+
+    def _prompt_text(self, title: str, prompt: str, initial: str = "") -> str | None:
+        import tkinter as tk
+        from tkinter import simpledialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            return simpledialog.askstring(title, prompt, initialvalue=initial, parent=root)
+        finally:
+            root.destroy()
+
+    def _show_dialog(self, title: str, message: str, *, error: bool = False):
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            if error:
+                messagebox.showerror(title, message, parent=root)
+            else:
+                messagebox.showinfo(title, message, parent=root)
+        finally:
+            root.destroy()
+
+    def _add_hosted_site(self):
+        name = self._prompt_text("Add .obscura Site", "Site name:")
+        if not name:
+            return
+        remembered_target = ""
+        remembered_key_path = None
+        try:
+            from src.utils.sites import load_site_config
+
+            config = load_site_config(name)
+            if config:
+                if config.target:
+                    remembered_target = config.target
+                remembered_key_path = config.key_path
+        except Exception:
+            remembered_target = ""
+            remembered_key_path = None
+        target = self._prompt_text(
+            "Add .obscura Site",
+            "Directory path or host:port to publish:",
+            initial=remembered_target,
+        )
+        if not target:
+            return
+
+        try:
+            from src.utils.daemon import install_daemon
+            from src.utils.sites import load_or_create_site_key, save_site_config
+
+            _, pub, key_path, _created = load_or_create_site_key(
+                name=name,
+                key=remembered_key_path,
+            )
+            save_site_config(name, key_path=key_path, target=target)
+            reference = install_daemon(name, target, key_path=key_path)
+            self._show_dialog(
+                "Obscura47",
+                f"Installed background host for {name}.\n\n"
+                f"Address: {self._address_from_pub(pub)}\n"
+                f"Target: {target}\n"
+                f"Service: {reference}",
+            )
+        except Exception as exc:
+            self._show_dialog("Obscura47", f"Could not add site:\n{exc}", error=True)
+        finally:
+            self._update_menu()
+
+    def _remove_hosted_site_daemon(self):
+        name = self._prompt_text("Remove Site Daemon", "Site name:")
+        if not name:
+            return
+
+        try:
+            from src.utils.daemon import uninstall_daemon
+
+            if not uninstall_daemon(name):
+                raise RuntimeError(f"no background service found for {name!r}")
+            self._show_dialog("Obscura47", f"Removed background service for {name}.")
+        except Exception as exc:
+            self._show_dialog("Obscura47", f"Could not remove site daemon:\n{exc}", error=True)
+        finally:
+            self._update_menu()
+
+    @staticmethod
+    def _address_from_pub(pub: str) -> str:
+        from src.utils.onion_addr import address_from_pubkey
+
+        return address_from_pubkey(pub)
 
     def _on_setup(self, icon, item):
         """Setup callback for the tray icon."""

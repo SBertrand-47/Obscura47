@@ -10,15 +10,20 @@ import pytest
 
 from src.utils.sites import (
     SITES_DIR,
+    SiteConfig,
     SiteInfo,
+    config_path_for_name,
+    delete_site_config,
     ensure_sites_dir,
     export_key,
     import_key,
     key_path_for_name,
     list_sites,
+    load_site_config,
     load_or_create_site_key,
     resolve_key_path,
     rotate_key,
+    save_site_config,
     set_key_permissions,
 )
 
@@ -44,6 +49,12 @@ class TestKeyPathForName:
     def test_rejects_dotfile(self):
         with pytest.raises(ValueError, match="invalid site name"):
             key_path_for_name(".hidden", "/fake/sites")
+
+
+class TestConfigPathForName:
+    def test_simple(self):
+        path = config_path_for_name("myblog", "/fake/sites")
+        assert path == "/fake/sites/myblog.site.json"
 
 
 class TestResolveKeyPath:
@@ -120,6 +131,31 @@ class TestListSites:
         addr2 = list(list_sites(tmp_sites))[0].address
         assert addr1 == addr2
 
+    def test_includes_saved_target(self, tmp_sites):
+        load_or_create_site_key(name="alpha", sites_dir=tmp_sites, quiet=True)
+        save_site_config("alpha", target="./public", sites_dir=tmp_sites)
+        site = list(list_sites(tmp_sites))[0]
+        assert site.target == "./public"
+        assert site.config_path.endswith("alpha.site.json")
+
+    def test_lists_named_site_with_external_key(self, tmp_sites, tmp_path):
+        from src.core.encryptions import ecc_load_or_create_keypair
+
+        external_key = str(tmp_path / "outside.pem")
+        ecc_load_or_create_keypair(external_key)
+        save_site_config(
+            "external",
+            key_path=external_key,
+            target="127.0.0.1:8000",
+            sites_dir=tmp_sites,
+        )
+
+        sites = list(list_sites(tmp_sites))
+        assert len(sites) == 1
+        assert sites[0].name == "external"
+        assert sites[0].key_path == external_key
+        assert sites[0].target == "127.0.0.1:8000"
+
 
 class TestSetKeyPermissions:
     def test_sets_0600(self, tmp_path):
@@ -166,6 +202,19 @@ class TestLoadOrCreateSiteKey:
         _, _, path, _ = load_or_create_site_key(name="perms", sites_dir=tmp_sites)
         mode = os.stat(path).st_mode & 0o777
         assert mode == 0o600
+
+    def test_saves_named_site_config(self, tmp_sites):
+        _, _, path, _ = load_or_create_site_key(name="named", sites_dir=tmp_sites, quiet=True)
+        config = load_site_config("named", sites_dir=tmp_sites)
+        assert config is not None
+        assert config.key_path == path
+
+    def test_preserves_saved_target(self, tmp_sites):
+        save_site_config("named", target="./public", sites_dir=tmp_sites)
+        load_or_create_site_key(name="named", sites_dir=tmp_sites, quiet=True)
+        config = load_site_config("named", sites_dir=tmp_sites)
+        assert config is not None
+        assert config.target == "./public"
 
 
 class TestExportKey:
@@ -214,6 +263,40 @@ class TestImportKey:
     def test_import_missing_file_raises(self, tmp_sites):
         with pytest.raises(FileNotFoundError):
             import_key("ghost", "/no/such/file.pem", sites_dir=tmp_sites)
+
+
+class TestSiteConfig:
+    def test_save_and_load(self, tmp_sites):
+        path = save_site_config(
+            "alpha",
+            key_path="~/keys/alpha.pem",
+            target="./site",
+            sites_dir=tmp_sites,
+        )
+        config = load_site_config("alpha", sites_dir=tmp_sites)
+        assert path.endswith("alpha.site.json")
+        assert config == SiteConfig(
+            name="alpha",
+            key_path=os.path.expanduser("~/keys/alpha.pem"),
+            target="./site",
+            config_path=path,
+        )
+
+    def test_delete(self, tmp_sites):
+        save_site_config("alpha", sites_dir=tmp_sites)
+        assert delete_site_config("alpha", sites_dir=tmp_sites) is True
+        assert delete_site_config("alpha", sites_dir=tmp_sites) is False
+
+    def test_merge_preserves_existing_fields(self, tmp_sites):
+        save_site_config("alpha", key_path="/tmp/a.pem", target="./site", sites_dir=tmp_sites)
+        save_site_config("alpha", key_path="/tmp/b.pem", sites_dir=tmp_sites)
+        config = load_site_config("alpha", sites_dir=tmp_sites)
+        assert config == SiteConfig(
+            name="alpha",
+            key_path="/tmp/b.pem",
+            target="./site",
+            config_path=config_path_for_name("alpha", tmp_sites),
+        )
 
 
 class TestRotateKey:
