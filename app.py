@@ -207,6 +207,29 @@ def resolve_hosted_site_selection(selection: str, hosted_sites: list) -> str:
     raise ValueError(f"unknown hosted site: {value}")
 
 
+def build_quick_start_text(*, connected: bool) -> str:
+    status = (
+        "You are connected. Use the buttons in Quick Actions below."
+        if connected else
+        "Start by pressing Connect, then use the buttons in Quick Actions below."
+    )
+    return (
+        f"{status}\n\n"
+        "Visit a site:\n"
+        "  1. Click Open .obscura Address\n"
+        "  2. Enter an address like alpha.obscura\n"
+        "  3. Obscura47 opens your browser with the right routing\n\n"
+        "Browse discovery:\n"
+        "  1. Click Browse Directory\n"
+        "  2. Enter a directory address\n"
+        "  3. Pick a listing to open\n\n"
+        "Publish your own site:\n"
+        "  1. Click Publish Site\n"
+        "  2. Choose a folder or local service\n"
+        "  3. Obscura47 saves your address and starts the background host"
+    )
+
+
 class ObscuraApp(tk.Tk):
     """Main application window."""
 
@@ -283,7 +306,7 @@ class ObscuraApp(tk.Tk):
         self._status_text.pack(side="left")
 
         self._status_detail = tk.Label(
-            self._banner_frame, text="Press Connect to join the network",
+            self._banner_frame, text="Connect, then open or publish from Quick Actions",
             font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD,
         )
         self._status_detail.pack(side="right", padx=(0, 16))
@@ -320,18 +343,18 @@ class ObscuraApp(tk.Tk):
         for role, (label, desc) in descriptions.items():
             self._build_status_card(cards_frame, role, label, desc)
 
-        # ── Proxy address hint ────────────────────────────────────
+        # ── Getting started hint ──────────────────────────────────
         hint_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
                               highlightthickness=1)
         hint_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
 
         tk.Label(
-            hint_frame, text="Browser Proxy Settings", font=self._label_font,
+            hint_frame, text="Getting Started", font=self._label_font,
             fg=TEXT, bg=BG_CARD,
         ).pack(anchor="w", padx=14, pady=(4, 0))
         tk.Label(
             hint_frame,
-            text="Set your browser HTTP/HTTPS proxy to 127.0.0.1 port 9047",
+            text="Use Quick Actions below to open, browse, or publish .obscura sites.",
             font=self._small_font, fg=TEXT_DIM, bg=BG_CARD,
         ).pack(anchor="w", padx=14, pady=(0, 4))
 
@@ -365,6 +388,7 @@ class ObscuraApp(tk.Tk):
         utility_buttons.pack(fill="x", padx=14, pady=(0, 4))
 
         for label, command in [
+            ("Quick Start", self._show_quick_start),
             ("Open .obscura Address", self._open_visitor),
             ("Browse Directory", self._browse_directory),
             ("My Hosted Sites", self._show_hosted_sites),
@@ -425,7 +449,7 @@ class ObscuraApp(tk.Tk):
         )
         self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
 
-        self._log("Welcome to Obscura47. Press Connect to join the network.")
+        self._log("Welcome to Obscura47. Connect, then use Quick Actions to visit or publish sites.")
 
     def _on_autostart_toggle(self):
         enabled = self._autostart_var.get()
@@ -632,6 +656,13 @@ class ObscuraApp(tk.Tk):
 
         if not open_in_browser(url=address):
             raise RuntimeError("proxy startup or browser launch failed")
+
+    def _show_quick_start(self):
+        messagebox.showinfo(
+            "Quick Start",
+            build_quick_start_text(connected=self._connected),
+            parent=self,
+        )
 
     def _open_visitor(self):
         address = self._prompt_text(
@@ -906,13 +937,13 @@ class ObscuraApp(tk.Tk):
             self._banner_green = True
             self._status_dot.config(fg=GREEN)
             self._status_text.config(text="Connected", fg=GREEN)
-            self._status_detail.config(text="You are part of the Obscura Network")
-            self._log("Connected. Set your browser proxy to 127.0.0.1:9047")
+            self._status_detail.config(text="Use Quick Actions to visit or publish .obscura sites")
+            self._log("Connected. Use Quick Actions to open, browse, or publish sites.")
         elif not both_running and getattr(self, '_banner_green', False):
             self._banner_green = False
             self._status_dot.config(fg=RED)
             self._status_text.config(text="Disconnected", fg=RED)
-            self._status_detail.config(text="Press Connect to join the network")
+            self._status_detail.config(text="Connect, then open or publish from Quick Actions")
             self._log("Disconnected from the Obscura Network.")
 
         # Connect button
