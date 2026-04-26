@@ -127,6 +127,25 @@ python tray_app.py node+exit        # Tray icon, relay + exit
 python app.py                       # Full Tkinter dashboard
 ```
 
+### Everyday Use
+
+Once the desktop app or tray app is running, the most common flows are:
+
+```text
+Visit a site:
+  Open .obscura Address  -> enter a site address -> browser opens with routing
+
+Browse discovery:
+  Browse Directory       -> enter a directory address -> pick a listing to open
+
+Publish your own site:
+  Publish Site           -> choose a folder or local service -> Obscura47 saves the address and starts the host
+```
+
+You do not need to manually configure your everyday browser if you use the
+built-in open flow. Obscura47 can start the local proxy and launch a browser
+for `.obscura` addresses automatically.
+
 ### 4. CLI (individual components)
 ```bash
 python -m src.main registry         # Bootstrap registry on :8470
