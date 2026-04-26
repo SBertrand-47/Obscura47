@@ -126,6 +126,19 @@ class Obscura47Tray:
 
         site_items.append(
             pystray.MenuItem(
+                "My site addresses...",
+                action=lambda: self._show_hosted_sites(),
+            )
+        )
+        if hosted:
+            site_items.append(
+                pystray.MenuItem(
+                    "Open hosted site...",
+                    action=lambda: self._open_hosted_site(),
+                )
+            )
+        site_items.append(
+            pystray.MenuItem(
                 "Add .obscura site...",
                 action=lambda: self._add_hosted_site(),
             )
@@ -373,6 +386,15 @@ class Obscura47Tray:
                 "Obscura47",
                 f"Directory: {directory_addr}\n\n{message}",
             )
+            if listings:
+                initial = listings[0].get("address", "")
+                selected = self._prompt_text(
+                    "Open Directory Listing",
+                    "Address to open now (optional):",
+                    initial=initial,
+                )
+                if selected:
+                    self._open_address_in_browser(selected)
         except Exception as exc:
             self._show_dialog("Obscura47", f"Could not browse directory:\n{exc}", error=True)
 
@@ -407,6 +429,65 @@ class Obscura47Tray:
                 messagebox.showinfo(title, message, parent=root)
         finally:
             root.destroy()
+
+    def _open_address_in_browser(self, address: str):
+        from src.utils.visitor import open_in_browser
+
+        if not open_in_browser(url=address):
+            raise RuntimeError("proxy startup or browser launch failed")
+
+    def _resolve_hosted_site_address(self, raw_value: str) -> str:
+        value = (raw_value or "").strip()
+        if not value:
+            raise ValueError("site name or address is required")
+        if value.endswith(".obscura"):
+            return value
+        for site in self._get_hosted_sites():
+            if site.name == value:
+                return site.address
+        raise ValueError(f"unknown hosted site: {value}")
+
+    def _format_site_summary(self, site) -> str:
+        from src.utils.daemon import daemon_installed
+
+        status = "background" if daemon_installed(site.name) else "manual"
+        target = site.target or "(target not saved yet)"
+        return (
+            f"{site.name}\n"
+            f"  Address: {site.address}\n"
+            f"  Target: {target}\n"
+            f"  Mode: {status}"
+        )
+
+    def _show_hosted_sites(self):
+        hosted = self._get_hosted_sites()
+        if not hosted:
+            self._show_dialog("Obscura47", "No hosted sites yet.")
+            return
+        message = "\n\n".join(self._format_site_summary(site) for site in hosted)
+        self._show_dialog("Obscura47", message)
+
+    def _open_hosted_site(self):
+        hosted = self._get_hosted_sites()
+        if not hosted:
+            self._show_dialog("Obscura47", "No hosted sites yet.")
+            return
+
+        choices = ", ".join(site.name for site in hosted)
+        selected = self._prompt_text(
+            "Open Hosted Site",
+            f"Site name or .obscura address:\n\nAvailable: {choices}",
+            initial=hosted[0].name,
+        )
+        if not selected:
+            return
+
+        try:
+            address = self._resolve_hosted_site_address(selected)
+            self._open_address_in_browser(address)
+            self._show_dialog("Obscura47", f"Opened {address} in your browser.")
+        except Exception as exc:
+            self._show_dialog("Obscura47", f"Could not open hosted site:\n{exc}", error=True)
 
     def _add_hosted_site(self):
         name = self._prompt_text("Add .obscura Site", "Site name:")
