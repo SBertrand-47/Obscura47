@@ -502,6 +502,13 @@ def handle_connect(client_socket):
             pending_requests[request_id] = client_socket
 
         route = build_route47(relay_peers)
+        if not route:
+            log.warning("CONNECT refused: no relay route available for %s:%s", host, port)
+            with pending_lock:
+                pending_requests.pop(request_id, None)
+            client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
         # Reverse channel: responses flow back on the same connections,
         # so return_path only needs the proxy's public key for encryption.
         return_path = {
