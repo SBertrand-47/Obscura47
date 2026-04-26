@@ -168,9 +168,8 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
     for p in remote:
         if role_filter and p.get("role") != role_filter:
             continue
-        # Skip ourselves — the registry returns all peers including this machine.
-        if _my_public_ip and p.get("host") == _my_public_ip:
-            continue
+        # Keep same-IP peers: a local proxy may legitimately need to discover
+        # a co-hosted relay or exit that shares its public IP.
         # Don't duplicate
         exists = any(
             ep["host"] == p["host"] and ep["port"] == p["port"]
@@ -191,6 +190,8 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
             # Update ws_port on existing entries if newly available
             for ep in target_list:
                 if ep["host"] == p["host"] and ep["port"] == p["port"]:
+                    if p.get("pub") and not ep.get("pub"):
+                        ep["pub"] = p["pub"]
                     if p.get("ws_port") and not ep.get("ws_port"):
                         ep["ws_port"] = p["ws_port"]
                     if p.get("ws_tls") and not ep.get("ws_tls"):
