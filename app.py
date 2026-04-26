@@ -14,7 +14,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 
 # ── Autostart / settings helpers ──────────────────────────────────────────────
 
@@ -184,6 +184,29 @@ TEXT_DIM     = "#8b949e"
 BORDER       = "#30363d"
 
 
+def format_hosted_site_summary(site, *, background_enabled: bool) -> str:
+    mode = "background" if background_enabled else "manual"
+    target = getattr(site, "target", None) or "(target not saved yet)"
+    return (
+        f"{site.name}\n"
+        f"  Address: {site.address}\n"
+        f"  Target: {target}\n"
+        f"  Mode: {mode}"
+    )
+
+
+def resolve_hosted_site_selection(selection: str, hosted_sites: list) -> str:
+    value = (selection or "").strip()
+    if not value:
+        raise ValueError("site name or address is required")
+    if value.endswith(".obscura"):
+        return value
+    for site in hosted_sites:
+        if getattr(site, "name", None) == value:
+            return site.address
+    raise ValueError(f"unknown hosted site: {value}")
+
+
 class ObscuraApp(tk.Tk):
     """Main application window."""
 
@@ -329,6 +352,29 @@ class ObscuraApp(tk.Tk):
             command=self._request_exit_status,
         )
         self._exit_request_btn.pack(pady=(6, 0))
+
+        # ── Quick actions ─────────────────────────────────────────
+        utility_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
+                                 highlightthickness=1)
+        utility_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=8)
+
+        tk.Label(utility_frame, text="Quick Actions", font=self._label_font,
+                 fg=TEXT, bg=BG_CARD).pack(anchor="w", padx=14, pady=(4, 6))
+
+        utility_buttons = tk.Frame(utility_frame, bg=BG_CARD)
+        utility_buttons.pack(fill="x", padx=14, pady=(0, 4))
+
+        for label, command in [
+            ("Open .obscura Address", self._open_visitor),
+            ("Browse Directory", self._browse_directory),
+            ("My Hosted Sites", self._show_hosted_sites),
+        ]:
+            tk.Button(
+                utility_buttons, text=label, font=self._small_font,
+                fg=TEXT, bg=BG_CARD_HI, activebackground=ACCENT_DIM,
+                activeforeground="#ffffff", bd=0, padx=12, pady=8,
+                cursor="hand2", command=command,
+            ).pack(side="left", padx=(0, 8))
 
         # ── Settings panel ────────────────────────────────────────
         settings_frame = tk.Frame(self, bg=BG_CARD, highlightbackground=BORDER,
@@ -558,6 +604,122 @@ class ObscuraApp(tk.Tk):
 
         except Exception as e:
             self._log(f"Exit application error: {e}")
+
+    # ── User utility actions ─────────────────────────────────────
+
+    def _prompt_text(self, title: str, prompt: str, initial: str = "") -> str | None:
+        return simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
+
+    def _get_hosted_sites(self) -> list:
+        try:
+            from src.utils.sites import list_sites
+
+            return list(list_sites())
+        except Exception:
+            return []
+
+    def _open_address_in_browser(self, address: str):
+        from src.utils.visitor import open_in_browser
+
+        if not open_in_browser(url=address):
+            raise RuntimeError("proxy startup or browser launch failed")
+
+    def _open_visitor(self):
+        address = self._prompt_text(
+            "Open .obscura Address",
+            "Address or URL to open:",
+        )
+        if not address:
+            return
+        try:
+            self._open_address_in_browser(address)
+            self._log(f"Opened {address} in browser.")
+        except Exception as exc:
+            messagebox.showerror("Open .obscura Address", str(exc), parent=self)
+            self._log(f"Could not open address: {exc}")
+
+    def _show_hosted_sites(self):
+        hosted = self._get_hosted_sites()
+        if not hosted:
+            messagebox.showinfo("My Hosted Sites", "No hosted sites yet.", parent=self)
+            return
+
+        from src.utils.daemon import daemon_installed
+
+        message = "\n\n".join(
+            format_hosted_site_summary(
+                site,
+                background_enabled=daemon_installed(site.name),
+            )
+            for site in hosted
+        )
+        messagebox.showinfo("My Hosted Sites", message, parent=self)
+
+        selected = self._prompt_text(
+            "Open Hosted Site",
+            "Site name or .obscura address to open now (optional):",
+            initial=hosted[0].name,
+        )
+        if not selected:
+            return
+        try:
+            address = resolve_hosted_site_selection(selected, hosted)
+            self._open_address_in_browser(address)
+            self._log(f"Opened hosted site {address}.")
+        except Exception as exc:
+            messagebox.showerror("Open Hosted Site", str(exc), parent=self)
+            self._log(f"Could not open hosted site: {exc}")
+
+    def _browse_directory(self):
+        directory_addr = self._prompt_text(
+            "Browse Directory",
+            "Directory address:",
+        )
+        if not directory_addr:
+            return
+        query = self._prompt_text(
+            "Browse Directory",
+            "Search query (optional):",
+        )
+        try:
+            from src.agent.directory import DirectoryClient
+            from src.utils.visitor import ensure_proxy_running
+
+            if not ensure_proxy_running():
+                raise RuntimeError("could not start the local proxy")
+
+            result = DirectoryClient(directory_addr).list(
+                query=(query or "").strip(),
+                limit=10,
+            )
+            listings = result.get("listings", [])
+            if not listings:
+                message = "No listings found."
+            else:
+                rows = []
+                for row in listings[:10]:
+                    line = f"{row.get('address', '')}"
+                    if row.get("title"):
+                        line += f" — {row['title']}"
+                    rows.append(line)
+                message = "\n".join(rows)
+            messagebox.showinfo(
+                "Browse Directory",
+                f"Directory: {directory_addr}\n\n{message}",
+                parent=self,
+            )
+            if listings:
+                selected = self._prompt_text(
+                    "Open Directory Listing",
+                    "Address to open now (optional):",
+                    initial=listings[0].get("address", ""),
+                )
+                if selected:
+                    self._open_address_in_browser(selected)
+                    self._log(f"Opened directory listing {selected}.")
+        except Exception as exc:
+            messagebox.showerror("Browse Directory", str(exc), parent=self)
+            self._log(f"Could not browse directory: {exc}")
 
     # ── Status polling ────────────────────────────────────────────
 
