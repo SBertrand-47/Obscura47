@@ -20,14 +20,18 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.agent.app import AgentApp, Request, Response, serve_app
+from src.agent.sandbox import Sandbox, SandboxPolicy
 from src.agent.tools import ParamSpec, ToolRegistry
 from src.core.hidden_service import HiddenServiceHost
 from src.core.router import set_proxy_ws_client, set_reverse_frame_callback
 from src.utils.logger import get_logger
 from src.utils.onion_addr import DESCRIPTOR_TTL
+
+if TYPE_CHECKING:
+    from src.agent.observatory import Observer
 
 log = get_logger(__name__)
 
@@ -60,11 +64,15 @@ class AgentRuntime:
         tools: ToolRegistry | None = None,
         bind_host: str = "127.0.0.1",
         bind_port: int = 0,
+        observer: "Observer | None" = None,
+        policy: SandboxPolicy | None = None,
     ):
         self.name = name
         self.key_path = key_path
         self.bind_host = bind_host
         self.bind_port = int(bind_port)
+        self.observer = observer
+        self.policy = policy
 
         self._http_server = None
         self._http_thread: threading.Thread | None = None
@@ -72,6 +80,7 @@ class AgentRuntime:
         self._republish_thread: threading.Thread | None = None
         self._stopped = threading.Event()
         self._started_at: float = 0.0
+        self._sandbox_installed = False
 
         installed_default_app = False
         if app is None:
@@ -86,6 +95,12 @@ class AgentRuntime:
                 _install_default_tools(tools, self)
         self.tools = tools
         self.tools.mount(self.app)
+
+        if observer is not None:
+            if self.app.observer is None:
+                self.app.observer = observer
+            if self.tools.observer is None:
+                self.tools.observer = observer
 
     @property
     def address(self) -> str:
@@ -136,6 +151,16 @@ class AgentRuntime:
             self.stop()
             return False
 
+        if self.policy is not None and not self._sandbox_installed:
+            try:
+                effective = _augment_policy_for_runtime(self.policy, peers=peers)
+                Sandbox.install(effective, observer=self.observer)
+                self._sandbox_installed = True
+            except Exception as e:
+                log.error("Agent %s failed to install sandbox: %s", self.name, e)
+                self.stop()
+                return False
+
         self._started_at = time.time()
         self._republish_thread = threading.Thread(
             target=self._republish_loop,
@@ -144,12 +169,38 @@ class AgentRuntime:
         )
         self._republish_thread.start()
 
+        if self.observer is not None:
+            try:
+                self.observer.emit(
+                    "runtime.start",
+                    agent=self.name,
+                    address=self.address,
+                    local_url=self.local_url,
+                )
+            except Exception:
+                log.exception("observer emit (runtime.start) failed")
+
         log.info("Agent %s reachable at %s → %s", self.name, self.address, self.local_url)
         return True
 
     def stop(self) -> None:
         """Tear down the HTTP server and the hidden-service host."""
+        if self.observer is not None and not self._stopped.is_set():
+            try:
+                uptime = round(time.time() - self._started_at, 1) if self._started_at else 0.0
+                self.observer.emit(
+                    "runtime.stop", agent=self.name, uptime_s=uptime,
+                )
+            except Exception:
+                pass
         self._stopped.set()
+        if self._sandbox_installed:
+            try:
+                Sandbox.uninstall()
+            except Exception:
+                log.exception("sandbox uninstall failed")
+            finally:
+                self._sandbox_installed = False
         if self._http_server is not None:
             try:
                 self._http_server.shutdown()
@@ -189,6 +240,42 @@ class AgentRuntime:
                     self._host.publish_descriptor()
             except Exception as e:
                 log.warning("descriptor republish failed: %s", e)
+
+
+def _augment_policy_for_runtime(
+    policy: SandboxPolicy,
+    *,
+    peers: list[dict[str, Any]] | None = None,
+) -> SandboxPolicy:
+    """Add the registry + bootstrap-peer endpoints to a user-supplied policy.
+
+    The runtime's republish loop hits the registry over HTTP, and the
+    rendezvous machinery dials peers' WebSocket ports. The operator
+    generally won't think to allowlist these explicitly, so the
+    runtime does it for them based on the bootstrap configuration.
+    """
+    from dataclasses import replace as _replace
+    from urllib.parse import urlparse
+
+    from src.utils.config import REGISTRY_URL
+
+    extras = list(policy.relay_endpoints)
+    parsed = urlparse(REGISTRY_URL)
+    host = parsed.hostname
+    if host:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        extras.append((host, int(port)))
+
+    for peer in peers or []:
+        peer_host = peer.get("host")
+        if not peer_host:
+            continue
+        for key in ("port", "ws_port"):
+            peer_port = peer.get(key)
+            if peer_port:
+                extras.append((str(peer_host), int(peer_port)))
+
+    return _replace(policy, relay_endpoints=tuple(extras))
 
 
 def _install_default_routes(app: AgentApp, runtime: AgentRuntime) -> None:
