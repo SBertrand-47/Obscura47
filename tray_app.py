@@ -29,6 +29,7 @@ class Obscura47Tray:
     def __init__(self):
         self._running_roles: set[str] = set()
         self._threads: dict[str, threading.Thread] = {}
+        self._hosted_sites: dict[str, threading.Thread] = {}
         self._peer_counts = {"relays": 0, "exits": 0}
         self._tray_icon: Optional[pystray.Icon] = None
         self._dashboard_process: Optional[subprocess.Popen] = None
@@ -105,6 +106,33 @@ class Obscura47Tray:
             )
 
         items.append(pystray.Menu.SEPARATOR)
+
+        # Hosted sites submenu
+        hosted = self._get_hosted_sites()
+        if hosted:
+            site_items = []
+            for s in hosted:
+                running = s.name in self._hosted_sites
+                label = f"{'*' if running else ' '} {s.name}  {s.address}"
+                site_items.append(pystray.MenuItem(label, action=None, enabled=False))
+            items.append(pystray.MenuItem(
+                f".obscura sites ({len(hosted)})",
+                pystray.Menu(*site_items),
+            ))
+        else:
+            items.append(
+                pystray.MenuItem(".obscura sites (none)", action=None, enabled=False)
+            )
+
+        items.append(pystray.Menu.SEPARATOR)
+
+        # Visitor launcher
+        items.append(
+            pystray.MenuItem(
+                "Open .obscura in browser",
+                action=lambda: self._open_visitor(),
+            )
+        )
 
         # Dashboard button
         items.append(
@@ -262,6 +290,25 @@ class Obscura47Tray:
             print(f"[Obscura47 Tray] Error: {exc}", flush=True)
         finally:
             self._on_quit()
+
+    def _open_visitor(self):
+        try:
+            from src.utils.visitor import open_in_browser
+            if "proxy" not in self._running_roles:
+                self._start_role("proxy")
+                import time
+                time.sleep(1)
+            open_in_browser()
+            print("[Obscura47 Tray] Browser opened with .obscura routing.", flush=True)
+        except Exception as exc:
+            print(f"[Obscura47 Tray] Failed to open browser: {exc}", flush=True)
+
+    def _get_hosted_sites(self) -> list:
+        try:
+            from src.utils.sites import list_sites
+            return list(list_sites())
+        except Exception:
+            return []
 
     def _on_setup(self, icon, item):
         """Setup callback for the tray icon."""
