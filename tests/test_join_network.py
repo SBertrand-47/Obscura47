@@ -154,6 +154,73 @@ class TestHostDirectoryRegistration:
         assert saved["key"] == str(tmp_path / "external.pem")
 
 
+class TestHostPublish:
+    def test_publish_writes_manifest_then_runs_host(self, monkeypatch):
+        called = []
+
+        monkeypatch.setattr(
+            join_network,
+            "_host_write_manifest",
+            lambda argv: called.append(("manifest", list(argv))),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_run_host",
+            lambda arg, site_name=None, key_path=None: called.append(
+                ("run_host", arg, site_name, key_path)
+            ),
+        )
+
+        join_network._host_publish(
+            ["./site", "--name", "mysite", "--title", "Alpha", "--tag", "blog"],
+        )
+
+        assert called == [
+            (
+                "manifest",
+                ["./site", "--name", "mysite", "--title", "Alpha", "--tag", "blog"],
+            ),
+            ("run_host", "./site", "mysite", None),
+        ]
+
+    def test_publish_with_directory_schedules_registration(self, monkeypatch):
+        called = []
+
+        monkeypatch.setattr(
+            join_network,
+            "_host_write_manifest",
+            lambda argv: called.append(("manifest", list(argv))),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_schedule_directory_registration",
+            lambda site_name, directory_addr: called.append(
+                ("schedule", site_name, directory_addr)
+            ),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_run_host",
+            lambda arg, site_name=None, key_path=None: called.append(
+                ("run_host", arg, site_name, key_path)
+            ),
+        )
+
+        join_network._host_publish(
+            ["./site", "--name", "mysite", "--directory", "directory.obscura"],
+        )
+
+        assert called == [
+            ("manifest", ["./site", "--name", "mysite"]),
+            ("schedule", "mysite", "directory.obscura"),
+            ("run_host", "./site", "mysite", None),
+        ]
+
+    def test_publish_requires_name(self):
+        with pytest.raises(SystemExit):
+            join_network._host_publish(["./site"])
+
+
 class TestDirectoryCli:
     def test_directory_list_uses_client(self, monkeypatch, capsys):
         monkeypatch.setattr("src.utils.visitor.ensure_proxy_running", lambda: True)
