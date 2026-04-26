@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app import ObscuraApp, format_hosted_site_summary, resolve_hosted_site_selection
+from app import (
+    ObscuraApp,
+    build_quick_start_text,
+    format_hosted_site_summary,
+    resolve_hosted_site_selection,
+)
 
 
 def test_format_hosted_site_summary_includes_target_and_mode():
@@ -51,6 +56,21 @@ def test_resolve_hosted_site_selection_rejects_unknown_name():
         assert "unknown hosted site" in str(exc)
     else:
         raise AssertionError("expected ValueError for unknown site")
+
+
+def test_build_quick_start_text_for_disconnected_state():
+    text = build_quick_start_text(connected=False)
+
+    assert "Start by pressing Connect" in text
+    assert "Visit a site:" in text
+    assert "Publish your own site:" in text
+
+
+def test_build_quick_start_text_for_connected_state():
+    text = build_quick_start_text(connected=True)
+
+    assert "You are connected." in text
+    assert "Browse discovery:" in text
 
 
 def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch):
