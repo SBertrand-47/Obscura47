@@ -14,7 +14,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import font as tkfont
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox, simpledialog, ttk
 
 # ── Autostart / settings helpers ──────────────────────────────────────────────
 
@@ -184,50 +184,11 @@ TEXT_DIM     = "#8b949e"
 BORDER       = "#30363d"
 
 
-def format_hosted_site_summary(site, *, background_enabled: bool) -> str:
-    mode = "background" if background_enabled else "manual"
-    target = getattr(site, "target", None) or "(target not saved yet)"
-    return (
-        f"{site.name}\n"
-        f"  Address: {site.address}\n"
-        f"  Target: {target}\n"
-        f"  Mode: {mode}"
-    )
-
-
-def resolve_hosted_site_selection(selection: str, hosted_sites: list) -> str:
-    value = (selection or "").strip()
-    if not value:
-        raise ValueError("site name or address is required")
-    if value.endswith(".obscura"):
-        return value
-    for site in hosted_sites:
-        if getattr(site, "name", None) == value:
-            return site.address
-    raise ValueError(f"unknown hosted site: {value}")
-
-
-def build_quick_start_text(*, connected: bool) -> str:
-    status = (
-        "You are connected. Use the buttons in Quick Actions below."
-        if connected else
-        "Start by pressing Connect, then use the buttons in Quick Actions below."
-    )
-    return (
-        f"{status}\n\n"
-        "Visit a site:\n"
-        "  1. Click Open .obscura Address\n"
-        "  2. Enter an address like alpha.obscura\n"
-        "  3. Obscura47 opens your browser with the right routing\n\n"
-        "Browse discovery:\n"
-        "  1. Click Browse Directory\n"
-        "  2. Enter a directory address\n"
-        "  3. Pick a listing to open\n\n"
-        "Publish your own site:\n"
-        "  1. Click Publish Site\n"
-        "  2. Choose a folder or local service\n"
-        "  3. Obscura47 saves your address and starts the background host"
-    )
+from src.utils.app_helpers import (  # noqa: E402
+    build_quick_start_text,
+    format_hosted_site_summary,
+    resolve_hosted_site_selection,
+)
 
 
 class ObscuraApp(tk.Tk):
@@ -240,6 +201,38 @@ class ObscuraApp(tk.Tk):
         self.configure(bg=BG)
         self.resizable(False, False)
         self.geometry("520x760")
+
+        # ── ttk styles (fix white-on-white buttons on macOS Aqua) ──
+        style = ttk.Style(self)
+        style.theme_use("clam")
+        style.configure("Connect.TButton",
+                        font=("Segoe UI", 10, "bold"),
+                        foreground="#ffffff", background=ACCENT_DIM,
+                        borderwidth=0, padding=(24, 10))
+        style.map("Connect.TButton",
+                  background=[("active", ACCENT)],
+                  foreground=[("active", "#ffffff")])
+        style.configure("Disconnect.TButton",
+                        font=("Segoe UI", 10, "bold"),
+                        foreground="#ffffff", background="#6e2b2b",
+                        borderwidth=0, padding=(24, 10))
+        style.map("Disconnect.TButton",
+                  background=[("active", RED)],
+                  foreground=[("active", "#ffffff")])
+        style.configure("Subtle.TButton",
+                        font=("Segoe UI", 9),
+                        foreground=TEXT_DIM, background=BG,
+                        borderwidth=0)
+        style.map("Subtle.TButton",
+                  background=[("active", BG_CARD)],
+                  foreground=[("active", TEXT)])
+        style.configure("Action.TButton",
+                        font=("Segoe UI", 9),
+                        foreground=TEXT, background=BG_CARD_HI,
+                        borderwidth=0, padding=(12, 8))
+        style.map("Action.TButton",
+                  background=[("active", ACCENT_DIM)],
+                  foreground=[("active", "#ffffff")])
 
         # ── Persisted settings ─────────────────────────────────────
         self._settings = _load_settings()
@@ -359,20 +352,16 @@ class ObscuraApp(tk.Tk):
         ).pack(anchor="w", padx=14, pady=(0, 4))
 
         # ── Connect button ────────────────────────────────────────
-        self._connect_btn = tk.Button(
-            self, text="\u25b6  Connect", font=self._btn_font,
-            fg="#ffffff", bg=ACCENT_DIM, activebackground=ACCENT,
-            activeforeground="#ffffff", bd=0, padx=24, pady=10,
+        self._connect_btn = ttk.Button(
+            self, text="\u25b6  Connect", style="Connect.TButton",
             cursor="hand2", command=self._toggle_connection,
         )
         self._connect_btn.pack(pady=(14, 0))
 
         # ── Request Exit Node status ──────────────────────────────
-        self._exit_request_btn = tk.Button(
-            self, text="Request Exit Node Status", font=self._small_font,
-            fg=TEXT_DIM, bg=BG, activebackground=BG_CARD,
-            activeforeground=TEXT, bd=0, cursor="hand2",
-            command=self._request_exit_status,
+        self._exit_request_btn = ttk.Button(
+            self, text="Request Exit Node Status", style="Subtle.TButton",
+            cursor="hand2", command=self._request_exit_status,
         )
         self._exit_request_btn.pack(pady=(6, 0))
 
@@ -396,10 +385,8 @@ class ObscuraApp(tk.Tk):
             ("Publish Site", self._publish_hosted_site),
             ("Remove Site", self._remove_hosted_site_daemon),
         ]:
-            tk.Button(
-                utility_buttons, text=label, font=self._small_font,
-                fg=TEXT, bg=BG_CARD_HI, activebackground=ACCENT_DIM,
-                activeforeground="#ffffff", bd=0, padx=12, pady=8,
+            ttk.Button(
+                utility_buttons, text=label, style="Action.TButton",
                 cursor="hand2", command=command,
             ).pack(side="left", padx=(0, 8))
 
@@ -948,9 +935,9 @@ class ObscuraApp(tk.Tk):
 
         # Connect button
         if self._connected:
-            self._connect_btn.config(text="\u25a0  Disconnect", bg="#6e2b2b")
+            self._connect_btn.config(text="\u25a0  Disconnect", style="Disconnect.TButton")
         else:
-            self._connect_btn.config(text="\u25b6  Connect", bg=ACCENT_DIM)
+            self._connect_btn.config(text="\u25b6  Connect", style="Connect.TButton")
 
         self.after(1000, self._poll)
 
