@@ -16,6 +16,7 @@ Usage:
     python join_network.py host list          # List all hosted sites and their addresses
     python join_network.py host enable ./mysite --name myblog   # Install per-site background service
     python join_network.py host disable --name myblog           # Remove background service
+    python join_network.py host publish ./mysite --name myblog  # Write manifest, optionally register, and host
     python join_network.py host write-manifest ./mysite --name myblog  # Create /.well-known/obscura.json
     python join_network.py host register-directory directory.obscura --name myblog   # Register site in a directory
     python join_network.py host unregister-directory directory.obscura --name myblog # Remove site from a directory
@@ -454,6 +455,79 @@ def _host_write_manifest(argv: list[str]):
     print()
 
 
+def _schedule_directory_registration(
+    site_name: str,
+    directory_addr: str,
+    *,
+    initial_delay: float = 2.0,
+    retry_delay: float = 3.0,
+    attempts: int = 5,
+):
+    def _worker():
+        if initial_delay > 0:
+            time.sleep(initial_delay)
+        for attempt in range(1, attempts + 1):
+            try:
+                _host_register_directory([directory_addr, "--name", site_name])
+                return
+            except SystemExit:
+                if attempt >= attempts:
+                    print()
+                    print(
+                        f"  [!] Could not register site {site_name!r} in {directory_addr} "
+                        f"after {attempts} attempts."
+                    )
+                    print()
+                    return
+                time.sleep(retry_delay)
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"directory-register-{site_name}",
+    ).start()
+
+
+def _host_publish(argv: list[str]):
+    name, key = _parse_host_flags(argv)
+    if not name:
+        print("  [!] --name is required for publish")
+        sys.exit(1)
+
+    directory_addr = _single_flag_value(argv, "--directory")
+    positional = _strip_flags(
+        argv,
+        ("--name", "--key", "--directory", "--title", "--description", "--tag"),
+    )
+    positional = [a for a in positional if not a.startswith("--")]
+    site_dir = positional[0] if positional else None
+    if not site_dir:
+        print("  [!] publish needs a site directory")
+        print("      e.g.  python join_network.py host publish ./mysite --name mysite")
+        sys.exit(1)
+
+    manifest_args = [site_dir, "--name", name]
+    if key:
+        manifest_args.extend(["--key", key])
+    title = _single_flag_value(argv, "--title")
+    if title:
+        manifest_args.extend(["--title", title])
+    description = _single_flag_value(argv, "--description")
+    if description:
+        manifest_args.extend(["--description", description])
+    for tag in _parse_repeated_flag(argv, "--tag"):
+        manifest_args.extend(["--tag", tag])
+
+    _host_write_manifest(manifest_args)
+
+    if directory_addr:
+        print(f"  Will register in directory: {directory_addr}")
+        print()
+        _schedule_directory_registration(name, directory_addr)
+
+    _run_host(site_dir, site_name=name, key_path=key)
+
+
 def _site_address_for_name(name: str) -> tuple[str, str]:
     from src.utils.onion_addr import address_from_pubkey
     from src.utils.sites import load_site_config, load_or_create_site_key
@@ -729,6 +803,9 @@ def main():
             if sub == "disable":
                 _host_disable(sys.argv[3:])
                 return
+            if sub == "publish":
+                _host_publish(sys.argv[3:])
+                return
             if sub == "export-key":
                 _host_export_key(sys.argv[3:])
                 return
@@ -753,6 +830,7 @@ def main():
                 print("            python join_network.py host list")
                 print("            python join_network.py host enable ./mysite --name mysite")
                 print("            python join_network.py host disable --name mysite")
+                print("            python join_network.py host publish ./mysite --name mysite")
                 print("            python join_network.py host write-manifest ./mysite --name mysite")
                 print("            python join_network.py host register-directory directory.obscura --name mysite")
                 print("            python join_network.py host unregister-directory directory.obscura --name mysite")
