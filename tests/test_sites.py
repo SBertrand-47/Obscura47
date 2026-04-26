@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+import json
 
 import pytest
 
 from src.utils.sites import (
     SITES_DIR,
+    SITE_MANIFEST_PROTOCOL_VERSION,
     SiteConfig,
     SiteInfo,
+    build_site_manifest,
     config_path_for_name,
     delete_site_config,
     ensure_sites_dir,
@@ -25,6 +28,7 @@ from src.utils.sites import (
     rotate_key,
     save_site_config,
     set_key_permissions,
+    write_site_manifest,
 )
 
 
@@ -297,6 +301,39 @@ class TestSiteConfig:
             target="./site",
             config_path=config_path_for_name("alpha", tmp_sites),
         )
+
+
+class TestSiteManifest:
+    def test_build_manifest(self):
+        manifest = build_site_manifest(
+            "abcdefghijklmnop.obscura",
+            title="Alpha",
+            description="Test site",
+            tags=["blog", "blog", " tech "],
+        )
+        assert manifest == {
+            "protocol": SITE_MANIFEST_PROTOCOL_VERSION,
+            "address": "abcdefghijklmnop.obscura",
+            "title": "Alpha",
+            "description": "Test site",
+            "tags": ["blog", "tech"],
+        }
+
+    def test_write_manifest(self, tmp_path):
+        site_dir = tmp_path / "site"
+        site_dir.mkdir()
+        out = write_site_manifest(
+            str(site_dir),
+            "abcdefghijklmnop.obscura",
+            title="Alpha",
+            tags=["blog"],
+        )
+        assert out.endswith(".well-known/obscura.json")
+        with open(out, encoding="utf-8") as f:
+            payload = json.load(f)
+        assert payload["protocol"] == SITE_MANIFEST_PROTOCOL_VERSION
+        assert payload["address"] == "abcdefghijklmnop.obscura"
+        assert payload["tags"] == ["blog"]
 
 
 class TestRotateKey:
