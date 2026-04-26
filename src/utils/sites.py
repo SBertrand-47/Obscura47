@@ -29,6 +29,7 @@ from src.utils.onion_addr import address_from_pubkey
 
 
 SITES_DIR = os.path.join(os.path.expanduser("~"), ".obscura47", "sites")
+SITE_MANIFEST_PROTOCOL_VERSION = "obscura.site/1"
 
 FIRST_RUN_BANNER = """\
 
@@ -147,6 +148,53 @@ def delete_site_config(name: str, sites_dir: str = SITES_DIR) -> bool:
         return False
     os.remove(path)
     return True
+
+
+def build_site_manifest(
+    address: str,
+    *,
+    title: str = "",
+    description: str = "",
+    tags: list[str] | None = None,
+) -> dict:
+    cleaned_tags: list[str] = []
+    for tag in tags or []:
+        tag = tag.strip()
+        if tag and tag not in cleaned_tags:
+            cleaned_tags.append(tag)
+    return {
+        "protocol": SITE_MANIFEST_PROTOCOL_VERSION,
+        "address": address,
+        "title": title.strip(),
+        "description": description.strip(),
+        "tags": cleaned_tags,
+    }
+
+
+def write_site_manifest(
+    site_dir: str,
+    address: str,
+    *,
+    title: str = "",
+    description: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    site_dir = os.path.abspath(os.path.expanduser(site_dir))
+    if not os.path.isdir(site_dir):
+        raise FileNotFoundError(f"site directory not found: {site_dir}")
+    well_known_dir = os.path.join(site_dir, ".well-known")
+    os.makedirs(well_known_dir, exist_ok=True)
+    manifest_path = os.path.join(well_known_dir, "obscura.json")
+    payload = build_site_manifest(
+        address,
+        title=title,
+        description=description,
+        tags=tags,
+    )
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return manifest_path
 
 
 def list_sites(sites_dir: str = SITES_DIR) -> Iterator[SiteInfo]:
