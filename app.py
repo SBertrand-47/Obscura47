@@ -368,6 +368,9 @@ class ObscuraApp(tk.Tk):
             ("Open .obscura Address", self._open_visitor),
             ("Browse Directory", self._browse_directory),
             ("My Hosted Sites", self._show_hosted_sites),
+            ("Add Site", self._add_hosted_site),
+            ("Publish Site", self._publish_hosted_site),
+            ("Remove Site", self._remove_hosted_site_daemon),
         ]:
             tk.Button(
                 utility_buttons, text=label, font=self._small_font,
@@ -618,6 +621,12 @@ class ObscuraApp(tk.Tk):
         except Exception:
             return []
 
+    @staticmethod
+    def _address_from_pub(pub: str) -> str:
+        from src.utils.onion_addr import address_from_pubkey
+
+        return address_from_pubkey(pub)
+
     def _open_address_in_browser(self, address: str):
         from src.utils.visitor import open_in_browser
 
@@ -669,6 +678,151 @@ class ObscuraApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Open Hosted Site", str(exc), parent=self)
             self._log(f"Could not open hosted site: {exc}")
+
+    def _add_hosted_site(self):
+        name = self._prompt_text("Add .obscura Site", "Site name:")
+        if not name:
+            return
+
+        remembered_target = ""
+        remembered_key_path = None
+        try:
+            from src.utils.sites import load_site_config
+
+            config = load_site_config(name)
+            if config:
+                if config.target:
+                    remembered_target = config.target
+                remembered_key_path = config.key_path
+        except Exception:
+            remembered_target = ""
+            remembered_key_path = None
+
+        target = self._prompt_text(
+            "Add .obscura Site",
+            "Directory path or host:port to publish:",
+            initial=remembered_target,
+        )
+        if not target:
+            return
+
+        try:
+            from src.utils.daemon import install_daemon
+            from src.utils.sites import load_or_create_site_key, save_site_config
+
+            _, pub, key_path, _created = load_or_create_site_key(
+                name=name,
+                key=remembered_key_path,
+            )
+            save_site_config(name, key_path=key_path, target=target)
+            reference = install_daemon(name, target, key_path=key_path)
+            address = self._address_from_pub(pub)
+            messagebox.showinfo(
+                "Add .obscura Site",
+                f"Installed background host for {name}.\n\n"
+                f"Address: {address}\n"
+                f"Target: {target}\n"
+                f"Service: {reference}",
+                parent=self,
+            )
+            self._log(f"Installed background host for {address}.")
+        except Exception as exc:
+            messagebox.showerror("Add .obscura Site", str(exc), parent=self)
+            self._log(f"Could not add hosted site: {exc}")
+
+    def _publish_hosted_site(self):
+        name = self._prompt_text("Publish .obscura Site", "Site name:")
+        if not name:
+            return
+
+        remembered_target = ""
+        remembered_key_path = None
+        try:
+            from src.utils.sites import load_site_config
+
+            config = load_site_config(name)
+            if config:
+                if config.target:
+                    remembered_target = config.target
+                remembered_key_path = config.key_path
+        except Exception:
+            remembered_target = ""
+            remembered_key_path = None
+
+        target = self._prompt_text(
+            "Publish .obscura Site",
+            "Directory path or host:port to publish:",
+            initial=remembered_target,
+        )
+        if not target:
+            return
+
+        directory_addr = self._prompt_text(
+            "Publish .obscura Site",
+            "Optional directory address to announce in:",
+        )
+        directory_addr = (directory_addr or "").strip()
+
+        try:
+            import join_network
+            from src.utils.daemon import install_daemon
+            from src.utils.sites import (
+                load_or_create_site_key,
+                save_site_config,
+                write_site_manifest,
+            )
+
+            _, pub, key_path, _created = load_or_create_site_key(
+                name=name,
+                key=remembered_key_path,
+            )
+            address = self._address_from_pub(pub)
+            save_site_config(name, key_path=key_path, target=target)
+
+            resolved_target = os.path.abspath(os.path.expanduser(target))
+            if os.path.isdir(resolved_target):
+                write_site_manifest(
+                    resolved_target,
+                    address,
+                    title=name,
+                )
+
+            reference = install_daemon(name, target, key_path=key_path)
+            if directory_addr:
+                join_network._schedule_directory_registration(name, directory_addr)
+
+            message = (
+                f"Published background host for {name}.\n\n"
+                f"Address: {address}\n"
+                f"Target: {target}\n"
+                f"Service: {reference}"
+            )
+            if directory_addr:
+                message += f"\nDirectory: {directory_addr}"
+            messagebox.showinfo("Publish .obscura Site", message, parent=self)
+            self._log(f"Published hosted site {address}.")
+        except Exception as exc:
+            messagebox.showerror("Publish .obscura Site", str(exc), parent=self)
+            self._log(f"Could not publish hosted site: {exc}")
+
+    def _remove_hosted_site_daemon(self):
+        name = self._prompt_text("Remove Site Daemon", "Site name:")
+        if not name:
+            return
+        try:
+            from src.utils.daemon import uninstall_daemon
+
+            if not uninstall_daemon(name):
+                raise RuntimeError(f"no background service found for {name!r}")
+            messagebox.showinfo(
+                "Remove Site Daemon",
+                f"Removed background service for {name}.",
+                parent=self,
+            )
+            self._log(f"Removed background service for site {name}.")
+        except Exception as exc:
+            messagebox.showerror("Remove Site Daemon", str(exc), parent=self)
+            self._log(f"Could not remove hosted site daemon: {exc}")
 
     def _browse_directory(self):
         directory_addr = self._prompt_text(
