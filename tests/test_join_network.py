@@ -75,6 +75,38 @@ class TestHostArgumentParsing:
         )
         assert out == ["./site"]
 
+    def test_main_directory_role_starts_directory(self, monkeypatch):
+        captured = {}
+
+        monkeypatch.setattr(join_network, "check_dependencies", lambda: None)
+        monkeypatch.setattr(join_network.signal, "signal", lambda *_args: None)
+        monkeypatch.setattr(
+            join_network,
+            "start_roles",
+            lambda roles, host_arg=None, site_name=None, key_path=None: captured.update(
+                {
+                    "roles": roles,
+                    "host_arg": host_arg,
+                    "site_name": site_name,
+                    "key_path": key_path,
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            join_network.sys,
+            "argv",
+            ["join_network.py", "directory"],
+        )
+
+        join_network.main()
+
+        assert captured == {
+            "roles": ["directory"],
+            "host_arg": None,
+            "site_name": None,
+            "key_path": None,
+        }
+
 
 class TestHostDirectoryRegistration:
     def test_register_directory_uses_saved_site_identity(self, monkeypatch, tmp_path):
@@ -120,3 +152,138 @@ class TestHostDirectoryRegistration:
             "register": "alpha.obscura",
         }
         assert saved["key"] == str(tmp_path / "external.pem")
+
+
+class TestHostPublish:
+    def test_publish_writes_manifest_then_runs_host(self, monkeypatch):
+        called = []
+
+        monkeypatch.setattr(
+            join_network,
+            "_host_write_manifest",
+            lambda argv: called.append(("manifest", list(argv))),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_run_host",
+            lambda arg, site_name=None, key_path=None: called.append(
+                ("run_host", arg, site_name, key_path)
+            ),
+        )
+
+        join_network._host_publish(
+            ["./site", "--name", "mysite", "--title", "Alpha", "--tag", "blog"],
+        )
+
+        assert called == [
+            (
+                "manifest",
+                ["./site", "--name", "mysite", "--title", "Alpha", "--tag", "blog"],
+            ),
+            ("run_host", "./site", "mysite", None),
+        ]
+
+    def test_publish_with_directory_schedules_registration(self, monkeypatch):
+        called = []
+
+        monkeypatch.setattr(
+            join_network,
+            "_host_write_manifest",
+            lambda argv: called.append(("manifest", list(argv))),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_schedule_directory_registration",
+            lambda site_name, directory_addr: called.append(
+                ("schedule", site_name, directory_addr)
+            ),
+        )
+        monkeypatch.setattr(
+            join_network,
+            "_run_host",
+            lambda arg, site_name=None, key_path=None: called.append(
+                ("run_host", arg, site_name, key_path)
+            ),
+        )
+
+        join_network._host_publish(
+            ["./site", "--name", "mysite", "--directory", "directory.obscura"],
+        )
+
+        assert called == [
+            ("manifest", ["./site", "--name", "mysite"]),
+            ("schedule", "mysite", "directory.obscura"),
+            ("run_host", "./site", "mysite", None),
+        ]
+
+    def test_publish_requires_name(self):
+        with pytest.raises(SystemExit):
+            join_network._host_publish(["./site"])
+
+
+class TestDirectoryCli:
+    def test_directory_list_uses_client(self, monkeypatch, capsys):
+        monkeypatch.setattr("src.utils.visitor.ensure_proxy_running", lambda: True)
+
+        called = {}
+
+        class FakeDirectoryClient:
+            def __init__(self, addr):
+                called["addr"] = addr
+
+            def list(self, *, query="", limit=20):
+                called["query"] = query
+                called["limit"] = limit
+                return {
+                    "total": 1,
+                    "listings": [
+                        {
+                            "address": "alpha.obscura",
+                            "title": "Alpha",
+                            "description": "Test site",
+                            "tags": ["blog"],
+                        }
+                    ],
+                }
+
+        monkeypatch.setattr("src.agent.directory.DirectoryClient", FakeDirectoryClient)
+
+        join_network._directory_list(
+            ["directory.obscura", "alpha", "--limit", "5"],
+        )
+
+        out = capsys.readouterr().out
+        assert called == {
+            "addr": "directory.obscura",
+            "query": "alpha",
+            "limit": 5,
+        }
+        assert "alpha.obscura" in out
+        assert "Alpha" in out
+
+    def test_directory_get_uses_client(self, monkeypatch, capsys):
+        monkeypatch.setattr("src.utils.visitor.ensure_proxy_running", lambda: True)
+
+        class FakeDirectoryClient:
+            def __init__(self, addr):
+                assert addr == "directory.obscura"
+
+            def get(self, address):
+                assert address == "alpha.obscura"
+                return {
+                    "address": address,
+                    "title": "Alpha",
+                    "description": "Test site",
+                    "tags": ["blog", "search"],
+                }
+
+        monkeypatch.setattr("src.agent.directory.DirectoryClient", FakeDirectoryClient)
+
+        join_network._directory_get(
+            ["directory.obscura", "alpha.obscura"],
+        )
+
+        out = capsys.readouterr().out
+        assert "address:" in out
+        assert "alpha.obscura" in out
+        assert "blog, search" in out

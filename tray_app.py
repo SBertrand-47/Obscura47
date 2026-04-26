@@ -130,6 +130,12 @@ class Obscura47Tray:
                 action=lambda: self._add_hosted_site(),
             )
         )
+        site_items.append(
+            pystray.MenuItem(
+                "Publish and announce site...",
+                action=lambda: self._publish_hosted_site(),
+            )
+        )
         if hosted:
             site_items.append(
                 pystray.MenuItem(
@@ -149,6 +155,12 @@ class Obscura47Tray:
             pystray.MenuItem(
                 "Open .obscura in browser",
                 action=lambda: self._open_visitor(),
+            )
+        )
+        items.append(
+            pystray.MenuItem(
+                "Browse directory...",
+                action=lambda: self._browse_directory(),
             )
         )
 
@@ -324,6 +336,46 @@ class Obscura47Tray:
         except Exception as exc:
             print(f"[Obscura47 Tray] Failed to open browser: {exc}", flush=True)
 
+    def _browse_directory(self):
+        directory_addr = self._prompt_text(
+            "Browse Directory",
+            "Directory address:",
+        )
+        if not directory_addr:
+            return
+        query = self._prompt_text(
+            "Browse Directory",
+            "Search query (optional):",
+        )
+        try:
+            from src.agent.directory import DirectoryClient
+            from src.utils.visitor import ensure_proxy_running
+
+            if not ensure_proxy_running():
+                raise RuntimeError("could not start the local proxy")
+
+            result = DirectoryClient(directory_addr).list(
+                query=(query or "").strip(),
+                limit=10,
+            )
+            listings = result.get("listings", [])
+            if not listings:
+                message = "No listings found."
+            else:
+                rows = []
+                for row in listings[:10]:
+                    line = f"{row.get('address', '')}"
+                    if row.get("title"):
+                        line += f" — {row['title']}"
+                    rows.append(line)
+                message = "\n".join(rows)
+            self._show_dialog(
+                "Obscura47",
+                f"Directory: {directory_addr}\n\n{message}",
+            )
+        except Exception as exc:
+            self._show_dialog("Obscura47", f"Could not browse directory:\n{exc}", error=True)
+
     def _get_hosted_sites(self) -> list:
         try:
             from src.utils.sites import list_sites
@@ -400,6 +452,78 @@ class Obscura47Tray:
             )
         except Exception as exc:
             self._show_dialog("Obscura47", f"Could not add site:\n{exc}", error=True)
+        finally:
+            self._update_menu()
+
+    def _publish_hosted_site(self):
+        name = self._prompt_text("Publish .obscura Site", "Site name:")
+        if not name:
+            return
+        remembered_target = ""
+        remembered_key_path = None
+        try:
+            from src.utils.sites import load_site_config
+
+            config = load_site_config(name)
+            if config:
+                if config.target:
+                    remembered_target = config.target
+                remembered_key_path = config.key_path
+        except Exception:
+            remembered_target = ""
+            remembered_key_path = None
+        target = self._prompt_text(
+            "Publish .obscura Site",
+            "Directory path or host:port to publish:",
+            initial=remembered_target,
+        )
+        if not target:
+            return
+        directory_addr = self._prompt_text(
+            "Publish .obscura Site",
+            "Optional directory address to announce in:",
+        )
+        directory_addr = (directory_addr or "").strip()
+
+        try:
+            import join_network
+            from src.utils.daemon import install_daemon
+            from src.utils.sites import (
+                load_or_create_site_key,
+                save_site_config,
+                write_site_manifest,
+            )
+
+            _, pub, key_path, _created = load_or_create_site_key(
+                name=name,
+                key=remembered_key_path,
+            )
+            address = self._address_from_pub(pub)
+            save_site_config(name, key_path=key_path, target=target)
+
+            resolved_target = os.path.abspath(os.path.expanduser(target))
+            if os.path.isdir(resolved_target):
+                write_site_manifest(
+                    resolved_target,
+                    address,
+                    title=name,
+                )
+
+            reference = install_daemon(name, target, key_path=key_path)
+            if directory_addr:
+                join_network._schedule_directory_registration(name, directory_addr)
+
+            message = (
+                f"Published background host for {name}.\n\n"
+                f"Address: {address}\n"
+                f"Target: {target}\n"
+                f"Service: {reference}"
+            )
+            if directory_addr:
+                message += f"\nDirectory: {directory_addr}"
+            self._show_dialog("Obscura47", message)
+        except Exception as exc:
+            self._show_dialog("Obscura47", f"Could not publish site:\n{exc}", error=True)
         finally:
             self._update_menu()
 
