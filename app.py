@@ -13,6 +13,7 @@ import argparse
 import threading
 import time
 import tkinter as tk
+from tkinter import filedialog
 from tkinter import font as tkfont
 from tkinter import messagebox, simpledialog, ttk
 
@@ -200,8 +201,9 @@ class ObscuraApp(tk.Tk):
         self.title("Obscura47")
         self.configure(bg=BG)
         self.resizable(False, True)
-        self.geometry("520x760")
-        self.minsize(520, 400)
+        default_width = 860 if platform.system() == "Darwin" else 760
+        self.geometry(f"{default_width}x760")
+        self.minsize(default_width, 400)
 
         # ── ttk styles (fix white-on-white buttons on macOS Aqua) ──
         style = ttk.Style(self)
@@ -403,7 +405,7 @@ class ObscuraApp(tk.Tk):
         utility_buttons = tk.Frame(utility_frame, bg=BG_CARD)
         utility_buttons.pack(fill="x", padx=14, pady=(0, 4))
 
-        for label, command in [
+        actions = [
             ("Quick Start", self._show_quick_start),
             ("Open .obscura Address", self._open_visitor),
             ("Browse Directory", self._browse_directory),
@@ -411,11 +413,15 @@ class ObscuraApp(tk.Tk):
             ("Add Site", self._add_hosted_site),
             ("Publish Site", self._publish_hosted_site),
             ("Remove Site", self._remove_hosted_site_daemon),
-        ]:
+        ]
+        for col in range(3):
+            utility_buttons.grid_columnconfigure(col, weight=1, uniform="quick-actions")
+        for idx, (label, command) in enumerate(actions):
+            row, col = divmod(idx, 3)
             ttk.Button(
                 utility_buttons, text=label, style="Action.TButton",
                 cursor="hand2", command=command,
-            ).pack(side="left", padx=(0, 8))
+            ).grid(row=row, column=col, padx=6, pady=6, sticky="ew")
 
         # ── Settings panel ────────────────────────────────────────
         settings_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
@@ -664,6 +670,88 @@ class ObscuraApp(tk.Tk):
     def _prompt_text(self, title: str, prompt: str, initial: str = "") -> str | None:
         return simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
 
+    def _prompt_publish_target(self, title: str, initial: str = "") -> str | None:
+        if self.__dict__.get("tk") is None:
+            return self._prompt_text(
+                title,
+                "Directory path or host:port to publish:",
+                initial=initial,
+            )
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=BG)
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        tk.Label(
+            dialog,
+            text="Directory path or host:port to publish:",
+            font=self._label_font,
+            fg=TEXT,
+            bg=BG,
+            anchor="w",
+        ).pack(fill="x", padx=16, pady=(16, 8))
+
+        row = tk.Frame(dialog, bg=BG)
+        row.pack(fill="x", padx=16, pady=(0, 12))
+
+        value = tk.StringVar(value=initial)
+        entry = ttk.Entry(row, textvariable=value, width=46)
+        entry.pack(side="left", fill="x", expand=True)
+
+        def _browse_folder():
+            chosen = filedialog.askdirectory(
+                parent=dialog,
+                initialdir=os.path.expanduser(initial) if initial else os.path.expanduser("~"),
+                title="Choose Site Folder",
+                mustexist=True,
+            )
+            if chosen:
+                value.set(chosen)
+                entry.icursor("end")
+                entry.focus_set()
+
+        ttk.Button(
+            row,
+            text="Browse Folder…",
+            style="Action.TButton",
+            command=_browse_folder,
+        ).pack(side="left", padx=(8, 0))
+
+        result = {"value": None}
+
+        def _submit():
+            text = value.get().strip()
+            result["value"] = text or None
+            dialog.destroy()
+
+        def _cancel():
+            dialog.destroy()
+
+        buttons = tk.Frame(dialog, bg=BG)
+        buttons.pack(fill="x", padx=16, pady=(0, 16))
+
+        ttk.Button(
+            buttons,
+            text="Cancel",
+            style="Subtle.TButton",
+            command=_cancel,
+        ).pack(side="right")
+        ttk.Button(
+            buttons,
+            text="OK",
+            style="Connect.TButton",
+            command=_submit,
+        ).pack(side="right", padx=(0, 8))
+
+        dialog.bind("<Return>", lambda _event: _submit())
+        dialog.bind("<Escape>", lambda _event: _cancel())
+        entry.focus_set()
+        entry.select_range(0, "end")
+        dialog.wait_window()
+        return result["value"]
+
     def _get_hosted_sites(self) -> list:
         try:
             from src.utils.sites import list_sites
@@ -756,9 +844,8 @@ class ObscuraApp(tk.Tk):
             remembered_target = ""
             remembered_key_path = None
 
-        target = self._prompt_text(
+        target = self._prompt_publish_target(
             "Add .obscura Site",
-            "Directory path or host:port to publish:",
             initial=remembered_target,
         )
         if not target:
@@ -807,9 +894,8 @@ class ObscuraApp(tk.Tk):
             remembered_target = ""
             remembered_key_path = None
 
-        target = self._prompt_text(
+        target = self._prompt_publish_target(
             "Publish .obscura Site",
-            "Directory path or host:port to publish:",
             initial=remembered_target,
         )
         if not target:
