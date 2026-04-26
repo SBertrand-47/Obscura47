@@ -14,6 +14,10 @@ The public framing of this project is intentionally simple:
 This README focuses on that public product surface, not every internal module
 or experimental direction in the codebase.
 
+Code in this repository is licensed under [Apache-2.0](./LICENSE). The
+Obscura47 name and branding are governed separately by
+[TRADEMARKS.md](./TRADEMARKS.md).
+
 ## What You Can Do
 
 - **Connect to the network** from the desktop app, tray app, or CLI
@@ -195,6 +199,9 @@ ownerless.
 
 If you fork the code, please make it clear whether your deployment is an
 independent network, a private lab, or an unofficial variant.
+
+For the code license, see [LICENSE](./LICENSE). For name and brand use, see
+[TRADEMARKS.md](./TRADEMARKS.md).
 
 ## Configuration
 
