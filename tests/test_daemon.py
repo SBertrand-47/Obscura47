@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 
 from src.utils.daemon import (
+    daemon_reference,
     generate_launchd_plist,
     generate_systemd_unit,
+    scheduled_task_name,
 )
 
 
@@ -30,6 +32,11 @@ class TestSystemdUnit:
         unit = generate_systemd_unit("s", "t")
         assert sys.executable in unit
 
+    def test_includes_key_path_when_provided(self):
+        unit = generate_systemd_unit("s", "./site", key_path="~/keys/site.pem")
+        assert "--key" in unit
+        assert "site.pem" in unit
+
 
 class TestLaunchdPlist:
     def test_valid_xml(self):
@@ -49,3 +56,26 @@ class TestLaunchdPlist:
     def test_log_path(self):
         plist = generate_launchd_plist("demo", "t")
         assert "host-demo.log" in plist
+
+    def test_contains_key_path_when_provided(self):
+        plist = generate_launchd_plist("demo", "./site", key_path="~/keys/demo.pem")
+        assert "<string>--key</string>" in plist
+        assert "demo.pem" in plist
+
+
+class TestDaemonReference:
+    def test_linux_reference(self):
+        ref = daemon_reference("alpha", system="Linux")
+        assert ref.endswith("obscura47-host-alpha.service")
+
+    def test_macos_reference(self):
+        ref = daemon_reference("alpha", system="Darwin")
+        assert ref.endswith("com.obscura47.host.alpha.plist")
+
+    def test_windows_reference(self):
+        assert daemon_reference("alpha", system="Windows") == "Obscura47 Host alpha"
+
+
+class TestScheduledTaskName:
+    def test_contains_site_name(self):
+        assert scheduled_task_name("myblog") == "Obscura47 Host myblog"
