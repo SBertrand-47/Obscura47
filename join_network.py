@@ -16,6 +16,9 @@ Usage:
     python join_network.py host list          # List all hosted sites and their addresses
     python join_network.py host enable ./mysite --name myblog   # Install per-site background service
     python join_network.py host disable --name myblog           # Remove background service
+    python join_network.py host write-manifest ./mysite --name myblog  # Create /.well-known/obscura.json
+    python join_network.py host register-directory directory.obscura --name myblog   # Register site in a directory
+    python join_network.py host unregister-directory directory.obscura --name myblog # Remove site from a directory
 
 No build step required — runs directly from source.
 """
@@ -360,6 +363,149 @@ def _host_rotate_key(argv: list[str]):
     print()
 
 
+def _parse_repeated_flag(argv: list[str], flag: str) -> list[str]:
+    values: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == flag and i + 1 < len(argv):
+            values.append(argv[i + 1])
+            i += 2
+        elif arg.startswith(flag + "="):
+            values.append(arg.split("=", 1)[1])
+            i += 1
+        else:
+            i += 1
+    return values
+
+
+def _single_flag_value(argv: list[str], flag: str) -> str | None:
+    vals = _parse_repeated_flag(argv, flag)
+    return vals[-1] if vals else None
+
+
+def _strip_flags(argv: list[str], flags_with_values: tuple[str, ...]) -> list[str]:
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in flags_with_values and i + 1 < len(argv):
+            i += 2
+        elif any(arg.startswith(flag + "=") for flag in flags_with_values):
+            i += 1
+        else:
+            positional.append(arg)
+            i += 1
+    return positional
+
+
+def _host_write_manifest(argv: list[str]):
+    from src.core.encryptions import ecc_load_or_create_keypair
+    from src.utils.onion_addr import address_from_pubkey
+    from src.utils.sites import load_or_create_site_key, load_site_config, write_site_manifest
+
+    name, key = _parse_host_flags(argv)
+    positional = _strip_flags(
+        argv,
+        ("--name", "--key", "--title", "--description", "--tag"),
+    )
+    positional = [a for a in positional if not a.startswith("--")]
+    site_dir = positional[0] if positional else None
+    if not site_dir:
+        print("  [!] write-manifest needs a site directory")
+        print("      e.g.  python join_network.py host write-manifest ./mysite --name mysite")
+        sys.exit(1)
+
+    if name and not key:
+        config = load_site_config(name)
+        if config and config.key_path:
+            key = config.key_path
+
+    _priv, pub, key_path, _created = load_or_create_site_key(name=name, key=key)
+    address = address_from_pubkey(pub)
+    title = _single_flag_value(argv, "--title") or (name or "")
+    description = _single_flag_value(argv, "--description") or ""
+    tags = _parse_repeated_flag(argv, "--tag")
+
+    try:
+        manifest_path = write_site_manifest(
+            site_dir,
+            address,
+            title=title,
+            description=description,
+            tags=tags,
+        )
+    except FileNotFoundError as e:
+        print(f"  [!] {e}")
+        sys.exit(1)
+
+    print()
+    print(f"  Wrote manifest for {address}")
+    print(f"  site directory:    {site_dir}")
+    print(f"  manifest path:     {manifest_path}")
+    print(f"  key file:          {key_path}")
+    print()
+
+
+def _site_address_for_name(name: str) -> tuple[str, str]:
+    from src.utils.onion_addr import address_from_pubkey
+    from src.utils.sites import load_site_config, load_or_create_site_key
+
+    config = load_site_config(name)
+    key = config.key_path if config and config.key_path else None
+    _priv, pub, key_path, _created = load_or_create_site_key(name=name, key=key)
+    return address_from_pubkey(pub), key_path
+
+
+def _host_register_directory(argv: list[str], *, unregister: bool = False):
+    from src.agent.client import ToolCallError
+    from src.agent.directory import DirectoryClient
+    from src.utils.visitor import ensure_proxy_running
+
+    name, _key = _parse_host_flags(argv)
+    if not name:
+        print(f"  [!] --name is required for {'unregister-directory' if unregister else 'register-directory'}")
+        sys.exit(1)
+
+    positional = _strip_host_flags(argv)
+    directory_addr = positional[0] if positional else None
+    if not directory_addr:
+        print("  [!] directory address is required")
+        print("      e.g.  python join_network.py host register-directory directory.obscura --name mysite")
+        sys.exit(1)
+
+    if not ensure_proxy_running():
+        print("  [!] could not start the local proxy")
+        sys.exit(1)
+
+    site_addr, key_path = _site_address_for_name(name)
+    client = DirectoryClient(directory_addr)
+    try:
+        result = (
+            client.unregister(site_addr)
+            if unregister
+            else client.register(site_addr)
+        )
+    except ToolCallError as e:
+        print(f"  [!] [{e.code}] {e.message}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"  [!] {e}")
+        sys.exit(1)
+
+    print()
+    print(
+        f"  {'Removed' if unregister else 'Registered'} {site_addr} "
+        f"{'from' if unregister else 'in'} {directory_addr}"
+    )
+    print(f"  key file:          {key_path}")
+    if not unregister:
+        print(f"  title:             {result.get('title', '')}")
+        if result.get("tags"):
+            print(f"  tags:              {', '.join(result['tags'])}")
+    print()
+
+
 def start_roles(roles: list[str], host_arg: str | None = None,
                 site_name: str | None = None, key_path: str | None = None):
     """Start one or more roles. First role runs in main thread, rest in daemon threads."""
@@ -444,18 +590,7 @@ def _parse_host_flags(argv: list[str]) -> tuple[str | None, str | None]:
 
 def _strip_host_flags(argv: list[str]) -> list[str]:
     """Return positional args after removing --name/--key flags and their values."""
-    positional: list[str] = []
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg in ("--name", "--key") and i + 1 < len(argv):
-            i += 2
-        elif arg.startswith("--name=") or arg.startswith("--key="):
-            i += 1
-        else:
-            positional.append(arg)
-            i += 1
-    return positional
+    return _strip_flags(argv, ("--name", "--key"))
 
 
 def main():
@@ -502,12 +637,24 @@ def main():
             if sub == "rotate-key":
                 _host_rotate_key(sys.argv[3:])
                 return
+            if sub == "write-manifest":
+                _host_write_manifest(sys.argv[3:])
+                return
+            if sub == "register-directory":
+                _host_register_directory(sys.argv[3:])
+                return
+            if sub == "unregister-directory":
+                _host_register_directory(sys.argv[3:], unregister=True)
+                return
             if not sub:
                 print("  [!] host mode needs a target argument")
                 print("      e.g.  python join_network.py host ./mysite")
                 print("            python join_network.py host list")
                 print("            python join_network.py host enable ./mysite --name mysite")
                 print("            python join_network.py host disable --name mysite")
+                print("            python join_network.py host write-manifest ./mysite --name mysite")
+                print("            python join_network.py host register-directory directory.obscura --name mysite")
+                print("            python join_network.py host unregister-directory directory.obscura --name mysite")
                 print("            python join_network.py host export-key --name mysite")
                 print("            python join_network.py host import-key key.pem --name mysite")
                 print("            python join_network.py host rotate-key --name mysite")

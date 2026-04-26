@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from src.agent.app import AgentApp, Request, Response
+from src.agent.client import AgentClient
 from src.agent.runtime import AgentRuntime
 from src.agent.tools import ParamSpec, ToolError, ToolRegistry
 from src.utils.logger import get_logger
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 DIRECTORY_PROTOCOL_VERSION = "obscura.directory/1"
+SITE_MANIFEST_PROTOCOL_VERSION = "obscura.site/1"
+SITE_MANIFEST_PATH = "/.well-known/obscura.json"
 MAX_LISTINGS = 10_000
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
@@ -186,9 +189,124 @@ def _listing_dict(l: Listing) -> dict[str, Any]:
     }
 
 
+def _clean_tags(tags: Any) -> list[str]:
+    if tags is None:
+        return []
+    if not isinstance(tags, list):
+        raise ValueError("manifest tags must be an array of strings")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in tags:
+        if not isinstance(raw, str):
+            raise ValueError("manifest tags must be an array of strings")
+        tag = raw.strip()
+        if not tag or tag in seen:
+            continue
+        cleaned.append(tag[:40])
+        seen.add(tag)
+        if len(cleaned) >= 10:
+            break
+    return cleaned
+
+
+def normalize_site_manifest(address: str, manifest: Any) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest must be a JSON object")
+    manifest_address = manifest.get("address")
+    if manifest_address and manifest_address != address:
+        raise ValueError("manifest address does not match requested address")
+    protocol = manifest.get("protocol")
+    if protocol and protocol != SITE_MANIFEST_PROTOCOL_VERSION:
+        raise ValueError(f"unsupported manifest protocol: {protocol}")
+    title = manifest.get("title", "")
+    description = manifest.get("description", "")
+    if title is not None and not isinstance(title, str):
+        raise ValueError("manifest title must be a string")
+    if description is not None and not isinstance(description, str):
+        raise ValueError("manifest description must be a string")
+    return {
+        "title": (title or "").strip()[:MAX_TITLE_LEN],
+        "description": (description or "").strip()[:MAX_DESCRIPTION_LEN],
+        "tags": _clean_tags(manifest.get("tags")),
+    }
+
+
+def fetch_site_manifest(
+    address: str,
+    client: AgentClient | None = None,
+) -> dict[str, Any]:
+    client = client or AgentClient()
+    resp = client.get(address, SITE_MANIFEST_PATH)
+    if not resp.ok:
+        raise ValueError(
+            f"manifest fetch returned HTTP {resp.status} for {address}{SITE_MANIFEST_PATH}"
+        )
+    try:
+        manifest = resp.json()
+    except ValueError as e:
+        raise ValueError(f"manifest was not valid JSON: {e}")
+    return normalize_site_manifest(address, manifest)
+
+
+class DirectoryClient:
+    """Convenience client for talking to a directory hidden service."""
+
+    def __init__(
+        self,
+        addr: str,
+        *,
+        port: int = 80,
+        agent: AgentClient | None = None,
+    ):
+        self.addr = addr
+        self.port = int(port)
+        self.agent = agent or AgentClient()
+
+    def register(self, address: str) -> dict[str, Any]:
+        return self.agent.call_tool(
+            self.addr,
+            "register",
+            {"address": address},
+            port=self.port,
+        )
+
+    def unregister(self, address: str) -> dict[str, Any]:
+        return self.agent.call_tool(
+            self.addr,
+            "unregister",
+            {"address": address},
+            port=self.port,
+        )
+
+    def list(
+        self,
+        *,
+        query: str = "",
+        limit: int = DEFAULT_LIMIT,
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {"limit": limit}
+        if query:
+            args["query"] = query
+        return self.agent.call_tool(
+            self.addr,
+            "list",
+            args,
+            port=self.port,
+        )
+
+    def get(self, address: str) -> dict[str, Any]:
+        return self.agent.call_tool(
+            self.addr,
+            "get",
+            {"address": address},
+            port=self.port,
+        )
+
+
 def build_directory_app(
     state_path: str | None = None,
     observer: "Observer | None" = None,
+    manifest_fetcher: Any | None = None,
 ) -> tuple[AgentApp, ToolRegistry]:
     app = AgentApp()
     tools = ToolRegistry()
@@ -202,26 +320,30 @@ def build_directory_app(
 
     @tools.tool(
         "register",
-        description="Register or update a .obscura site in the directory.",
+        description="Register or update a .obscura site in the directory by fetching its manifest.",
         params=[
             ParamSpec("address", "string", required=True, description=".obscura address to list"),
-            ParamSpec("title", "string", required=False, description="short display title"),
-            ParamSpec("description", "string", required=False, description="description of the site"),
-            ParamSpec("tags", "array", required=False, description="list of tag strings"),
         ],
         returns="object",
     )
-    def handle_register(req: Request, args: dict) -> dict:
+    def handle_register(args: dict, req: Request) -> dict:
         caller = req.caller_fingerprint
         if not caller:
             raise ToolError("authentication_required", "caller identity unknown")
+        fetcher = manifest_fetcher or fetch_site_manifest
+        try:
+            manifest = fetcher(args["address"])
+        except ValueError as e:
+            raise ToolError("bad_manifest", str(e))
+        except Exception as e:
+            raise ToolError("manifest_unavailable", str(e) or repr(e))
         try:
             listing = state.register(
                 address=args["address"],
                 caller=caller,
-                title=args.get("title", ""),
-                description=args.get("description", ""),
-                tags=args.get("tags"),
+                title=manifest.get("title", ""),
+                description=manifest.get("description", ""),
+                tags=manifest.get("tags"),
             )
         except (ValueError, PermissionError) as e:
             raise ToolError("register_failed", str(e))
@@ -237,7 +359,7 @@ def build_directory_app(
         ],
         returns="object",
     )
-    def handle_unregister(req: Request, args: dict) -> dict:
+    def handle_unregister(args: dict, req: Request) -> dict:
         caller = req.caller_fingerprint
         if not caller:
             raise ToolError("authentication_required", "caller identity unknown")
@@ -260,7 +382,7 @@ def build_directory_app(
         ],
         returns="object",
     )
-    def handle_list(req: Request, args: dict) -> dict:
+    def handle_list(args: dict, req: Request) -> dict:
         results = state.search(
             query=args.get("query", ""),
             limit=args.get("limit", DEFAULT_LIMIT),
@@ -279,7 +401,7 @@ def build_directory_app(
         ],
         returns="object",
     )
-    def handle_get(req: Request, args: dict) -> dict:
+    def handle_get(args: dict, req: Request) -> dict:
         listing = state.get(args["address"])
         if not listing:
             raise ToolError("not_found", "listing not found")
