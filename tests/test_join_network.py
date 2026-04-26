@@ -60,3 +60,63 @@ class TestHostArgumentParsing:
 
         with pytest.raises(SystemExit):
             join_network.main()
+
+    def test_strip_flags_omits_manifest_option_values(self):
+        out = join_network._strip_flags(
+            [
+                "./site",
+                "--name", "mysite",
+                "--title", "Alpha",
+                "--description", "Desc",
+                "--tag", "blog",
+                "--tag=search",
+            ],
+            ("--name", "--key", "--title", "--description", "--tag"),
+        )
+        assert out == ["./site"]
+
+
+class TestHostDirectoryRegistration:
+    def test_register_directory_uses_saved_site_identity(self, monkeypatch, tmp_path):
+        site_dir = tmp_path / "sites"
+        site_dir.mkdir()
+
+        saved = {}
+
+        def fake_load_site_config(name):
+            return SiteConfig(
+                name=name,
+                key_path=str(tmp_path / "external.pem"),
+                target="./site",
+            )
+
+        def fake_load_or_create_site_key(name=None, key=None):
+            saved["key"] = key
+            return object(), "PUB", key or "/tmp/default.pem", False
+
+        monkeypatch.setattr("src.utils.sites.load_site_config", fake_load_site_config)
+        monkeypatch.setattr("src.utils.sites.load_or_create_site_key", fake_load_or_create_site_key)
+        monkeypatch.setattr("src.utils.onion_addr.address_from_pubkey", lambda pub: "alpha.obscura")
+        monkeypatch.setattr("src.utils.visitor.ensure_proxy_running", lambda: True)
+
+        called = {}
+
+        class FakeDirectoryClient:
+            def __init__(self, addr):
+                called["addr"] = addr
+
+            def register(self, address):
+                called["register"] = address
+                return {"title": "Alpha", "tags": ["blog"]}
+
+        monkeypatch.setattr("src.agent.directory.DirectoryClient", FakeDirectoryClient)
+
+        join_network._host_register_directory(
+            ["directory.obscura", "--name", "mysite"],
+        )
+
+        assert called == {
+            "addr": "directory.obscura",
+            "register": "alpha.obscura",
+        }
+        assert saved["key"] == str(tmp_path / "external.pem")
