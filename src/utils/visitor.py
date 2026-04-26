@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import os
 import platform
+import socket
 import subprocess
 import sys
-import tempfile
-import threading
 import time
-from pathlib import Path
 
 from src.utils.config import PROXY_HOST, PROXY_PORT
 
@@ -30,6 +28,11 @@ function FindProxyForURL(url, host) {{
 
 PAC_DIR = os.path.join(os.path.expanduser("~"), ".obscura47")
 PAC_FILENAME = "obscura.pac"
+PROXY_START_TIMEOUT_SECONDS = 8.0
+
+
+def _project_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def generate_pac(
@@ -51,6 +54,60 @@ def pac_file_url(pac_path: str) -> str:
     return f"file://{os.path.abspath(pac_path)}"
 
 
+def normalize_browser_url(url: str) -> str:
+    """Normalize a user-supplied address into a browser-safe URL."""
+    url = (url or "").strip()
+    if not url:
+        return "about:blank"
+    if "://" in url:
+        return url
+    return f"http://{url}"
+
+
+def proxy_is_running(
+    proxy_host: str = PROXY_HOST,
+    proxy_port: int = PROXY_PORT,
+    timeout: float = 0.25,
+) -> bool:
+    try:
+        with socket.create_connection((proxy_host, proxy_port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_proxy_running(
+    proxy_host: str = PROXY_HOST,
+    proxy_port: int = PROXY_PORT,
+    timeout: float = PROXY_START_TIMEOUT_SECONDS,
+) -> bool:
+    """Start the local proxy if needed and wait for it to listen."""
+    if proxy_is_running(proxy_host=proxy_host, proxy_port=proxy_port):
+        return True
+
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "cwd": _project_root(),
+    }
+    if platform.system() == "Windows":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        kwargs["start_new_session"] = True
+
+    subprocess.Popen(
+        [sys.executable, os.path.join(_project_root(), "join_network.py"), "proxy"],
+        **kwargs,
+    )
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proxy_is_running(proxy_host=proxy_host, proxy_port=proxy_port):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def open_in_browser(
     url: str = "",
     proxy_host: str = PROXY_HOST,
@@ -61,12 +118,13 @@ def open_in_browser(
     Generates a PAC file, then launches the platform's default browser
     with proxy configuration.  Returns True if the browser was launched.
     """
+    if not ensure_proxy_running(proxy_host=proxy_host, proxy_port=proxy_port):
+        return False
+
     pac_path = generate_pac(proxy_host=proxy_host, proxy_port=proxy_port)
     pac_url = pac_file_url(pac_path)
     system = platform.system()
-
-    if not url:
-        url = "about:blank"
+    url = normalize_browser_url(url)
 
     try:
         if system == "Darwin":
