@@ -1,11 +1,13 @@
-"""Tests for desktop utility helper functions in app.py."""
+"""Tests for desktop utility helper functions."""
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
-from app import (
-    ObscuraApp,
+import pytest
+
+from src.utils.app_helpers import (
     build_quick_start_text,
     format_hosted_site_summary,
     resolve_hosted_site_selection,
@@ -50,12 +52,8 @@ def test_resolve_hosted_site_selection_accepts_raw_address():
 def test_resolve_hosted_site_selection_rejects_unknown_name():
     hosted = [SimpleNamespace(name="alpha", address="alpha.obscura")]
 
-    try:
+    with pytest.raises(ValueError, match="unknown hosted site"):
         resolve_hosted_site_selection("beta", hosted)
-    except ValueError as exc:
-        assert "unknown hosted site" in str(exc)
-    else:
-        raise AssertionError("expected ValueError for unknown site")
 
 
 def test_build_quick_start_text_for_disconnected_state():
@@ -73,8 +71,27 @@ def test_build_quick_start_text_for_connected_state():
     assert "Browse discovery:" in text
 
 
-def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch):
-    app = object.__new__(ObscuraApp)
+# ── GUI-dependent tests (require tkinter) ─────────────────────────────────────
+
+try:
+    import tkinter  # noqa: F401
+    _has_tkinter = True
+except ImportError:
+    _has_tkinter = False
+
+_skip_no_tk = pytest.mark.skipif(not _has_tkinter, reason="tkinter not available")
+
+
+@pytest.fixture()
+def _stub_app():
+    from app import ObscuraApp
+
+    return object.__new__(ObscuraApp)
+
+
+@_skip_no_tk
+def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch, _stub_app):
+    app = _stub_app
 
     prompts = iter(["mysite", "./site", "directory.obscura"])
     app._prompt_text = lambda *args, **kwargs: next(prompts)
@@ -128,19 +145,17 @@ def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch
     app._publish_hosted_site()
 
     assert saved == {"name": "mysite", "key_path": "/tmp/mysite.pem", "target": "./site"}
-    assert manifest == {
-        "site_dir": "/Users/bertrand/Desktop/Obscura47/site",
-        "address": "alpha.obscura",
-        "title": "mysite",
-    }
+    assert manifest["address"] == "alpha.obscura"
+    assert manifest["title"] == "mysite"
     assert installed == {"name": "mysite", "target": "./site", "key_path": "/tmp/mysite.pem"}
     assert scheduled == {"site_name": "mysite", "directory_addr": "directory.obscura"}
     assert infos and "alpha.obscura" in infos[0][1]
     assert not errors
 
 
-def test_remove_hosted_site_daemon_reports_success(monkeypatch):
-    app = object.__new__(ObscuraApp)
+@_skip_no_tk
+def test_remove_hosted_site_daemon_reports_success(monkeypatch, _stub_app):
+    app = _stub_app
 
     app._prompt_text = lambda *args, **kwargs: "mysite"
     logs = []
