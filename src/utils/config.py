@@ -127,6 +127,9 @@ NODE_KEY_PATH = getenv_str("OBSCURA_NODE_KEY_PATH", os.path.join(os.path.expandu
 EXIT_KEY_PATH = getenv_str("OBSCURA_EXIT_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "exit_key.pem"))
 PROXY_KEY_PATH = getenv_str("OBSCURA_PROXY_KEY_PATH", os.path.join(os.path.expanduser("~"), ".obscura47", "proxy_key.pem"))
 
+# Hidden-service site keys directory
+SITES_DIR = getenv_str("OBSCURA_SITES_DIR", os.path.join(os.path.expanduser("~"), ".obscura47", "sites"))
+
 
 # Bootstrap registry (internet discovery)
 REGISTRY_HOST = getenv_str("OBSCURA_REGISTRY_HOST", "0.0.0.0")
