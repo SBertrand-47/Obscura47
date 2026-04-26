@@ -1,0 +1,24 @@
+[Unit]
+Description=Obscura47 hidden-service host (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 join_network.py host %I --name %i
+WorkingDirectory=/opt/obscura47
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.obscura47
+PrivateTmp=yes
+
+EnvironmentFile=-%h/.obscura47/env
+
+[Install]
+WantedBy=default.target

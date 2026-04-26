@@ -49,8 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         help="display name surfaced in the default /info route",
     )
     parser.add_argument(
-        "--key", default="agent_service.pem",
-        help="path to the service ECC keypair (PEM); created if missing",
+        "--key", default=None,
+        help=(
+            "path to the service ECC keypair (PEM); created if missing. "
+            "Defaults to ~/.obscura47/sites/<name>.pem when omitted."
+        ),
     )
     parser.add_argument(
         "--bind", default="127.0.0.1",
@@ -94,10 +97,16 @@ def main(argv: list[str] | None = None) -> int:
 
     policy = policy_from_args(args)
 
+    from src.utils.sites import load_or_create_site_key
+
+    _priv, _pub, key_path, _created = load_or_create_site_key(
+        name=args.name, key=args.key,
+    )
+
     app = _load_app(args.app) if args.app else None
     runtime = AgentRuntime(
         name=args.name,
-        key_path=args.key,
+        key_path=key_path,
         app=app,
         bind_host=args.bind,
         bind_port=args.port,
