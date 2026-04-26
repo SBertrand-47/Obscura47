@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import json
 import socket
-from typing import Any, Iterator
+import time
+from typing import TYPE_CHECKING, Any, Iterator
 
 from src.agent.tools import DEFAULT_PREFIX
 from src.utils.config import PROXY_HOST, PROXY_PORT
+
+if TYPE_CHECKING:
+    from src.agent.observatory import Observer
 
 
 class ToolCallError(Exception):
@@ -77,6 +81,7 @@ class AgentClient:
         self.proxy_host = proxy_host or PROXY_HOST
         self.proxy_port = int(proxy_port if proxy_port is not None else PROXY_PORT)
         self.timeout = float(timeout)
+        self.observer: "Observer | None" = None
 
     def request(
         self,
@@ -86,6 +91,7 @@ class AgentClient:
         port: int = 80,
         body: Any = None,
         headers: dict[str, str] | None = None,
+        session_id: str | None = None,
     ) -> AgentResponse:
         method = method.upper()
         merged_headers: dict[str, str] = {}
@@ -107,10 +113,26 @@ class AgentClient:
         host_header = addr if port == 80 else f"{addr}:{port}"
         merged_headers.setdefault("Host", host_header)
         merged_headers["Connection"] = "close"
+        if session_id:
+            merged_headers.setdefault("X-Obscura-Session", session_id)
         if body_bytes:
             merged_headers.setdefault("Content-Length", str(len(body_bytes)))
         elif method in {"POST", "PUT", "PATCH", "DELETE"}:
             merged_headers.setdefault("Content-Length", "0")
+
+        observer = self.observer
+        started = time.time() if observer is not None else 0.0
+        if observer is not None:
+            try:
+                observer.emit(
+                    "dial.out",
+                    session_id=session_id,
+                    addr=addr, port=port,
+                    method=method, path=path,
+                    bytes_out=len(body_bytes),
+                )
+            except Exception:
+                pass
 
         sock = socket.create_connection(
             (self.proxy_host, self.proxy_port), timeout=self.timeout,
@@ -144,7 +166,37 @@ class AgentClient:
             head = buf.read_until(b"\r\n\r\n")
             status, resp_headers = _parse_response_head(head)
             body_out = _read_response_body(buf, resp_headers)
-            return AgentResponse(status, resp_headers, body_out)
+            resp = AgentResponse(status, resp_headers, body_out)
+            if observer is not None:
+                try:
+                    latency_ms = round((time.time() - started) * 1000, 3)
+                    observer.emit(
+                        "dial.result",
+                        session_id=session_id,
+                        addr=addr, port=port,
+                        method=method, path=path,
+                        status=status, latency_ms=latency_ms,
+                        bytes_out=len(body_bytes),
+                        bytes_in=len(body_out),
+                    )
+                except Exception:
+                    pass
+            return resp
+        except Exception as e:
+            if observer is not None:
+                try:
+                    latency_ms = round((time.time() - started) * 1000, 3)
+                    observer.emit(
+                        "dial.error",
+                        session_id=session_id,
+                        addr=addr, port=port,
+                        method=method, path=path,
+                        error=str(e) or repr(e),
+                        latency_ms=latency_ms,
+                    )
+                except Exception:
+                    pass
+            raise
         finally:
             try:
                 sock.close()
@@ -194,6 +246,7 @@ class AgentClient:
         *,
         port: int = 80,
         prefix: str = DEFAULT_PREFIX,
+        session_id: str | None = None,
     ) -> Any:
         """Invoke a remote tool and return its ``result``.
 
@@ -203,6 +256,7 @@ class AgentClient:
         resp = self.post(
             addr, _join_prefix(prefix, f"tools/{name}"),
             port=port, body={"args": args or {}},
+            session_id=session_id,
         )
         try:
             envelope = resp.json()
