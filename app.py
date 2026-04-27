@@ -1026,8 +1026,20 @@ class ObscuraApp(tk.Tk):
         counts = {"relays": 0, "exits": 0}
         try:
             import src.core.proxy as proxy_mod
-            counts["relays"] = count_unique_peers(getattr(proxy_mod, "relay_peers", []))
-            counts["exits"] = count_unique_peers(getattr(proxy_mod, "exit_peers", []))
+            from src.utils.config import PEER_EXPIRY_SECONDS
+
+            # Purge stale peers before counting — observe_discovery only
+            # cleans up when a new multicast message arrives, so if a node
+            # disconnects and stops broadcasting, stale entries linger.
+            now = time.time()
+            cutoff = now - PEER_EXPIRY_SECONDS
+            relay_list = getattr(proxy_mod, "relay_peers", [])
+            exit_list = getattr(proxy_mod, "exit_peers", [])
+            relay_list[:] = [p for p in relay_list if p.get("ts", 0) >= cutoff]
+            exit_list[:] = [p for p in exit_list if p.get("ts", 0) >= cutoff]
+
+            counts["relays"] = count_unique_peers(relay_list)
+            counts["exits"] = count_unique_peers(exit_list)
         except Exception:
             pass
         return counts
