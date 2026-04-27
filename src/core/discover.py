@@ -35,6 +35,42 @@ def _validate_peer_key(host: str, port: int, pub_pem: str | None) -> bool:
     )
     return False
 
+
+def _peer_matches(existing: Dict, new_peer: Dict) -> bool:
+    if existing.get("host") == new_peer.get("host") and existing.get("port") == new_peer.get("port"):
+        return True
+    new_pub = new_peer.get("pub")
+    return bool(new_pub and existing.get("pub") == new_pub)
+
+
+def _merge_peer(peers: List[Dict], new_peer: Dict) -> None:
+    """Merge a discovered peer into the list, deduping by endpoint or pubkey.
+
+    Nodes may keep the same long-lived identity while their advertised TCP port
+    changes. Treating ``pub`` as identity when available prevents one physical
+    node from being counted twice under old/new ports.
+    """
+    match_idx = None
+    duplicate_idxs: list[int] = []
+    for idx, peer in enumerate(list(peers)):
+        if _peer_matches(peer, new_peer):
+            if match_idx is None:
+                match_idx = idx
+            else:
+                duplicate_idxs.append(idx)
+
+    if match_idx is None:
+        peers.append(dict(new_peer))
+    else:
+        merged = dict(peers[match_idx])
+        for key, value in new_peer.items():
+            if value is not None:
+                merged[key] = value
+        peers[match_idx] = merged
+
+    for idx in reversed(duplicate_idxs):
+        peers.pop(idx)
+
 def get_local_ip():
     """Returns the machine's LAN IP (avoids 127.0.0.1)."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -113,13 +149,9 @@ def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISC
                             # TOFU: reject if public key changed
                             if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
                                 continue
-                            # Update or insert
-                            for idx, p in enumerate(list(peers)):
-                                if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
-                                    peers[idx]["ts"] = new_peer["ts"]
-                                    break
-                            else:
-                                peers.append(new_peer)
+                            before = len(peers)
+                            _merge_peer(peers, new_peer)
+                            if len(peers) > before:
                                 log.info(f"Discovered new peer: host={new_peer['host']}, port={new_peer['port']}")
 
                         # Expire old peers
@@ -189,13 +221,9 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                             # and exits instead of hiding them by IP alone.
                             if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
                                 continue
-                            # Update or insert
-                            for idx, p in enumerate(list(peers)):
-                                if p["host"] == new_peer["host"] and p["port"] == new_peer["port"]:
-                                    peers[idx]["ts"] = new_peer["ts"]
-                                    break
-                            else:
-                                peers.append(new_peer)
+                            before = len(peers)
+                            _merge_peer(peers, new_peer)
+                            if len(peers) > before:
                                 log.info(f"Observed peer: host={new_peer['host']}, port={new_peer['port']} (from {addr[0]})")
 
                             # Expire old peers
