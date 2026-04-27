@@ -15,6 +15,7 @@ from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     EXIT_KEY_PATH, EXIT_WS_PORT,
+    EXIT_ADVERTISED_HOST,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE, TUNNEL_IDLE_SECONDS,
     EXIT_EGRESS_AUDIT_ENABLED, EXIT_EGRESS_AUDIT_PATH, AUDIT_RETENTION_DAYS,
     EXIT_DENY_PRIVATE_IPS, EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS,
@@ -62,7 +63,8 @@ class ExitNode:
         # Register with internet bootstrap registry (with ws_port and priv_key for auth)
         start_heartbeat("exit", self.port, self.pub_pem,
                         priv_key=self.priv_key, ws_port=self.ws_port,
-                        ws_tls=self.ws_tls_enabled or None)
+                        ws_tls=self.ws_tls_enabled or None,
+                        advertised_host=EXIT_ADVERTISED_HOST or None)
 
         # Start WebSocket server (dual-protocol; wss:// when TLS configured)
         self.ws_server = WSServer(
