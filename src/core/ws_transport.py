@@ -28,6 +28,16 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 
+def _bracket_ipv6(host: str) -> str:
+    """Wrap an IPv6 address in brackets for use in URIs and log messages.
+
+    IPv4 addresses and hostnames are returned unchanged.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def _ws_is_open(ws) -> bool:
     """Return whether a websockets connection is still usable.
 
@@ -307,7 +317,7 @@ class WSClient:
     async def _connect(self, host: str, port: int, tls: bool):
         """Establish and authenticate a WebSocket connection."""
         scheme = "wss" if tls else "ws"
-        uri = f"{scheme}://{host}:{port}"
+        uri = f"{scheme}://{_bracket_ipv6(host)}:{port}"
         kwargs = {}
         if tls:
             kwargs["ssl"] = _build_client_ssl_context(self.tls_verify)
