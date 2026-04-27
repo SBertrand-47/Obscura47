@@ -564,8 +564,31 @@ if (DASHBOARD_DIST_DIR / "assets").exists():
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host
+        return _normalise_ip(forwarded.split(",")[0].strip())
+    return _normalise_ip(request.client.host)
+
+
+def _normalise_ip(ip: str) -> str:
+    """Normalise an IP address for storage and peer-id construction.
+
+    * Strips IPv6 zone IDs (``%eth0``).
+    * Unwraps IPv4-mapped IPv6 addresses (``::ffff:1.2.3.4`` → ``1.2.3.4``).
+    * Strips surrounding brackets (``[::1]`` → ``::1``).
+    """
+    ip = ip.strip()
+    if ip.startswith("[") and ip.endswith("]"):
+        ip = ip[1:-1]
+    # Remove zone ID
+    if "%" in ip:
+        ip = ip.split("%")[0]
+    # Unwrap IPv4-mapped IPv6
+    prefixes = ("::ffff:", "0:0:0:0:0:ffff:")
+    for prefix in prefixes:
+        if ip.lower().startswith(prefix):
+            maybe_v4 = ip[len(prefix):]
+            if ":" not in maybe_v4:
+                return maybe_v4
+    return ip
 
 
 def _audit_admin_event(action: str, *, request: Request | None = None, target: str | None = None,

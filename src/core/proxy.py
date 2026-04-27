@@ -166,6 +166,11 @@ def choose_best_exit():
             return (0.0, 0.0)  # unseen — prefer over known-bad exits
         if stats.get('backoff_until', 0.0) > now:
             return None  # in backoff, exclude
+        # Exclude exits that have never succeeded and already failed
+        # multiple times — they are likely unreachable (wrong address
+        # family, firewall, etc.)
+        if stats.get('ok', 0) == 0 and stats.get('fail', 0) >= 2:
+            return None
         total = stats['ok'] + stats['fail']
         success_ratio = (stats['ok'] / total) if total else 0.0
         return (stats['rtt_ms'], -success_ratio)
