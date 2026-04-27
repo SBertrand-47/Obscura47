@@ -3,6 +3,24 @@
 from __future__ import annotations
 
 
+def count_unique_peers(peers: list) -> int:
+    seen = set()
+    total = 0
+    for peer in peers or []:
+        if not isinstance(peer, dict):
+            continue
+        pub = peer.get("pub")
+        if pub:
+            identity = ("pub", pub)
+        else:
+            identity = ("endpoint", peer.get("host"), peer.get("port"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += 1
+    return total
+
+
 def format_hosted_site_summary(site, *, background_enabled: bool) -> str:
     mode = "background" if background_enabled else "manual"
     target = getattr(site, "target", None) or "(target not saved yet)"

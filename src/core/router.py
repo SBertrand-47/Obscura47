@@ -524,7 +524,7 @@ def start_tunnel(destination, peers, request_id: str, host: str, port: int, retu
         route = build_route47(peers)
     if not route:
         log.warning("start_tunnel: empty route, cannot start")
-        return route
+        return None
     remaining = list(route[1:]) + [destination]
     envelope = {
         "type": "connect",
@@ -534,7 +534,9 @@ def start_tunnel(destination, peers, request_id: str, host: str, port: int, retu
         "return_path": return_path,
         "route": remaining,
     }
-    _send_frame_via_route([route[0]], envelope)
+    sent = _send_frame_via_route([route[0]], envelope)
+    if not sent:
+        return None
     return route
 
 def send_tunnel_data(destination, route, request_id: str, chunk_b64: str):
