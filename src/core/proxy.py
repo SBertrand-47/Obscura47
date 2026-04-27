@@ -153,6 +153,10 @@ def exit_health_monitor():
 
 def choose_best_exit():
     now = time.time()
+    # Purge stale peers before selecting an exit
+    from src.utils.config import PEER_EXPIRY_SECONDS
+    cutoff = now - PEER_EXPIRY_SECONDS
+    exit_peers[:] = [p for p in exit_peers if p.get("ts", 0) >= cutoff]
     candidates = [(p['host'], p['port']) for p in list(exit_peers)]
     if not candidates:
         return None
@@ -485,12 +489,14 @@ def handle_connect(client_socket):
             return
 
         if not relay_peers and not exit_peers:
+            log.warning("CONNECT refused: no peers discovered (relay=%d, exit=%d)", len(relay_peers), len(exit_peers))
             client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
             client_socket.close()
             return
 
         destination = choose_best_exit()
         if not destination:
+            log.warning("CONNECT refused: no reachable exit node for %s:%s", host, port)
             client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             client_socket.close()
             return
@@ -503,12 +509,19 @@ def handle_connect(client_socket):
 
         route = build_route47(relay_peers)
         if not route:
-            log.warning("CONNECT refused: no relay route available for %s:%s", host, port)
-            with pending_lock:
-                pending_requests.pop(request_id, None)
-            client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
-            client_socket.close()
-            return
+            # Fallback: when no relay peers are available (small network),
+            # build a direct single-hop route through the exit itself so
+            # traffic can still flow instead of returning 503.
+            if exit_peers:
+                log.warning("No relay peers — using direct route to exit for %s:%s", host, port)
+                route = [destination]
+            else:
+                log.warning("CONNECT refused: no relay route available for %s:%s", host, port)
+                with pending_lock:
+                    pending_requests.pop(request_id, None)
+                client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+                client_socket.close()
+                return
         # Reverse channel: responses flow back on the same connections,
         # so return_path only needs the proxy's public key for encryption.
         return_path = {
