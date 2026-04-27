@@ -9,6 +9,7 @@ import pytest
 
 from src.utils.app_helpers import (
     build_quick_start_text,
+    count_unique_peers,
     format_hosted_site_summary,
     resolve_hosted_site_selection,
 )
@@ -69,6 +70,26 @@ def test_build_quick_start_text_for_connected_state():
 
     assert "You are connected." in text
     assert "Browse discovery:" in text
+
+
+def test_count_unique_peers_merges_same_pub_across_addresses():
+    peers = [
+        {"host": "192.168.1.20", "port": 5001, "pub": "node-pub"},
+        {"host": "203.0.113.10", "port": 5001, "pub": "node-pub"},
+        {"host": "203.0.113.11", "port": 5001, "pub": "other-node"},
+    ]
+
+    assert count_unique_peers(peers) == 2
+
+
+def test_count_unique_peers_falls_back_to_host_and_port():
+    peers = [
+        {"host": "203.0.113.10", "port": 5001},
+        {"host": "203.0.113.10", "port": 5001},
+        {"host": "203.0.113.10", "port": 5002},
+    ]
+
+    assert count_unique_peers(peers) == 2
 
 
 # ── GUI-dependent tests (require tkinter) ─────────────────────────────────────
