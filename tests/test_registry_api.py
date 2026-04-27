@@ -47,6 +47,24 @@ class TestBasicEndpoints:
         data = r.json()
         assert data["ok"] is True
         assert "your_ip" in data
+        assert data["registered_host"] == "testclient"
+
+    def test_register_uses_advertised_host_override(self, client):
+        r = client.post(
+            "/register",
+            json={"role": "exit", "port": 6000, "advertised_host": "154.38.172.2"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["registered_host"] == "154.38.172.2"
+        assert data["peer_id"] == "154.38.172.2:6000"
+
+        admin = client.get(
+            "/admin/peers",
+            headers={"Authorization": "Bearer test-admin-key"},
+        )
+        exit_peer = next(p for p in admin.json()["peers"] if p["role"] == "exit")
+        assert exit_peer["host"] == "154.38.172.2"
 
     def test_peers_after_register(self, client):
         client.post("/register", json={"role": "node", "port": 5001})
@@ -105,6 +123,28 @@ class TestAuthFlow:
         # Peer should now be in the list
         peers = client.get("/peers").json()
         assert any(p["port"] == 5001 for p in peers)
+
+    def test_verify_keeps_advertised_host_override(self, client):
+        priv, pub = ecc_generate_keypair()
+        r = client.post(
+            "/register",
+            json={
+                "role": "node",
+                "port": 5001,
+                "pub": pub,
+                "advertised_host": "154.38.172.2",
+            },
+        )
+        challenge = r.json()["challenge"]
+        peer_id = r.json()["peer_id"]
+
+        sig = ecdsa_sign(priv, challenge.encode())
+        r2 = client.post("/register/verify", json={"peer_id": peer_id, "signature": sig})
+        assert r2.status_code == 200
+        assert r2.json()["registered_host"] == "154.38.172.2"
+
+        peers = client.get("/peers").json()
+        assert peers[0]["host"] == "154.38.172.2"
 
     def test_verify_with_invalid_signature(self, client):
         _, pub = ecc_generate_keypair()

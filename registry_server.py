@@ -128,6 +128,7 @@ class PeerRegistration(BaseModel):
     pub: str | None = None
     ws_port: int | None = Field(default=None, ge=1, le=65535)
     ws_tls: bool | None = None  # True if ws_port serves wss://
+    advertised_host: str | None = None
 
 
 class AuthVerification(BaseModel):
@@ -641,11 +642,12 @@ async def register_peer(body: PeerRegistration, request: Request):
     If no public key is provided, the peer is registered immediately (unauthenticated).
     """
     ip = _get_client_ip(request)
+    advertised_host = _normalise_ip(body.advertised_host) if body.advertised_host else ip
 
     if not _check_rate_limit(ip):
         raise HTTPException(429, detail="Rate limit exceeded")
 
-    peer_id = f"{ip}:{body.port}"
+    peer_id = f"{advertised_host}:{body.port}"
 
     # If peer has a public key, require challenge-response auth
     if body.pub:
@@ -653,16 +655,16 @@ async def register_peer(body: PeerRegistration, request: Request):
         existing = await get_peer_by_id(peer_id)
         if existing and existing.get("pub") == body.pub:
             # Known peer heartbeat — update timestamp without re-auth
-            await upsert_peer(peer_id, ip, body.port, body.role, body.pub,
+            await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
                               body.ws_port, body.ws_tls)
-            return {"ok": True, "your_ip": ip, "peer_id": peer_id}
+            return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
 
         # New peer or pubkey change — issue challenge
         nonce = secrets.token_hex(32)
         _pending_challenges[peer_id] = {
             "nonce": nonce,
             "peer_data": {
-                "host": ip,
+                "host": advertised_host,
                 "port": body.port,
                 "role": body.role,
                 "pub": body.pub,
@@ -673,15 +675,15 @@ async def register_peer(body: PeerRegistration, request: Request):
             "ip": ip,
         }
         print(f"[registry] Challenge issued for {body.role} at {peer_id}")
-        return {"ok": False, "challenge": nonce, "peer_id": peer_id, "your_ip": ip}
+        return {"ok": False, "challenge": nonce, "peer_id": peer_id, "your_ip": ip, "registered_host": advertised_host}
 
     # No public key — register immediately (unauthenticated)
     is_new = await get_peer_by_id(peer_id) is None
-    await upsert_peer(peer_id, ip, body.port, body.role,
+    await upsert_peer(peer_id, advertised_host, body.port, body.role,
                       ws_port=body.ws_port, ws_tls=body.ws_tls)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
-    return {"ok": True, "your_ip": ip, "peer_id": peer_id}
+    return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
 
 
 @app.post("/register/verify")
@@ -716,7 +718,7 @@ async def verify_registration(body: AuthVerification, request: Request):
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
                        data["pub"], data.get("ws_port"), data.get("ws_tls"))
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
-    return {"ok": True, "your_ip": ip, "peer_id": body.peer_id}
+    return {"ok": True, "your_ip": ip, "registered_host": data["host"], "peer_id": body.peer_id}
 
 
 @app.get("/peers")

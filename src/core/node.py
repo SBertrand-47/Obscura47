@@ -13,6 +13,7 @@ from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     NODE_KEY_PATH, NODE_WS_PORT,
+    NODE_ADVERTISED_HOST,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE,
     CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS, TLS_VERIFY,
 )
@@ -102,7 +103,8 @@ class ObscuraNode:
         # Register with internet bootstrap registry (with ws_port and priv_key for auth)
         start_heartbeat("node", self.port, self.pub_pem,
                         priv_key=self.priv_key, ws_port=self.ws_port,
-                        ws_tls=self.ws_tls_enabled or None)
+                        ws_tls=self.ws_tls_enabled or None,
+                        advertised_host=NODE_ADVERTISED_HOST or None)
 
         # Start WebSocket server (dual-protocol; wss:// when TLS configured)
         self.ws_server = WSServer(
