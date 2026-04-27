@@ -586,8 +586,12 @@ def _handle_hs_connect(client_socket, addr: str, port: int):
     try:
         # Pass the locally observed relays so the client can pick a
         # rendezvous point without another registry round-trip.
+        # When the local relay_peers list is empty (small / internet-only
+        # network), pass None so dial_hidden_service falls back to
+        # fetching peers directly from the registry.
+        local_peers = list(relay_peers) if relay_peers else None
         dialed = dial_hidden_service(
-            addr, _proxy_pub_pem, peers=list(relay_peers))
+            addr, _proxy_pub_pem, peers=local_peers)
         if not dialed:
             client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             client_socket.close()
