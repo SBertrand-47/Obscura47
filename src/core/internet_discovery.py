@@ -51,7 +51,8 @@ def _ssl_ctx():
 
 def register_with_registry(role: str, port: int, pub: str | None = None,
                            priv_key=None, ws_port: int | None = None,
-                           ws_tls: bool | None = None):
+                           ws_tls: bool | None = None,
+                           advertised_host: str | None = None):
     """
     Register this node with the bootstrap registry.
     If pub + priv_key are provided, performs ECDSA challenge-response auth.
@@ -64,6 +65,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         body["ws_port"] = ws_port
     if ws_tls is not None:
         body["ws_tls"] = ws_tls
+    if advertised_host:
+        body["advertised_host"] = advertised_host
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -80,7 +83,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         if result.get("ok"):
             # Registered (heartbeat or no-auth)
             _my_public_ip = result.get("your_ip") or _my_public_ip
-            log.info(f"Registered as {role} with registry (your_ip={_my_public_ip})")
+            registered_host = result.get("registered_host") or body.get("advertised_host") or _my_public_ip
+            log.info(f"Registered as {role} with registry (your_ip={_my_public_ip}, host={registered_host})")
             return result
 
         # Challenge-response flow
@@ -105,7 +109,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
             if verify_result.get("ok"):
                 _my_public_ip = verify_result.get("your_ip") or _my_public_ip
-                log.info(f"Verified as {role} with registry (your_ip={_my_public_ip})")
+                registered_host = verify_result.get("registered_host") or body.get("advertised_host") or _my_public_ip
+                log.info(f"Verified as {role} with registry (your_ip={_my_public_ip}, host={registered_host})")
                 return verify_result
             else:
                 log.error(f"Verification failed: {verify_result}")
@@ -121,22 +126,30 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
 def heartbeat_loop(role: str, port: int, pub: str | None = None,
                    priv_key=None, ws_port: int | None = None,
-                   ws_tls: bool | None = None):
+                   ws_tls: bool | None = None,
+                   advertised_host: str | None = None):
     """Periodically re-register to keep this node alive in the registry."""
     while True:
         register_with_registry(role, port, pub, priv_key=priv_key,
-                               ws_port=ws_port, ws_tls=ws_tls)
+                               ws_port=ws_port, ws_tls=ws_tls,
+                               advertised_host=advertised_host)
         time.sleep(REGISTRY_HEARTBEAT_INTERVAL)
 
 
 def start_heartbeat(role: str, port: int, pub: str | None = None,
                     priv_key=None, ws_port: int | None = None,
-                    ws_tls: bool | None = None):
+                    ws_tls: bool | None = None,
+                    advertised_host: str | None = None):
     """Start the heartbeat in a background daemon thread."""
     t = threading.Thread(
         target=heartbeat_loop,
         args=(role, port, pub),
-        kwargs={"priv_key": priv_key, "ws_port": ws_port, "ws_tls": ws_tls},
+        kwargs={
+            "priv_key": priv_key,
+            "ws_port": ws_port,
+            "ws_tls": ws_tls,
+            "advertised_host": advertised_host,
+        },
         daemon=True,
     )
     t.start()
