@@ -132,6 +132,13 @@ def dial_hidden_service(
         fallback = [p for p in intros if p is not intro_point]
         if fallback:
             rv_point = random.choice(fallback)
+        elif intro_point.get('pub') and intro_point.get('host') and intro_point.get('port'):
+            # Last resort: reuse the intro point itself as the rendezvous
+            # point.  In very small networks (1-2 relays) this is the only
+            # option and still preserves payload confidentiality because
+            # hs_data chunks are sealed end-to-end.
+            log.warning("Small network: reusing intro point as rendezvous for %s", addr)
+            rv_point = dict(intro_point)
         else:
             log.warning("No rendezvous point available distinct from intro")
             return None
