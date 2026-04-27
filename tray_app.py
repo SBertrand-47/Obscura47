@@ -14,6 +14,7 @@ import subprocess
 from typing import Optional
 from PIL import Image, ImageDraw
 import pystray
+from src.utils.app_helpers import count_unique_peers
 
 # Colour palette (matching app.py)
 BG = "#0d1117"
@@ -56,8 +57,8 @@ class Obscura47Tray:
         try:
             import src.core.proxy as proxy_mod
 
-            counts["relays"] = len(getattr(proxy_mod, "relay_peers", []))
-            counts["exits"] = len(getattr(proxy_mod, "exit_peers", []))
+            counts["relays"] = count_unique_peers(getattr(proxy_mod, "relay_peers", []))
+            counts["exits"] = count_unique_peers(getattr(proxy_mod, "exit_peers", []))
         except Exception:
             pass
         self._peer_counts = counts

@@ -187,6 +187,7 @@ BORDER       = "#30363d"
 
 from src.utils.app_helpers import (  # noqa: E402
     build_quick_start_text,
+    count_unique_peers,
     format_hosted_site_summary,
     resolve_hosted_site_selection,
 )
@@ -1025,8 +1026,8 @@ class ObscuraApp(tk.Tk):
         counts = {"relays": 0, "exits": 0}
         try:
             import src.core.proxy as proxy_mod
-            counts["relays"]  = len(getattr(proxy_mod, "relay_peers", []))
-            counts["exits"]   = len(getattr(proxy_mod, "exit_peers", []))
+            counts["relays"] = count_unique_peers(getattr(proxy_mod, "relay_peers", []))
+            counts["exits"] = count_unique_peers(getattr(proxy_mod, "exit_peers", []))
         except Exception:
             pass
         return counts

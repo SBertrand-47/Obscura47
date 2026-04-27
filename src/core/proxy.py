@@ -516,7 +516,14 @@ def handle_connect(client_socket):
             "request_id": request_id,
         }
 
-        start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route)
+        route = start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route)
+        if not route:
+            log.warning("CONNECT refused: could not open tunnel to %s:%s", host, port)
+            with pending_lock:
+                pending_requests.pop(request_id, None)
+            client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
         started = time.time()
         max_seconds = TUNNEL_MAX_SECONDS
         with pending_lock:
