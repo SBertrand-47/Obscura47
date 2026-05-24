@@ -325,17 +325,36 @@ class HiddenServiceHost:
     # ── Startup ───────────────────────────────────────────────────
 
     def _pick_intro_points(self, peers: list[dict], count: int) -> list[dict]:
-        candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
+        from src.core.internet_discovery import is_self_peer
+        candidates = [
+            p for p in peers
+            if p.get('role') == 'node' and p.get('pub') and not is_self_peer(p)
+        ]
+        if not candidates:
+            # All nodes resolve to self - fall back so the host can still
+            # publish an intro (it will fail to reach itself, but at least
+            # we surface the empty-network condition via the warning path).
+            candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
         if not candidates:
             return []
         random.shuffle(candidates)
         return candidates[:count]
 
-    def establish(self, peers: list[dict] | None = None) -> bool:
-        """Open intro circuits to several relays so clients have a choice."""
+    def establish(self, peers: list[dict] | None = None,
+                  *, refresh: bool = False) -> bool:
+        """Open intro circuits to several relays so clients have a choice.
+
+        When ``refresh=True``, drop any previously-tracked intro circuits
+        first - used by the republish loop to keep WS connections warm
+        (the WS pool idle-closes connections after a minute, which would
+        otherwise sever the intro channel and silently strand the host).
+        """
         if peers is None:
             peers = fetch_peers_from_registry()
         self._relay_pool = [p for p in peers if p.get('pub')]
+        if refresh:
+            self._intro_circuits.clear()
+            self._intro_peers.clear()
         intros = self._pick_intro_points(self._relay_pool, INTRO_POINT_COUNT)
         if not intros:
             log.error("No suitable intro points among peers")
@@ -417,10 +436,18 @@ class HiddenServiceHost:
                  self.address, self.target_host, self.target_port)
 
         def republish_loop():
+            # Refresh more often than CHANNEL_IDLE_CLOSE_SECONDS (60s) so the
+            # intro WS connections stay warm - if they idle-close, the
+            # descriptor still points at the relay but introduces have no
+            # path back to the host and dials silently time out.
+            from src.utils.config import CHANNEL_IDLE_CLOSE_SECONDS
+            interval = max(20, min(DESCRIPTOR_TTL // 2,
+                                   int(CHANNEL_IDLE_CLOSE_SECONDS) - 10))
             while not self._stopped.is_set():
-                time.sleep(max(60, DESCRIPTOR_TTL // 2))
+                time.sleep(interval)
                 if self._stopped.is_set():
                     break
+                self.establish(refresh=True)
                 self.publish_descriptor()
         threading.Thread(target=republish_loop, daemon=True).start()
 
