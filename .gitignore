@@ -73,3 +73,6 @@ folder_structure.txt
 
 # Build artifacts
 *.spec.bak
+
+#Vision file
+building.md

@@ -108,11 +108,15 @@ def _pick_rendezvous_point(
 ) -> dict | None:
     # Accept any peer with host/port/pub. relay_peers by convention holds
     # node relays; registry-sourced peers also carry role='node'.
+    # Self-peers are filtered too - we cannot rendezvous through our own
+    # NAT-bound relay from this machine.
+    from src.core.internet_discovery import is_self_peer
     candidates = [
         p for p in peers
         if p.get('pub') and p.get('host') and p.get('port')
         and (p.get('role') in (None, 'node'))
         and (p.get('host'), p.get('port')) not in exclude
+        and not is_self_peer(p)
     ]
     if not candidates:
         return None
@@ -143,7 +147,12 @@ def dial_hidden_service(
         log.warning("Descriptor for %s missing pubkey", addr)
         return None
 
-    intro_point = random.choice(intros)
+    # Prefer intro points that aren't us - dialing our own relay would
+    # NAT-loop. Fall back to any intro if all of them resolve to self
+    # (better to try and fail than refuse to dial).
+    from src.core.internet_discovery import is_self_peer
+    non_self_intros = [p for p in intros if not is_self_peer(p)]
+    intro_point = random.choice(non_self_intros or intros)
 
     if peers is None:
         peers = fetch_peers_from_registry() or []
