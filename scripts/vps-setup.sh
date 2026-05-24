@@ -65,6 +65,11 @@ OBSCURA_REGISTRY_ADMIN_KEY=CHANGE_ME_TO_A_STRONG_SECRET
 OBSCURA_EXIT_LISTEN_PORT=6000
 OBSCURA_EXIT_WS_PORT=6001
 
+# Relay node - gives the public network a reachable HS intro point so
+# users behind NAT can host services that are dialable from anywhere.
+OBSCURA_NODE_LISTEN_PORT=5001
+OBSCURA_NODE_WS_PORT=5002
+
 # Security: block exit connections to private IPs
 OBSCURA_EXIT_DENY_PRIVATE_IPS=true
 
@@ -73,8 +78,11 @@ OBSCURA_EXIT_EGRESS_AUDIT_ENABLED=true
 OBSCURA_AUDIT_RETENTION_DAYS=14
 
 # Data paths (all under /var/lib/obscura47 for ProtectSystem=strict compatibility)
+# Distinct key files per role so a compromise of one role does not pivot
+# to the other.
 OBSCURA_REGISTRY_DB_PATH=/var/lib/obscura47/registry.db
 OBSCURA_EXIT_KEY_PATH=/var/lib/obscura47/exit_key.pem
+OBSCURA_NODE_KEY_PATH=/var/lib/obscura47/node_key.pem
 OBSCURA_AUDIT_LOG_DIR=/var/lib/obscura47/audit
 
 # TLS (uncomment and set paths when you have certs)
@@ -95,6 +103,10 @@ echo "[+] Systemd service installed and enabled"
 echo ""
 echo "=== Setup complete ==="
 echo "  1. Edit $APP_DIR/.env (set OBSCURA_REGISTRY_ADMIN_KEY)"
-echo "  2. Start: systemctl start obscura47-server"
-echo "  3. Logs:  journalctl -u obscura47-server -f"
+echo "  2. Open firewall ports for the relay node:"
+echo "       ufw allow 5001/tcp   # node TCP"
+echo "       ufw allow 5002/tcp   # node WebSocket"
+echo "     (exit ports 6000/6001 and registry 8470/443 should already be open)"
+echo "  3. Start: systemctl start obscura47-server"
+echo "  4. Logs:  journalctl -u obscura47-server -f"
 echo ""
