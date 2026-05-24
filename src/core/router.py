@@ -210,7 +210,7 @@ class Router:
                 sealed = onion_encrypt_for_peer(route[i]['pub'], json.dumps(layer_plain))
                 inner = sealed
 
-            # inner is already sealed for route[0] — send directly
+            # inner is already sealed for route[0] - send directly
             envelope = {"encrypted_data": inner}
             ws_client = self._ws_client()
             sent = (
@@ -516,8 +516,8 @@ def channel_idle_sweeper():
 def start_tunnel(destination, peers, request_id: str, host: str, port: int, return_path: dict, route=None):
     """Start a tunnel by sending a CONNECT_INIT frame along a fixed route.
 
-    envelope.route holds the hops *after* the first hop — i.e. what the first
-    hop must forward through — so each receiving hop pops route[0] to find
+    envelope.route holds the hops *after* the first hop - i.e. what the first
+    hop must forward through - so each receiving hop pops route[0] to find
     its next destination, with no self-loop.
     """
     if route is None:

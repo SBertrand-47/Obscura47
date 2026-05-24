@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-#  Obscura47 — Linux Build Script
+#  Obscura47 - Linux Build Script
 #  Produces: dist/Obscura47-CLI   (single binary)
 #
 #  Prerequisites:
@@ -12,7 +12,7 @@ set -e
 
 echo ""
 echo "============================================"
-echo "  Obscura47 — Linux Build"
+echo "  Obscura47 - Linux Build"
 echo "============================================"
 echo ""
 

@@ -60,7 +60,7 @@ class ObscuraNode:
         # When a tunnel CONNECT arrives on an inbound connection, we record
         # the send_back function (TCP socket writer or WS reverse_send) so
         # that later reverse_data / reverse_close frames can flow back
-        # toward the proxy on the *same* connection — no new inbound connect.
+        # toward the proxy on the *same* connection - no new inbound connect.
         self._reverse_channels = {}
         self._reverse_lock = threading.Lock()
 
@@ -204,7 +204,7 @@ class ObscuraNode:
             log.warning("Invalid next_hop format; dropping")
             return
 
-        # Hidden-service envelope — same route/request_id shape as tunnels,
+        # Hidden-service envelope - same route/request_id shape as tunnels,
         # terminates at this node (intro or rendezvous point) instead of
         # opening TCP.
         HS_FRAME_TYPES = (
@@ -216,7 +216,7 @@ class ObscuraNode:
             self._process_hs_frame(layer, send_back)
             return
 
-        # Tunnel envelope (type + route) — walk the route and forward
+        # Tunnel envelope (type + route) - walk the route and forward
         if isinstance(layer, dict) and layer.get('type') in ('connect', 'data', 'close') and isinstance(layer.get('route'), list):
             route = layer['route']
             req_id = layer.get("request_id", "")
@@ -312,7 +312,7 @@ class ObscuraNode:
     def _hs_terminal_introduce(self, layer: dict):
         """Intro point: relay the client's introduce blob to the host.
 
-        The introduce_payload is sealed to the service pubkey — this node
+        The introduce_payload is sealed to the service pubkey - this node
         cannot read it. We forward it along the host's intro circuit as
         reverse_data so the host can decrypt and react.
         """
@@ -335,7 +335,7 @@ class ObscuraNode:
         # Acknowledge to the client along its intro circuit. The client
         # only learns that the introduce was delivered, nothing else.
         if client_req:
-            # We may not have the client's pub stored — introduce circuits
+            # We may not have the client's pub stored - introduce circuits
             # aren't used for data, so best-effort only.
             pass
         log.info("Relayed hs_introduce for %s to host (host_req=%s)", service_addr, host_req)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Obscura47 — Quick Join
+Obscura47 - Quick Join
 Run this script to instantly join the Obscura network.
 
 Usage:
@@ -24,7 +24,7 @@ Usage:
     python join_network.py directory list directory.obscura [query]    # Browse listings
     python join_network.py directory get directory.obscura site.obscura # Show one listing
 
-No build step required — runs directly from source.
+No build step required - runs directly from source.
 """
 
 import sys
@@ -55,13 +55,14 @@ BANNER = r"""
 """
 
 ROLES = {
-    "node": "Relay Node — forward encrypted traffic for others",
-    "exit": "Exit Node  — provide internet egress for the network",
-    "proxy": "Proxy      — local SOCKS proxy (browse through Obscura)",
-    "registry": "Registry   — bootstrap server for peer discovery",
-    "directory": "Directory  — publish an opt-in .obscura site directory",
-    "host": "Host       — publish a local site/service as a .obscura address",
-    "open": "Open       — open a .obscura address in a browser",
+    "node": "Relay Node - forward encrypted traffic for others",
+    "exit": "Exit Node  - provide internet egress for the network",
+    "proxy": "Proxy      - local SOCKS proxy (browse through Obscura)",
+    "registry": "Registry   - bootstrap server for peer discovery",
+    "directory": "Directory  - publish an opt-in .obscura site directory",
+    "host": "Host       - publish a local site/service as a .obscura address",
+    "open": "Open       - open a .obscura address in a browser",
+    "diagnose": "Diagnose   - walk the registry/HS lookup path for an address",
 }
 
 
@@ -700,13 +701,13 @@ def interactive_menu():
     """Show an interactive menu for role selection."""
     print(BANNER)
     print("  Choose how to join the Obscura network:\n")
-    print("    1) Relay Node      — Help others by forwarding traffic")
-    print("    2) Exit Node       — Provide internet access to the network")
-    print("    3) Relay + Exit    — Run both (recommended for contributors)")
-    print("    4) Full Stack      — Run all components (node + exit + proxy + registry)")
-    print("    5) Proxy Only      — Browse the internet through Obscura")
-    print("    6) Host .obscura   — Publish a local site/service")
-    print("    7) Directory       — Run an opt-in site directory")
+    print("    1) Relay Node      - Help others by forwarding traffic")
+    print("    2) Exit Node       - Provide internet access to the network")
+    print("    3) Relay + Exit    - Run both (recommended for contributors)")
+    print("    4) Full Stack      - Run all components (node + exit + proxy + registry)")
+    print("    5) Proxy Only      - Browse the internet through Obscura")
+    print("    6) Host .obscura   - Publish a local site/service")
+    print("    7) Directory       - Run an opt-in site directory")
     print()
 
     choice = input("  Enter choice [1-7]: ").strip()
@@ -759,6 +760,19 @@ def _strip_host_flags(argv: list[str]) -> list[str]:
     return _strip_flags(argv, ("--name", "--key"))
 
 
+def _run_diagnose(addr: str):
+    """Walk the full `.obscura` lookup path and print which step fails."""
+    from src.utils.diagnose import run_diagnostics, format_report_text
+
+    report = run_diagnostics(addr if addr else None)
+    print()
+    print(format_report_text(report))
+    if not addr:
+        print()
+        print("  Tip: pass a .obscura address to also test descriptor lookup.")
+        print("       e.g.  python join_network.py diagnose alpha.obscura")
+
+
 def main():
     signal.signal(signal.SIGINT, lambda s, f: (print("\n\n  Shutting down..."), sys.exit(0)))
 
@@ -782,6 +796,10 @@ def main():
                 print("  Browser launched with .obscura proxy routing.")
             else:
                 print("  [!] Could not start the proxy or open the browser.")
+            return
+        elif arg == "diagnose":
+            addr = sys.argv[2] if len(sys.argv) >= 3 else ""
+            _run_diagnose(addr)
             return
         elif arg == "directory":
             sub = sys.argv[2].lower() if len(sys.argv) >= 3 else ""

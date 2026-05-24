@@ -3,14 +3,14 @@
 Picks the right kernel-level backend for the host platform, applies
 it, and then hands off to the same code path :mod:`src.agent.__main__`
 uses. Layer 1 (the in-process Python patcher) is always engaged on
-top — Layer 2 protects against escapes that would defeat Layer 1.
+top - Layer 2 protects against escapes that would defeat Layer 1.
 
 Backends:
 
-* macOS — re-exec under :program:`/usr/bin/sandbox-exec` with a
+* macOS - re-exec under :program:`/usr/bin/sandbox-exec` with a
   generated profile.
-* Linux — apply Landlock + ``PR_SET_NO_NEW_PRIVS`` in-process.
-* Anything else — log a warning and continue with Layer 1 only.
+* Linux - apply Landlock + ``PR_SET_NO_NEW_PRIVS`` in-process.
+* Anything else - log a warning and continue with Layer 1 only.
 
 CLI flags mirror :mod:`src.agent.__main__` plus the
 ``--sandbox-*`` family that builds the :class:`SandboxPolicy`.
@@ -32,7 +32,7 @@ def add_sandbox_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the standard ``--sandbox-*`` flag set to ``parser``.
 
     Shared by every agent CLI so policy syntax is consistent across
-    binaries. Does not enable sandboxing on its own — the caller is
+    binaries. Does not enable sandboxing on its own - the caller is
     responsible for passing ``policy=`` into :class:`AgentRuntime`.
     """
     group = parser.add_argument_group("sandbox")
@@ -125,7 +125,7 @@ def apply_layer2(policy: SandboxPolicy) -> bool:
     """Engage the OS-native sandbox for the current platform.
 
     Returns ``True`` on best-effort success (which on macOS means a
-    successful re-exec — control does not return to the original
+    successful re-exec - control does not return to the original
     process), ``False`` when the platform has no Layer 2 backend or
     activation failed.
     """

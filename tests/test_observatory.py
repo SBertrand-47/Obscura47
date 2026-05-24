@@ -327,7 +327,7 @@ def test_state_clear_resets_buffer_and_counters():
 
 
 # ---------------------------------------------------------------------------
-# build_observatory_app — wire-shape tests
+# build_observatory_app - wire-shape tests
 # ---------------------------------------------------------------------------
 
 
@@ -702,7 +702,7 @@ def test_build_observer_from_flags_jsonl_only(tmp_path):
 def test_build_observer_from_flags_remote_only(monkeypatch):
     """A remote-only configuration must build a single-sink observer.
 
-    We don't actually need to dial anything in this test — the
+    We don't actually need to dial anything in this test - the
     RemoteSink will spawn a worker thread but stays idle until events
     arrive, so a no-op AgentClient is enough.
     """

@@ -4,7 +4,7 @@ const STORAGE_KEY = "obscura47_admin_key";
 const REFRESH_MS = 10000;
 
 function formatAge(seconds) {
-  if (!Number.isFinite(seconds)) return "—";
+  if (!Number.isFinite(seconds)) return "-";
   if (seconds < 60) return `${Math.max(0, Math.round(seconds))}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h`;
@@ -313,11 +313,11 @@ export default function App() {
       {error && <div className="error">{error}</div>}
 
       <div className="stats">
-        <Stat label="Total peers" value={summary.total ?? "—"} />
-        <Stat label="Live" value={summary.live ?? "—"} accent="accent" />
-        <Stat label="Stale" value={summary.stale ?? "—"} />
-        <Stat label="Pending exits" value={summary.pending_exits ?? "—"} accent={summary.pending_exits > 0 ? "pending" : ""} />
-        <Stat label="Approved exits" value={summary.approved_exits ?? "—"} accent="accent" />
+        <Stat label="Total peers" value={summary.total ?? "-"} />
+        <Stat label="Live" value={summary.live ?? "-"} accent="accent" />
+        <Stat label="Stale" value={summary.stale ?? "-"} />
+        <Stat label="Pending exits" value={summary.pending_exits ?? "-"} accent={summary.pending_exits > 0 ? "pending" : ""} />
+        <Stat label="Approved exits" value={summary.approved_exits ?? "-"} accent="accent" />
       </div>
 
       <section>

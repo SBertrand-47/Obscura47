@@ -37,7 +37,7 @@ FIRST_RUN_BANNER = """\
   │  NEW SITE KEY CREATED                                          │
   │                                                                │
   │  Your .pem file IS your .obscura address.                      │
-  │  If you lose it, you lose the address forever — there is no    │
+  │  If you lose it, you lose the address forever - there is no    │
   │  recovery. Back it up somewhere safe.                          │
   │                                                                │
   │  Key file:  {key_path:<50s}│
