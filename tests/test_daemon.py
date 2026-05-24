@@ -1,4 +1,4 @@
-"""Tests for src.utils.daemon — service template generation."""
+"""Tests for src.utils.daemon - service template generation."""
 
 from __future__ import annotations
 

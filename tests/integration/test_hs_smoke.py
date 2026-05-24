@@ -119,7 +119,7 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
 
     echo_sock = _start_echo_server(ECHO_PORT)
     try:
-        # 1. Start three nodes — intro, rendezvous, and a middle relay
+        # 1. Start three nodes - intro, rendezvous, and a middle relay
         # used to pad multi-hop HS circuits. Each ObscuraNode binds its
         # WS server at construction, so we patch the module-level
         # NODE_WS_PORT between constructions to avoid port collisions.
@@ -160,7 +160,7 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
             key_path=str(tmp_path / "hs.pem"),
         )
 
-        # 3. Minimal HS client — collects decrypted inner payloads.
+        # 3. Minimal HS client - collects decrypted inner payloads.
         client_priv, client_pub = ecc_generate_keypair()
         received_chunks: list[bytes] = []
         received_close = threading.Event()
@@ -222,7 +222,7 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         assert host.publish_descriptor()
         time.sleep(0.3)
 
-        # 5. Dial the hidden service — rv must be distinct from intro.
+        # 5. Dial the hidden service - rv must be distinct from intro.
         dialed = rv_mod.dial_hidden_service(
             host.address, client_pub, peers=all_peers)
         assert dialed is not None, "dial_hidden_service returned None"

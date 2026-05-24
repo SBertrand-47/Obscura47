@@ -1,4 +1,4 @@
-"""Tests for src.utils.vanity — vanity address miner."""
+"""Tests for src.utils.vanity - vanity address miner."""
 
 from __future__ import annotations
 

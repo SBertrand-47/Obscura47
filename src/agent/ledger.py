@@ -5,7 +5,7 @@ A small in-network token ledger that any operator can publish as a
 fingerprint of the caller's service public key, so any client whose
 identity has already been surfaced to the application layer (i.e.
 ``Request.caller_pub`` is populated by the rendezvous handshake) owns
-the matching account automatically — no separate enrolment step.
+the matching account automatically - no separate enrolment step.
 
 The protocol is intentionally minimal:
 
@@ -23,15 +23,15 @@ on any blessed central server, and ledger instances do not federate.
 
 Wire surface (mounted via :class:`~src.agent.tools.ToolRegistry`):
 
-* ``balance(account?: string) -> {account, balance}``  — public read.
+* ``balance(account?: string) -> {account, balance}``  - public read.
 * ``transfer(to: string, amount: int, memo?: string, nonce: string)``
-  — caller pays ``amount`` tokens to ``to``. Caller is the
+  - caller pays ``amount`` tokens to ``to``. Caller is the
   authenticated ``caller_fingerprint``; direct local hits without a
   rendezvous identity are rejected.
-* ``history(account?: string, limit?: int) -> [tx ...]``  — append-only
+* ``history(account?: string, limit?: int) -> [tx ...]``  - append-only
   log filtered by ``account`` (defaults to caller).
-* ``mint(to: string, amount: int, memo?: string)`` — admin-only.
-* Topic ``transactions`` — every commit fans out the canonical tx
+* ``mint(to: string, amount: int, memo?: string)`` - admin-only.
+* Topic ``transactions`` - every commit fans out the canonical tx
   envelope to subscribers, suitable for downstream observability.
 """
 
@@ -121,7 +121,7 @@ class LedgerState:
 
     Account ids are SHA-256 hex fingerprints (64 lowercase hex chars).
     Amounts are non-negative integers. Idempotency is per
-    ``(from_account, nonce)`` — a transfer with the same pair always
+    ``(from_account, nonce)`` - a transfer with the same pair always
     returns the previously committed transaction without re-debiting.
 
     Parameters

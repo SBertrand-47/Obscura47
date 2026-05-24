@@ -47,7 +47,11 @@ from src.core.router import (
     set_reverse_frame_callback,
 )
 from src.core.ws_transport import WSClient
-from src.core.internet_discovery import fetch_peers_from_registry
+from src.core.internet_discovery import (
+    fetch_peers_from_registry,
+    registry_request_json,
+    RegistryHTTPError,
+)
 from src.utils.config import (
     REGISTRY_URL,
     CHANNEL_QUEUE_MAX,
@@ -376,21 +380,29 @@ class HiddenServiceHost:
             ttl=DESCRIPTOR_TTL,
         )
         body = json.dumps(desc).encode()
-        req = urllib.request.Request(
-            f"{REGISTRY_URL}/hs/descriptor",
-            data=body,
-            headers={'Content-Type': 'application/json'},
-            method='POST',
-        )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-            log.info("Descriptor published for %s (%d intros)",
-                     self.address, len(intro))
-            return True
-        except Exception as e:
-            log.error("Failed to publish descriptor: %s", e)
+            registry_request_json(
+                f"{REGISTRY_URL}/hs/descriptor",
+                method='POST',
+                data=body,
+                extra_headers={'Content-Type': 'application/json'},
+                timeout=10,
+            )
+        except RegistryHTTPError as e:
+            if e.kind == "content_type":
+                log.error(
+                    "Descriptor publish for %s rejected non-JSON response (%s). "
+                    "The deployed registry is likely missing the /hs/descriptor "
+                    "endpoint - redeploy registry_server.py.",
+                    self.address, e.content_type,
+                )
+            else:
+                log.error("Failed to publish descriptor for %s [%s]: %s",
+                          self.address, e.kind, e)
             return False
+        log.info("Descriptor published for %s (%d intros)",
+                 self.address, len(intro))
+        return True
 
     def run(self):
         set_reverse_frame_callback(self._on_tcp_reverse)

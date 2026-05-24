@@ -1,5 +1,5 @@
 """
-Obscura47 — VPS Server Launcher
+Obscura47 - VPS Server Launcher
 
 Runs both the bootstrap registry and the exit node on a single server.
 This is the recommended way to deploy on your VPS.

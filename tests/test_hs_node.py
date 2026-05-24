@@ -1,7 +1,7 @@
 """Unit tests for hidden-service relay handling in ObscuraNode.
 
 Exercises the intro-point and rendezvous-point logic directly by
-calling the internal handlers — no real sockets or circuits.
+calling the internal handlers - no real sockets or circuits.
 """
 import json
 import types

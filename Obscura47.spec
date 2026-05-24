@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Obscura47 — PyInstaller Spec File (GUI)
+Obscura47 - PyInstaller Spec File (GUI)
 Builds the windowed desktop app.
 
 Usage:  pyinstaller obscura47.spec
