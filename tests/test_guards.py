@@ -67,7 +67,7 @@ class TestGuardSet:
         # Present a pool of completely different peers: no guard is live,
         # but the set is already full so no new guards get pinned.
         # We expect pick_first_hop to return None (no live guards),
-        # NOT fall back to an arbitrary candidate — that would defeat pinning.
+        # NOT fall back to an arbitrary candidate - that would defeat pinning.
         brand_new_pool = [{"host": "192.168.99.1", "port": 9999}]
         # Fill is gated on empty slots; since slots are full, brand_new_pool
         # is ignored. All current guards are absent from the pool → no live.

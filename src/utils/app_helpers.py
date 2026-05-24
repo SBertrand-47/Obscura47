@@ -1,4 +1,4 @@
-"""Pure helper functions for the desktop app — no tkinter dependency."""
+"""Pure helper functions for the desktop app - no tkinter dependency."""
 
 from __future__ import annotations
 
@@ -56,6 +56,9 @@ def build_quick_start_text(*, connected: bool) -> str:
         "  1. Click Open .obscura Address\n"
         "  2. Enter an address like alpha.obscura\n"
         "  3. Obscura47 opens your browser with the right routing\n\n"
+        "Tip: do not change Firefox/Chrome proxy settings yourself -\n"
+        "the launcher handles routing and prefixes http:// for you. If\n"
+        "the page does not load, use Diagnose Connection.\n\n"
         "Browse discovery:\n"
         "  1. Click Browse Directory\n"
         "  2. Enter a directory address\n"
