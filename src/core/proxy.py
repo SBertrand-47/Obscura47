@@ -44,7 +44,7 @@ PROXY_PORT = CFG_PROXY_PORT
 
 from src.utils.config import PROXY_KEY_PATH
 
-# Proxy's own ECC keypair,used to decrypt responses routed back through relays
+# Proxy's own ECC keypair - used to decrypt responses routed back through relays
 _proxy_priv, _proxy_pub_pem = ecc_load_or_create_keypair(PROXY_KEY_PATH)
 DISCOVERY_PORT = CFG_DISCOVERY_PORT  # Discovery port for proxies
 NODE_DISCOVERY_PORT = CFG_NODE_DISCOVERY_PORT
@@ -85,6 +85,15 @@ def log_selected_exit(prefix: str, destination: dict):
         log.info(f"{prefix} exit {destination['host']}:{destination['port']} | rtt={rtt:.1f}ms | success={ok}/{total} | backoff={backoff_left}s")
     except Exception:
         pass
+
+_HTTP_PROXY_METHODS = frozenset({
+    "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH",
+})
+_HTTP_MAX_HEADER_BYTES = 65536
+_HTTP_HOP_BY_HOP_HEADERS = frozenset({
+    "proxy-connection", "proxy-authorization", "proxy-authenticate",
+    "connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade",
+})
 
 pending_requests = {}  # request_id -> client_socket
 pending_meta = {}       # request_id -> {'started': ts, 'bytes_up': int, 'bytes_down': int, 'last_activity': ts, 'exit': hostport}
@@ -163,11 +172,11 @@ def choose_best_exit():
     def score(key):
         stats = exit_health.get(key)
         if not stats:
-            return (0.0, 0.0)  # unseen,prefer over known-bad exits
+            return (0.0, 0.0)  # unseen - prefer over known-bad exits
         if stats.get('backoff_until', 0.0) > now:
             return None  # in backoff, exclude
         # Exclude exits that have never succeeded and already failed
-        # multiple times,they are likely unreachable (wrong address
+        # multiple times - they are likely unreachable (wrong address
         # family, firewall, etc.)
         if stats.get('ok', 0) == 0 and stats.get('fail', 0) >= 2:
             return None
@@ -211,8 +220,8 @@ def _handle_exit_response_data(raw_data):
     else:
         log.debug(f"Exit frame | type={typ} | request_id={request_id}")
 
-    # rv_ready fires before the client socket is registered,dial is
-    # still blocking waiting for it,so handle it before the pending
+    # rv_ready fires before the client socket is registered - dial is
+    # still blocking waiting for it - so handle it before the pending
     # lookup.
     if typ == "rv_ready":
         notify_rv_ready(request_id)
@@ -283,7 +292,7 @@ def _handle_reverse_response(frame: dict):
 
     The frame's ``encrypted_response`` is decrypted with the proxy's private
     key and then dispatched through the normal response handler.  This is the
-    primary path when the proxy is behind NAT,responses flow back on the
+    primary path when the proxy is behind NAT - responses flow back on the
     same TCP/WS connections used to send requests, so no new inbound
     connections to the proxy are needed.
     """
@@ -457,7 +466,8 @@ def handle_new_client(client_socket):
             client_socket.close()
             return
         first_line = peek.decode(errors="ignore").split("\r\n", 1)[0]
-        if first_line.upper().startswith("CONNECT "):
+        method = first_line.split(" ", 1)[0].upper() if first_line else ""
+        if method == "CONNECT":
             active_tunnels += 1
             metrics['active_tunnels'] = active_tunnels
             metrics['total_tunnels'] += 1
@@ -468,8 +478,23 @@ def handle_new_client(client_socket):
                 active_tunnels -= 1
                 metrics['active_tunnels'] = active_tunnels
                 per_ip_tunnels[peer_ip] = max(0, per_ip_tunnels.get(peer_ip, 1) - 1)
+        elif method in _HTTP_PROXY_METHODS:
+            # Plain HTTP proxy request (e.g. `GET http://addr.obscura/`).
+            # Browsers issue these for `http://` URLs; we bridge `.obscura`
+            # ones into an HS tunnel and refuse everything else, since
+            # clearnet HTTP should be tunneled via CONNECT (so the exit
+            # sees only ciphertext from this proxy's perspective).
+            active_tunnels += 1
+            metrics['active_tunnels'] = active_tunnels
+            metrics['total_tunnels'] += 1
+            per_ip_tunnels[peer_ip] = per_ip_tunnels.get(peer_ip, 0) + 1
+            try:
+                handle_http_proxy(client_socket)
+            finally:
+                active_tunnels -= 1
+                metrics['active_tunnels'] = active_tunnels
+                per_ip_tunnels[peer_ip] = max(0, per_ip_tunnels.get(peer_ip, 1) - 1)
         else:
-            # Only CONNECT tunnels are supported (no legacy HTTP relay)
             client_socket.send(b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n")
             client_socket.close()
     except Exception as e:
@@ -487,7 +512,7 @@ def handle_connect(client_socket):
         host, port_str = target.split(":")
         port = int(port_str)
 
-        # Hidden-service branch,dial a `.obscura` address via rendezvous
+        # Hidden-service branch - dial a `.obscura` address via rendezvous
         # instead of opening a clearnet exit tunnel.
         if is_obscura_address(host):
             _handle_hs_connect(client_socket, host, port)
@@ -511,6 +536,13 @@ def handle_connect(client_socket):
         request_id = str(time.time_ns())
         with pending_lock:
             pending_requests[request_id] = client_socket
+            pending_meta[request_id] = {
+                'bytes_up': 0,
+                'bytes_down': 0,
+                'started': time.time(),
+                'last_activity': time.time(),
+                'exit': None,
+            }
 
         route = build_route47(relay_peers)
         if not route:
@@ -518,12 +550,13 @@ def handle_connect(client_socket):
             # build a direct single-hop route through the exit itself so
             # traffic can still flow instead of returning 503.
             if exit_peers:
-                log.warning("No relay peers,using direct route to exit for %s:%s", host, port)
+                log.warning("No relay peers - using direct route to exit for %s:%s", host, port)
                 route = [destination]
             else:
                 log.warning("CONNECT refused: no relay route available for %s:%s", host, port)
                 with pending_lock:
                     pending_requests.pop(request_id, None)
+                    pending_meta.pop(request_id, None)
                 client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
                 client_socket.close()
                 return
@@ -539,6 +572,7 @@ def handle_connect(client_socket):
             log.warning("CONNECT refused: could not open tunnel to %s:%s", host, port)
             with pending_lock:
                 pending_requests.pop(request_id, None)
+                pending_meta.pop(request_id, None)
             client_socket.send(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
             client_socket.close()
             return
@@ -641,6 +675,211 @@ def _handle_hs_connect(client_socket, addr: str, port: int):
         threading.Thread(target=upstream, daemon=True).start()
     except Exception as e:
         log.error(f"HS CONNECT error: {e}")
+        try:
+            client_socket.close()
+        except Exception:
+            pass
+
+
+def _read_http_headers(client_socket) -> bytes | None:
+    """Read until the end of the HTTP header block, returning the raw bytes.
+
+    Returns ``None`` on socket error or oversized headers. The body bytes
+    that arrived in the same recv() are included after the blank-line
+    delimiter - the caller separates them.
+    """
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        try:
+            chunk = client_socket.recv(4096)
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf += chunk
+        if len(buf) > _HTTP_MAX_HEADER_BYTES:
+            try:
+                client_socket.send(
+                    b"HTTP/1.1 431 Request Header Fields Too Large\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+            except OSError:
+                pass
+            return None
+    return buf
+
+
+def _rewrite_http_request(
+    raw: bytes, host_for_header: str,
+) -> tuple[bytes, bytes] | None:
+    """Convert a proxy-style HTTP request into an origin-form request.
+
+    ``raw`` is everything we read so far (headers + maybe the start of the
+    body). On success returns ``(new_headers, body_prefix)``; on malformed
+    input returns ``None``.
+
+    Hop-by-hop headers are stripped, ``Connection: close`` is forced (the
+    HS tunnel is one-shot - keep-alive would leave the rendezvous circuit
+    hanging), and the request line is rewritten from absolute URI to the
+    relative path the origin server expects.
+    """
+    from urllib.parse import urlparse
+
+    header_blob, sep, body_prefix = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return None
+    try:
+        text = header_blob.decode("latin-1")
+    except Exception:
+        return None
+    lines = text.split("\r\n")
+    if not lines:
+        return None
+    parts = lines[0].split(" ", 2)
+    if len(parts) != 3:
+        return None
+    method, uri, version = parts
+    parsed = urlparse(uri)
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+
+    new_lines = [f"{method} {path} {version}"]
+    seen_host = False
+    for line in lines[1:]:
+        if not line:
+            continue
+        name, _, _value = line.partition(":")
+        lname = name.strip().lower()
+        if lname in _HTTP_HOP_BY_HOP_HEADERS:
+            continue
+        if lname == "host":
+            seen_host = True
+        new_lines.append(line)
+    if not seen_host:
+        new_lines.append(f"Host: {host_for_header}")
+    new_lines.append("Connection: close")
+    new_headers = ("\r\n".join(new_lines) + "\r\n\r\n").encode("latin-1")
+    return new_headers, body_prefix
+
+
+def handle_http_proxy(client_socket):
+    """Handle a plain-HTTP proxy request for a `.obscura` address.
+
+    Browsers send ``GET http://addr/path HTTP/1.1`` for HTTP URLs even when
+    a proxy is configured (CONNECT is reserved for tunnels). This handler
+    bridges those requests to the same hidden-service path that powers
+    CONNECT - clearnet HTTP via this proxy is intentionally refused so the
+    exit-vs-onion separation stays clean.
+    """
+    try:
+        raw = _read_http_headers(client_socket)
+        if raw is None:
+            try:
+                client_socket.close()
+            except OSError:
+                pass
+            return
+
+        first_line = raw.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+        from urllib.parse import urlparse
+
+        parts = first_line.split(" ", 2)
+        if len(parts) != 3:
+            client_socket.send(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
+        _method, uri, _version = parts
+        parsed = urlparse(uri)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port or 80
+
+        if not is_obscura_address(host):
+            log.info(
+                "HTTP proxy refused non-.obscura target %r - use HTTPS so the "
+                "browser issues CONNECT.", host or uri,
+            )
+            client_socket.send(
+                b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n"
+                b"Content-Type: text/plain\r\nContent-Length: 96\r\n\r\n"
+                b"This proxy only forwards plain HTTP for .obscura hidden "
+                b"services. Use HTTPS for clearnet sites.\n"
+            )
+            client_socket.close()
+            return
+
+        rewritten = _rewrite_http_request(raw, host)
+        if rewritten is None:
+            client_socket.send(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
+        new_headers, body_prefix = rewritten
+
+        local_peers = list(relay_peers) if relay_peers else None
+        dialed = dial_hidden_service(host, _proxy_pub_pem, peers=local_peers)
+        if not dialed:
+            client_socket.send(
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n"
+                b"Content-Type: text/plain\r\n\r\n"
+                b"Obscura47: could not reach the .obscura host. "
+                b"Run 'python join_network.py diagnose " + host.encode("latin-1") +
+                b"' for details.\n"
+            )
+            client_socket.close()
+            return
+        route, request_id, service_pub = dialed
+        if not service_pub:
+            client_socket.send(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            client_socket.close()
+            return
+
+        with pending_lock:
+            pending_requests[request_id] = client_socket
+            pending_meta[request_id] = {
+                'bytes_up': 0, 'bytes_down': 0,
+                'started': time.time(), 'last_activity': time.time(),
+                'exit': f"hs:{host}",
+            }
+            hs_session_pub[request_id] = service_pub
+
+        # Push the rewritten request (headers + any body bytes we already
+        # drained from the socket while reading headers) before starting
+        # the upstream pump, so the host sees them in order.
+        initial = new_headers + body_prefix
+        sealed = onion_encrypt_for_peer(
+            service_pub, base64.b64encode(initial).decode(),
+        )
+        send_hs_chunk(route, request_id, sealed)
+        with pending_lock:
+            if request_id in pending_meta:
+                pending_meta[request_id]['bytes_up'] += len(initial)
+                metrics['bytes_up'] += len(initial)
+
+        def upstream():
+            try:
+                while True:
+                    chunk = client_socket.recv(8192)
+                    if not chunk:
+                        break
+                    sealed = onion_encrypt_for_peer(
+                        service_pub, base64.b64encode(chunk).decode(),
+                    )
+                    send_hs_chunk(route, request_id, sealed)
+                    with pending_lock:
+                        if request_id in pending_meta:
+                            pending_meta[request_id]['bytes_up'] += len(chunk)
+                            pending_meta[request_id]['last_activity'] = time.time()
+                            metrics['bytes_up'] += len(chunk)
+            except Exception as e:
+                log.warning(f"HTTP-bridge upstream error | {e}")
+            finally:
+                close_hs(route, request_id)
+
+        threading.Thread(target=upstream, daemon=True).start()
+    except Exception as e:
+        log.error(f"HTTP proxy handling error: {e}")
         try:
             client_socket.close()
         except Exception:

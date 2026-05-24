@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Obscura47,One-time VPS setup
+# Obscura47 - One-time VPS setup
 # Run on the VPS as root (or with sudo):
 #   bash vps-setup.sh
 #

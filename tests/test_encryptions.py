@@ -137,7 +137,7 @@ class TestECDSA:
         assert ecdsa_verify(pub, b"msg", "not-base64!") is False
 
     def test_signatures_differ(self):
-        """ECDSA is randomized,same input should produce different signatures."""
+        """ECDSA is randomized - same input should produce different signatures."""
         priv, _ = ecc_generate_keypair()
         sig1 = ecdsa_sign(priv, b"msg")
         sig2 = ecdsa_sign(priv, b"msg")

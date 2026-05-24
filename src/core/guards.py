@@ -1,5 +1,5 @@
 """
-Obscura47,Guard Node Pinning
+Obscura47 - Guard Node Pinning
 
 A client-side (proxy) mechanism that commits to a small persistent set of
 first-hop relays rather than re-sampling every circuit. This mitigates the

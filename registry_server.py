@@ -1,5 +1,5 @@
 """
-Obscura47,Bootstrap Registry Server (FastAPI + SQLite)
+Obscura47 - Bootstrap Registry Server (FastAPI + SQLite)
 
 Drop this single file on any public server (VPS, cloud instance, etc.) and run:
 
@@ -97,7 +97,7 @@ except ImportError:
 
     def _ecdsa_verify(pub_pem: str, message: bytes, signature_b64: str) -> bool:
         raise RuntimeError(
-            "pycryptodome is not installed,ECDSA verification unavailable. "
+            "pycryptodome is not installed - ECDSA verification unavailable. "
             "Install it with: pip install pycryptodome"
         )
 
@@ -203,12 +203,12 @@ async def init_db():
             metadata TEXT
         )
     """)
-    # Additive migration,tolerate existing DBs that pre-date ws_tls
+    # Additive migration - tolerate existing DBs that pre-date ws_tls
     try:
         await DB.execute("ALTER TABLE peers ADD COLUMN ws_tls INTEGER")
     except Exception:
         pass
-    # Additive migration,add approved column for exit node approval system
+    # Additive migration - add approved column for exit node approval system
     try:
         await DB.execute("ALTER TABLE peers ADD COLUMN approved INTEGER DEFAULT 1")
     except Exception:
@@ -654,12 +654,12 @@ async def register_peer(body: PeerRegistration, request: Request):
         # Check if this peer is already registered with the same pubkey (heartbeat)
         existing = await get_peer_by_id(peer_id)
         if existing and existing.get("pub") == body.pub:
-            # Known peer heartbeat,update timestamp without re-auth
+            # Known peer heartbeat - update timestamp without re-auth
             await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
                               body.ws_port, body.ws_tls)
             return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
 
-        # New peer or pubkey change,issue challenge
+        # New peer or pubkey change - issue challenge
         nonce = secrets.token_hex(32)
         _pending_challenges[peer_id] = {
             "nonce": nonce,
@@ -677,7 +677,7 @@ async def register_peer(body: PeerRegistration, request: Request):
         print(f"[registry] Challenge issued for {body.role} at {peer_id}")
         return {"ok": False, "challenge": nonce, "peer_id": peer_id, "your_ip": ip, "registered_host": advertised_host}
 
-    # No public key,register immediately (unauthenticated)
+    # No public key - register immediately (unauthenticated)
     is_new = await get_peer_by_id(peer_id) is None
     await upsert_peer(peer_id, advertised_host, body.port, body.role,
                       ws_port=body.ws_port, ws_tls=body.ws_tls)
@@ -711,7 +711,7 @@ async def verify_registration(body: AuthVerification, request: Request):
         del _pending_challenges[body.peer_id]
         raise HTTPException(403, detail="Invalid signature")
 
-    # Auth passed,register the peer
+    # Auth passed - register the peer
     data = challenge["peer_data"]
     del _pending_challenges[body.peer_id]
 

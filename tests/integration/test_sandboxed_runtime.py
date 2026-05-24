@@ -3,7 +3,7 @@
 Brings up an :class:`AgentApp` with a tool registry and the in-process
 sandbox installed exactly the way :class:`AgentRuntime` would install
 it. The test then drives the local HTTP server with raw HTTP/1.1
-requests (no rendezvous, no proxy,those are exercised by
+requests (no rendezvous, no proxy - those are exercised by
 ``test_agent_runtime.py``) and asserts:
 
 * tools that try to read outside the FS allowlist fail with the

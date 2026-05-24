@@ -29,7 +29,11 @@ import urllib.request
 from typing import Any
 
 from src.core.encryptions import onion_encrypt_for_peer
-from src.core.internet_discovery import fetch_peers_from_registry
+from src.core.internet_discovery import (
+    fetch_peers_from_registry,
+    registry_request_json,
+    RegistryHTTPError,
+)
 from src.core.router import build_hs_route, send_hs_frame
 from src.utils.config import HS_CIRCUIT_HOPS, REGISTRY_URL
 from src.utils.logger import get_logger
@@ -64,12 +68,33 @@ def notify_rv_ready(request_id: str) -> None:
 
 
 def fetch_descriptor(addr: str) -> dict[str, Any] | None:
+    """Fetch and verify a hidden-service descriptor for ``addr``.
+
+    Failure modes are surfaced as warnings with enough detail to tell apart
+    a missing descriptor (HTTP 404), a stale registry deployment that lacks
+    the /hs routes (Cloudflare/nginx fallback HTML on 200), and a transport
+    failure. Returns the verified descriptor dict on success, else None.
+    """
     url = f"{REGISTRY_URL}/hs/descriptor/{addr}"
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            desc = json.loads(resp.read())
-    except Exception as e:
-        log.warning("Descriptor fetch failed for %s: %s", addr, e)
+        desc = registry_request_json(url, method="GET", timeout=10)
+    except RegistryHTTPError as e:
+        if e.kind == "http_status" and e.status == 404:
+            log.warning("Descriptor for %s not found in registry (404)", addr)
+        elif e.kind == "content_type":
+            log.warning(
+                "Descriptor fetch for %s returned non-JSON (%s). The deployed "
+                "registry may not have the /hs/descriptor endpoint - its "
+                "fallback page was served instead. Body preview: %s",
+                addr, e.content_type, e.body_preview,
+            )
+        else:
+            log.warning("Descriptor fetch failed for %s [%s]: %s",
+                        addr, e.kind, e)
+        return None
+
+    if not isinstance(desc, dict):
+        log.warning("Descriptor for %s is not a JSON object", addr)
         return None
     if not verify_descriptor(desc):
         log.warning("Descriptor verification failed for %s", addr)
@@ -128,7 +153,7 @@ def dial_hidden_service(
     )
     if not rv_point:
         # Fall back to any node in the intro list that isn't the picked
-        # intro,small networks may not offer a separate relay.
+        # intro - small networks may not offer a separate relay.
         fallback = [p for p in intros if p is not intro_point]
         if fallback:
             rv_point = random.choice(fallback)
@@ -202,7 +227,7 @@ def dial_hidden_service(
 
 def send_hs_chunk(route: list[dict], request_id: str, sealed_chunk: str) -> bool:
     """Send an hs_data frame along the rendezvous circuit. ``sealed_chunk``
-    is already encrypted to the service pubkey,the rendezvous point
+    is already encrypted to the service pubkey - the rendezvous point
     only relays ciphertext."""
     envelope = {
         'type': 'hs_data',

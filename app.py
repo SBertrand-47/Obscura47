@@ -1,5 +1,5 @@
 """
-Obscura47,Desktop Client
+Obscura47 - Desktop Client
 Launch this file to run the Obscura Network GUI.
 Users join as relay nodes and use the local proxy to browse anonymously.
 Exit node status requires admin approval.
@@ -414,6 +414,7 @@ class ObscuraApp(tk.Tk):
             ("Add Site", self._add_hosted_site),
             ("Publish Site", self._publish_hosted_site),
             ("Remove Site", self._remove_hosted_site_daemon),
+            ("Diagnose Connection", self._diagnose_connection),
         ]
         for col in range(3):
             utility_buttons.grid_columnconfigure(col, weight=1, uniform="quick-actions")
@@ -783,7 +784,10 @@ class ObscuraApp(tk.Tk):
     def _open_visitor(self):
         address = self._prompt_text(
             "Open .obscura Address",
-            "Address or URL to open:",
+            "Address or URL to open:\n\n"
+            "Obscura47 launches your browser pre-configured with the right "
+            "proxy routing - you do not need to change Firefox/Chrome proxy "
+            "settings manually.",
         )
         if not address:
             return
@@ -793,6 +797,72 @@ class ObscuraApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Open .obscura Address", str(exc), parent=self)
             self._log(f"Could not open address: {exc}")
+            return
+        # Offer a follow-up diagnostic - the browser may succeed in
+        # launching but still fail to reach the site if the network
+        # has no live peers or the registry lacks /hs routes.
+        if self._is_obscura_address(address):
+            if messagebox.askyesno(
+                "Open .obscura Address",
+                "Browser launched. If the page does not load, run a "
+                "connection diagnostic now?",
+                parent=self,
+            ):
+                self._diagnose_connection(default_address=address)
+
+    @staticmethod
+    def _is_obscura_address(value: str) -> bool:
+        try:
+            from src.utils.onion_addr import is_obscura_address
+        except Exception:
+            return False
+        candidate = (value or "").strip()
+        # Strip scheme + path so "http://alpha.obscura/x" still matches.
+        if "://" in candidate:
+            candidate = candidate.split("://", 1)[1]
+        candidate = candidate.split("/", 1)[0]
+        return is_obscura_address(candidate)
+
+    def _diagnose_connection(self, default_address: str = ""):
+        """Run the registry/HS lookup walk and show a structured report."""
+        address = self._prompt_text(
+            "Diagnose Connection",
+            "Optional .obscura address to test (leave blank for registry-only):",
+            initial=self._strip_to_obscura(default_address),
+        )
+        # askstring returns None on cancel, "" on submit-with-empty.
+        # Cancel aborts; empty submit runs a registry-only check.
+        if address is None:
+            return
+        address = address.strip()
+        self._log("Running connection diagnostic…")
+
+        def _worker():
+            from src.utils.diagnose import run_diagnostics, format_report_text
+            try:
+                report = run_diagnostics(address or None)
+                text = format_report_text(report)
+                ok = report.ok
+            except Exception as exc:
+                text = f"Diagnostic crashed: {exc}"
+                ok = False
+            self.after(0, lambda: self._show_diagnostic_result(text, ok=ok))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_diagnostic_result(self, text: str, *, ok: bool):
+        if ok:
+            messagebox.showinfo("Diagnose Connection", text, parent=self)
+        else:
+            messagebox.showwarning("Diagnose Connection", text, parent=self)
+        self._log("Connection diagnostic complete.")
+
+    @staticmethod
+    def _strip_to_obscura(value: str) -> str:
+        v = (value or "").strip()
+        if "://" in v:
+            v = v.split("://", 1)[1]
+        return v.split("/", 1)[0]
 
     def _show_hosted_sites(self):
         hosted = self._get_hosted_sites()
@@ -999,7 +1069,7 @@ class ObscuraApp(tk.Tk):
                 for row in listings[:10]:
                     line = f"{row.get('address', '')}"
                     if row.get("title"):
-                        line += f",{row['title']}"
+                        line += f" - {row['title']}"
                     rows.append(line)
                 message = "\n".join(rows)
             messagebox.showinfo(
@@ -1028,7 +1098,7 @@ class ObscuraApp(tk.Tk):
             import src.core.proxy as proxy_mod
             from src.utils.config import PEER_EXPIRY_SECONDS
 
-            # Purge stale peers before counting,observe_discovery only
+            # Purge stale peers before counting - observe_discovery only
             # cleans up when a new multicast message arrives, so if a node
             # disconnects and stops broadcasting, stale entries linger.
             now = time.time()

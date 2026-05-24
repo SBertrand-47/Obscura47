@@ -1,4 +1,4 @@
-"""Tests for src.agent.directory,.obscura discovery surface."""
+"""Tests for src.agent.directory - .obscura discovery surface."""
 
 from __future__ import annotations
 

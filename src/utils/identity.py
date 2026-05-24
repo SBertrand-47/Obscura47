@@ -11,8 +11,8 @@ Each rendezvous session corresponds to exactly one TCP connection from
 the host process to the local application. The host registers
 ``(local_host, local_src_port) -> client_pub`` *before* it forwards any
 bytes onto the local socket. The application's HTTP handler later
-reads its accepted socket's ``client_address``,which is the same
-``(host, port)`` tuple,and can resolve the caller without changing
+reads its accepted socket's ``client_address`` - which is the same
+``(host, port)`` tuple - and can resolve the caller without changing
 the wire format or peeking at the byte stream.
 
 The registry is process-global on purpose: the lookup happens in code
@@ -23,9 +23,9 @@ small.
 
 Identity surfaces
 -----------------
-* ``caller_pub`` is the full PEM-encoded public key,useful for
+* ``caller_pub`` is the full PEM-encoded public key - useful for
   signature verification later.
-* ``caller_fingerprint`` is a SHA-256 hex digest of the PEM bytes ,
+* ``caller_fingerprint`` is a SHA-256 hex digest of the PEM bytes -
   short, comparable, suitable as a stable user id for a ledger or log.
 """
 
@@ -97,7 +97,7 @@ def caller_session(local_addr: tuple[str, int], pub_pem: str) -> Iterator[None]:
 def fingerprint_pubkey(pub_pem: str | None) -> str | None:
     """SHA-256 hex digest of a PEM public key, or ``None`` for missing input.
 
-    Stable across processes,two different agents seeing the same
+    Stable across processes - two different agents seeing the same
     caller pub get the same fingerprint, which makes it usable as a
     primary key for ledgers, audit logs, etc.
     """

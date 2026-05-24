@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────
-#  Obscura47,macOS Build Script
+#  Obscura47 - macOS Build Script
 #  Produces: dist/Obscura47.app   (GUI double-clickable app)
 #            dist/Obscura47-CLI   (terminal binary)
 #
@@ -13,7 +13,7 @@ set -e
 
 echo ""
 echo "============================================"
-echo "  Obscura47,macOS Build"
+echo "  Obscura47 - macOS Build"
 echo "============================================"
 echo ""
 

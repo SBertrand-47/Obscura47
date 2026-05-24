@@ -1,4 +1,4 @@
-"""Unit tests for src/core/router.py,route building and WS-preference logic."""
+"""Unit tests for src/core/router.py - route building and WS-preference logic."""
 import json
 import pytest
 
@@ -168,7 +168,7 @@ class TestOnionRouting:
         layer3 = json.loads(onion_decrypt_with_priv(p3, layer2["inner"]))
         assert layer3["next_hop"] == destination
 
-        # Peel final layer (destination),contains payload
+        # Peel final layer (destination) - contains payload
         final = json.loads(onion_decrypt_with_priv(p_dest, layer3["inner"]))
         assert final["payload"]["data"] == "hello"
         assert final["payload"]["return_path"] == {"host": "back"}

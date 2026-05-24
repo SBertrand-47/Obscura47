@@ -1,4 +1,4 @@
-"""Tests for src.utils.sites,multi-site key management."""
+"""Tests for src.utils.sites - multi-site key management."""
 
 from __future__ import annotations
 

@@ -88,7 +88,7 @@ def isolated_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OBSCURA_GUARD_PATH", str(tmp_path / "guards.json"))
     monkeypatch.setenv("OBSCURA_NODE_KEY_PATH", str(tmp_path / "node.pem"))
     monkeypatch.setenv("OBSCURA_EXIT_KEY_PATH", str(tmp_path / "exit.pem"))
-    # Unreachable registry,internet discovery should tolerate its absence
+    # Unreachable registry - internet discovery should tolerate its absence
     monkeypatch.setenv("OBSCURA_REGISTRY_URL", "http://127.0.0.1:1")
     # Stretch the multicast sweep interval so it doesn't spam during the test
     monkeypatch.setenv("OBSCURA_DISCOVERY_INTERVAL", "3600")
@@ -100,7 +100,7 @@ def isolated_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OBSCURA_EXIT_WS_PORT", str(EXIT_WS_PORT))
     monkeypatch.setenv("OBSCURA_PROXY_WS_RESP_PORT", str(PROXY_WS_RESP_PORT))
     monkeypatch.setenv("OBSCURA_PROXY_RESP_PORT", str(PROXY_RESP_PORT))
-    # Test echo server runs on 127.0.0.1,allow private IPs for testing
+    # Test echo server runs on 127.0.0.1 - allow private IPs for testing
     monkeypatch.setenv("OBSCURA_EXIT_DENY_PRIVATE_IPS", "false")
     yield
 
@@ -125,7 +125,7 @@ def test_end_to_end_tunnel_round_trip(isolated_env):
         assert _wait_for_port("127.0.0.1", NODE_PORT, timeout=5.0), "relay TCP never came up"
         assert _wait_for_port("127.0.0.1", EXIT_PORT, timeout=5.0), "exit TCP never came up"
 
-        # Inject peers directly,bypass registry + multicast for determinism.
+        # Inject peers directly - bypass registry + multicast for determinism.
         # `ts` is required or the internet-discovery sweeper purges the entry
         # the first time it runs.
         now = time.time()
