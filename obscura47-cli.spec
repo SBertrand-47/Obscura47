@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-Obscura47 — PyInstaller Spec File (CLI)
+Obscura47 - PyInstaller Spec File (CLI)
 Builds the command-line binary for running individual roles.
 
 Usage:  pyinstaller obscura47-cli.spec

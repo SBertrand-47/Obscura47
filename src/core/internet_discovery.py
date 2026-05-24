@@ -11,6 +11,7 @@ import json
 import ssl
 import time
 import threading
+import urllib.error
 import urllib.request
 from typing import List, Dict, Callable
 from src.core.discover import _merge_peer
@@ -19,7 +20,7 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Public IP as seen by the registry — set on first successful registration.
+# Public IP as seen by the registry - set on first successful registration.
 # Used to filter self out of the peer lists returned by the registry.
 _my_public_ip: str | None = None
 
@@ -27,7 +28,7 @@ _my_public_ip: str | None = None
 _REGISTRY_UA = "Obscura47/1.0 (registry-client)"
 
 
-def _registry_headers(extra: dict | None = None) -> dict:
+def registry_headers(extra: dict | None = None) -> dict:
     h = {
         "User-Agent": _REGISTRY_UA,
         "Accept": "application/json",
@@ -37,7 +38,92 @@ def _registry_headers(extra: dict | None = None) -> dict:
     return h
 
 
-def _ssl_ctx():
+# Back-compat alias for the previously private helper.
+_registry_headers = registry_headers
+
+
+class RegistryHTTPError(Exception):
+    """Raised by registry_request_json when the registry response is not usable.
+
+    ``kind`` discriminates between transport, http-status, and content-type
+    failures so callers can surface specific diagnostics (e.g. distinguish
+    a 404 descriptor lookup from a Cloudflare HTML fallback served because
+    the deployed registry is missing /hs routes).
+    """
+
+    def __init__(self, kind: str, message: str, status: int | None = None,
+                 content_type: str | None = None, body_preview: str | None = None):
+        super().__init__(message)
+        self.kind = kind  # "transport" | "http_status" | "content_type" | "json_decode"
+        self.status = status
+        self.content_type = content_type
+        self.body_preview = body_preview
+
+
+def registry_request_json(url: str, *, method: str = "GET",
+                          data: bytes | None = None,
+                          extra_headers: dict | None = None,
+                          timeout: int = 10):
+    """Make a registry HTTP call and return parsed JSON, or raise
+    :class:`RegistryHTTPError` with a structured diagnosis.
+
+    Centralising this means every caller benefits from:
+
+    * the Obscura47 User-Agent header (Cloudflare 403s default urllib UAs)
+    * a Content-Type guard so a Cloudflare/nginx HTML fallback page is
+      reported as such instead of a generic JSON-decode failure
+    * a short body preview in the error for easier triage
+    """
+    headers = registry_headers(extra_headers)
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout, context=registry_ssl_ctx())
+    except urllib.error.HTTPError as e:
+        body = b""
+        try:
+            body = e.read() or b""
+        except Exception:
+            pass
+        ct = e.headers.get("Content-Type", "") if e.headers else ""
+        raise RegistryHTTPError(
+            "http_status",
+            f"{method} {url} → HTTP {e.code}",
+            status=e.code,
+            content_type=ct,
+            body_preview=body[:200].decode(errors="replace"),
+        ) from e
+    except Exception as e:
+        raise RegistryHTTPError(
+            "transport", f"{method} {url} → {e}",
+        ) from e
+
+    with resp:
+        ct = resp.headers.get("Content-Type", "")
+        body = resp.read() or b""
+
+    if "json" not in ct.lower():
+        raise RegistryHTTPError(
+            "content_type",
+            f"{method} {url} returned non-JSON content-type {ct!r} - "
+            f"the registry may be missing this endpoint and a reverse "
+            f"proxy is serving a fallback page",
+            status=200,
+            content_type=ct,
+            body_preview=body[:200].decode(errors="replace"),
+        )
+
+    try:
+        return json.loads(body)
+    except Exception as e:
+        raise RegistryHTTPError(
+            "json_decode",
+            f"{method} {url} returned malformed JSON: {e}",
+            content_type=ct,
+            body_preview=body[:200].decode(errors="replace"),
+        ) from e
+
+
+def registry_ssl_ctx():
     """Return an SSL context honoring OBSCURA_TLS_VERIFY (None for http:// URLs)."""
     if not REGISTRY_URL.startswith("https://"):
         return None
@@ -75,7 +161,7 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         headers=_registry_headers({"Content-Type": "application/json"}),
         method="POST",
     )
-    ctx = _ssl_ctx()
+    ctx = registry_ssl_ctx()
     try:
         with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
             result = json.loads(resp.read())
@@ -163,7 +249,7 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
         url += f"?role={role_filter}"
     req = urllib.request.Request(url, headers=_registry_headers(), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx()) as resp:
+        with urllib.request.urlopen(req, timeout=5, context=registry_ssl_ctx()) as resp:
             peers = json.loads(resp.read())
             return peers if isinstance(peers, list) else []
     except Exception as e:
@@ -258,7 +344,7 @@ def check_network_status() -> dict:
             headers=_registry_headers(),
             method="GET"
         )
-        ctx = _ssl_ctx()
+        ctx = registry_ssl_ctx()
         with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
             result = json.loads(resp.read())
             return result if isinstance(result, dict) else {"kill_active": False}
