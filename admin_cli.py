@@ -6,7 +6,7 @@ Safe to keep in the public repo, but it is not part of the normal contributor
 or end-user workflow. Never commit generated admin keys, bearer tokens, or a
 populated .env file.
 
-Obscura47 — Admin CLI
+Obscura47 - Admin CLI
 Manage the Obscura network: approve/reject nodes, activate kill switch, view status.
 
 Usage:

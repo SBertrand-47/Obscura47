@@ -1,4 +1,4 @@
-"""Visitor launcher — open `.obscura` addresses in a regular browser.
+"""Visitor launcher - open `.obscura` addresses in a regular browser.
 
 Generates a PAC (Proxy Auto-Config) file that routes ``*.obscura``
 through the local Obscura proxy while sending everything else direct.
