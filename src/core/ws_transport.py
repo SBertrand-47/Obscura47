@@ -1,5 +1,5 @@
 """
-Obscura47,WebSocket Transport Layer
+Obscura47 - WebSocket Transport Layer
 
 Provides WSServer and WSClient for authenticated, persistent WebSocket
 connections between nodes. Replaces raw TCP for node-to-node communication

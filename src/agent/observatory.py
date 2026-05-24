@@ -15,20 +15,20 @@ Event schema
 Every event carries a fixed envelope plus a free-form ``payload`` dict.
 Required fields:
 
-* ``event_id``,UUID4 hex; unique per event.
-* ``ts``,float, seconds since epoch (``time.time()``).
-* ``actor``,short string identifying the producer (typically the
+* ``event_id`` - UUID4 hex; unique per event.
+* ``ts`` - float, seconds since epoch (``time.time()``).
+* ``actor`` - short string identifying the producer (typically the
   emitting agent's display name; remote ingest also stamps a separate
   ``submitted_by`` fingerprint server-side).
-* ``kind``,one of the documented event kinds (see ``KIND_*`` below).
+* ``kind`` - one of the documented event kinds (see ``KIND_*`` below).
 
 Optional / contextual fields:
 
-* ``session_id``,correlates events that belong to the same logical
+* ``session_id`` - correlates events that belong to the same logical
   flow (one inbound request, the tool invocations it triggered, the
   outbound dials it spawned, the response). Producers are expected to
   set the same ``session_id`` on every event in a flow.
-* ``payload``,kind-specific keys. Conventional names:
+* ``payload`` - kind-specific keys. Conventional names:
   ``method``/``path``/``status``/``latency_ms``/``bytes_in``/
   ``bytes_out`` for HTTP-shaped events; ``tool``/``args_keys``/
   ``code``/``message``/``caller`` for tool events; ``addr``/``port``
@@ -47,7 +47,7 @@ Wire surface (mounted via :class:`~src.agent.tools.ToolRegistry`):
 * ``query(kind?, actor?, submitted_by?, session_id?, since?, until?,
   limit?) -> [event ...]``
 * ``stats() -> {accepted, by_kind, by_actor}``
-* Topic ``events``,every accepted event fans out to subscribers.
+* Topic ``events`` - every accepted event fans out to subscribers.
 """
 
 from __future__ import annotations
@@ -668,7 +668,7 @@ def build_observatory_app(
 
 
 # ---------------------------------------------------------------------------
-# CLI helpers,opt-in observers wired from operator flags.
+# CLI helpers - opt-in observers wired from operator flags.
 # ---------------------------------------------------------------------------
 
 
@@ -683,7 +683,7 @@ def build_observer_from_flags(
 
     Returns ``None`` when no sink is configured. When both flags are
     supplied a :class:`MultiSink` is built so events land locally
-    *and* on a remote collector,this is the typical operator setup
+    *and* on a remote collector - this is the typical operator setup
     where the JSONL file is the durable record and the remote
     collector is a live dashboard.
     """
@@ -742,7 +742,7 @@ def _shrink_value(v: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point,`python -m src.agent.observatory`
+# CLI entry point - `python -m src.agent.observatory`
 # ---------------------------------------------------------------------------
 
 

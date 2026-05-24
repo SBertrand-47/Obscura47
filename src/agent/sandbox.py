@@ -9,8 +9,8 @@ Two layers of policy enforcement, sharing a single :class:`SandboxPolicy`:
   :class:`pathlib.Path` open) for guarded wrappers. Violations raise
   :class:`SandboxViolation` and emit a structured ``sandbox.violation``
   observability event when an :class:`Observer` is wired in. This is
-  cooperative,Python is leaky enough that a determined attacker can
-  bypass it,but it is enough to keep accidentally-misbehaving agent
+  cooperative - Python is leaky enough that a determined attacker can
+  bypass it - but it is enough to keep accidentally-misbehaving agent
   code on the rails and to make policy violations loud.
 
 * **Layer 2** (best-effort, see :mod:`src.agent.sandboxed_runtime`).
@@ -162,7 +162,7 @@ class SandboxPolicy:
 
 
 # ---------------------------------------------------------------------------
-# Per-thread context,lets violation events carry a session_id when the
+# Per-thread context - lets violation events carry a session_id when the
 # triggering call ran inside an HTTP handler.
 # ---------------------------------------------------------------------------
 
@@ -402,7 +402,7 @@ def _expand_endpoints(policy: SandboxPolicy) -> frozenset[tuple[str, int]]:
     addresses, so the allowlist must contain both the literal
     ``(host, port)`` written in the policy and any addresses
     :func:`socket.getaddrinfo` resolves the hostname to. Resolution
-    failures are tolerated,an unresolvable hostname simply means
+    failures are tolerated - an unresolvable hostname simply means
     that name won't be reachable, which is the safer default.
     """
     out: set[tuple[str, int]] = set()

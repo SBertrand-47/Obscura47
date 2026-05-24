@@ -46,7 +46,7 @@ def _request_with_caller(
     """Construct a Request whose caller_fingerprint is forced to a value.
 
     Uses a sentinel ``caller_pub`` string when ``caller_fingerprint`` is
-    supplied,the lazy property would normally derive the fingerprint
+    supplied - the lazy property would normally derive the fingerprint
     from the pub PEM, but tests want to inject a synthetic id directly.
     """
     req = Request(method, path, {}, body, caller_pub=caller_pub)
@@ -56,7 +56,7 @@ def _request_with_caller(
 
 
 # ---------------------------------------------------------------------------
-# LedgerState,balances, transfers, mint
+# LedgerState - balances, transfers, mint
 # ---------------------------------------------------------------------------
 
 
@@ -109,7 +109,7 @@ def test_transfer_rejects_non_int_amount():
 
 
 def test_transfer_rejects_bool_amount():
-    """Python bools are ints,make sure we reject them explicitly."""
+    """Python bools are ints - make sure we reject them explicitly."""
     s = LedgerState(initial_balances={ALICE: 100})
     with pytest.raises(LedgerError) as exc:
         s.transfer(from_account=ALICE, to_account=BOB,
@@ -170,7 +170,7 @@ def test_transfer_nonce_scoped_per_caller():
 
 
 def test_mint_requires_no_caller_in_state_layer():
-    """LedgerState.mint is unauthenticated,auth lives in the tool layer."""
+    """LedgerState.mint is unauthenticated - auth lives in the tool layer."""
     s = LedgerState()
     tx = s.mint(to_account=ALICE, amount=1000, memo="genesis")
     assert tx.from_account is None
@@ -530,7 +530,7 @@ def test_mint_tool_unauthenticated_caller_rejected():
 
 
 # ---------------------------------------------------------------------------
-# build_ledger_app,full mount onto AgentApp
+# build_ledger_app - full mount onto AgentApp
 # ---------------------------------------------------------------------------
 
 
@@ -604,7 +604,7 @@ def test_resolve_admin_fingerprint_rejects_garbage():
 
 
 # ---------------------------------------------------------------------------
-# LedgerClient,wire-shape smoke test against an in-process registry
+# LedgerClient - wire-shape smoke test against an in-process registry
 # ---------------------------------------------------------------------------
 
 

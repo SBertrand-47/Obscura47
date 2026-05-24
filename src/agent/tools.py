@@ -6,9 +6,9 @@ and stream events without each host inventing a wire format.
 
 Three routes are mounted (default prefix ``/.well-known/obscura/``):
 
-* ``GET  <prefix>tools``                ,JSON manifest of registered tools
-* ``POST <prefix>tools/<name>``         ,invoke a tool, body ``{"args": {...}}``
-* ``GET  <prefix>subscribe/<topic>``    ,long-lived SSE stream of topic events
+* ``GET  <prefix>tools``                 - JSON manifest of registered tools
+* ``POST <prefix>tools/<name>``          - invoke a tool, body ``{"args": {...}}``
+* ``GET  <prefix>subscribe/<topic>``     - long-lived SSE stream of topic events
 
 The manifest is a JSON document of the form::
 
@@ -441,7 +441,7 @@ def _sse_iter(topic: Topic) -> Iterator[bytes]:
     A 15-second keepalive comment keeps intermediaries from closing the
     connection during quiet periods. The subscription is removed when
     the generator is closed by the HTTP handler. Frames terminate with
-    CRLF,SSE permits LF, CR, or CRLF, and CRLF is the friendliest
+    CRLF - SSE permits LF, CR, or CRLF, and CRLF is the friendliest
     choice for plain HTTP/1.1 line readers in the rest of the codebase.
     """
     q = topic.subscribe()

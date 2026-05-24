@@ -1,4 +1,4 @@
-"""Tests for src.utils.visitor,PAC generation and visitor launcher."""
+"""Tests for src.utils.visitor - PAC generation and visitor launcher."""
 
 from __future__ import annotations
 

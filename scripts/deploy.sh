@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Obscura47,Deploy latest code to VPS
+# Obscura47 - Deploy latest code to VPS
 # Run from your local machine:
 #   bash scripts/deploy.sh user@db.monmedjs.com
 #

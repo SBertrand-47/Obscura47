@@ -234,7 +234,7 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                     except OSError as e:
                         # On Windows, WinError 10054 can permanently corrupt the socket state.
                         # Break inner loop to recreate the socket.
-                        log.warning(f"Socket error in observe_discovery (port {multicast_port}): {e},recreating socket")
+                        log.warning(f"Socket error in observe_discovery (port {multicast_port}): {e} - recreating socket")
                         break
                     except Exception as e:
                         log.warning(f"Error in observe_discovery: {e}")

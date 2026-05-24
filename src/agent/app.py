@@ -34,7 +34,7 @@ class Request:
     service for this connection, when it can be determined (i.e. the
     request actually arrived through a `.obscura` rendezvous and the
     host registered a caller mapping for the local socket). It's
-    ``None`` for purely local traffic,direct ``urllib`` hits during
+    ``None`` for purely local traffic - direct ``urllib`` hits during
     tests or operator probes against the bound port.
     """
 
@@ -116,7 +116,7 @@ class StreamingResponse:
     each chunk is written to the wire as soon as it's produced.
     Content-Length is intentionally never set; clients should treat the
     body as either chunk-streamed (with ``Transfer-Encoding: chunked``)
-    or terminated by ``Connection: close``,by default we emit the
+    or terminated by ``Connection: close`` - by default we emit the
     latter, which is enough for SSE.
     """
 

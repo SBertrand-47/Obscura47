@@ -125,7 +125,7 @@ class ExitNode:
         """Process an incoming encrypted frame (shared by TCP and WebSocket handlers).
 
         ``send_back`` is an optional callable that writes data back to the
-        inbound connection this frame arrived on,used as a reverse channel
+        inbound connection this frame arrived on - used as a reverse channel
         for streaming responses back through the relay chain.
         """
         encrypted_data = packet.get("encrypted_data")
@@ -136,7 +136,7 @@ class ExitNode:
             log.warning("Onion decryption failed; dropping frame")
             return
         request_data = json.loads(decrypted_message)
-        # Onion routing wraps the final payload in {"payload": {...}},unwrap
+        # Onion routing wraps the final payload in {"payload": {...}} - unwrap
         if "payload" in request_data and isinstance(request_data["payload"], dict):
             request_data = request_data["payload"]
         req_id = request_data.get("request_id", "")
@@ -169,7 +169,7 @@ class ExitNode:
                 return
             raw = base64.b64decode(chunk_b64)
             if info.get('ready') and not info['ready'].is_set():
-                # Outbound connect still in progress,buffer
+                # Outbound connect still in progress - buffer
                 info.setdefault('queue', []).append(raw)
                 return
             try:

@@ -7,11 +7,11 @@ listing that any visitor can query.
 
 Wire surface (mounted via :class:`~src.agent.tools.ToolRegistry`):
 
-* ``register(address: string)`` ,tell the directory about a site.
-* ``unregister(address: string)``,remove a listing (caller must own it).
-* ``list(query?: string, limit?: int)``,search / browse listings.
-* ``get(address: string)``,fetch details for a single listing.
-* Topic ``listings``,SSE stream of register / unregister events.
+* ``register(address: string)``  - tell the directory about a site.
+* ``unregister(address: string)`` - remove a listing (caller must own it).
+* ``list(query?: string, limit?: int)`` - search / browse listings.
+* ``get(address: string)`` - fetch details for a single listing.
+* Topic ``listings`` - SSE stream of register / unregister events.
 
 Persistence is optional (``--state`` flag for JSON file).
 
