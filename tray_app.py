@@ -1,5 +1,5 @@
 """
-Obscura47 — System Tray Application
+Obscura47 - System Tray Application
 Runs Obscura47 in the background with a system tray icon (cross-platform).
 Launch this to run the network as a background service.
 
@@ -181,6 +181,12 @@ class Obscura47Tray:
         # Dashboard button
         items.append(
             pystray.MenuItem("Open Dashboard", action=lambda: self._open_dashboard())
+        )
+        items.append(
+            pystray.MenuItem(
+                "Diagnose connection...",
+                action=lambda: self._diagnose_connection(),
+            )
         )
 
         items.append(pystray.Menu.SEPARATOR)
@@ -380,7 +386,7 @@ class Obscura47Tray:
                 for row in listings[:10]:
                     line = f"{row.get('address', '')}"
                     if row.get("title"):
-                        line += f" — {row['title']}"
+                        line += f" - {row['title']}"
                     rows.append(line)
                 message = "\n".join(rows)
             self._show_dialog(
@@ -436,6 +442,29 @@ class Obscura47Tray:
 
         if not open_in_browser(url=address):
             raise RuntimeError("proxy startup or browser launch failed")
+
+    def _diagnose_connection(self):
+        """Run a connection diagnostic and show the report."""
+        address = self._prompt_text(
+            "Diagnose Connection",
+            "Optional .obscura address to test (leave blank for registry-only):",
+        )
+        if address is None:
+            return
+        address = address.strip()
+
+        from src.utils.diagnose import run_diagnostics, format_report_text
+
+        try:
+            report = run_diagnostics(address or None)
+            text = format_report_text(report)
+            self._show_dialog(
+                "Diagnose Connection", text, error=not report.ok,
+            )
+        except Exception as exc:
+            self._show_dialog(
+                "Diagnose Connection", f"Diagnostic crashed: {exc}", error=True,
+            )
 
     def _resolve_hosted_site_address(self, raw_value: str) -> str:
         value = (raw_value or "").strip()

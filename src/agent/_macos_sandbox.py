@@ -149,7 +149,7 @@ def apply(policy: "SandboxPolicy") -> bool:
     * ``sandbox-exec`` is missing,
     * we've already been re-execed once (idempotent guard).
 
-    Otherwise this function does **not return** on success — it
+    Otherwise this function does **not return** on success - it
     replaces the current process image with the sandboxed one. On
     failure it logs and returns ``False`` so the caller can fall back
     to Layer 1 only.
