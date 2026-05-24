@@ -8,6 +8,8 @@ Supports ECDSA challenge-response auth when a node provides its ECC private key.
 """
 
 import json
+import os
+import socket
 import ssl
 import time
 import threading
@@ -15,7 +17,13 @@ import urllib.error
 import urllib.request
 from typing import List, Dict, Callable
 from src.core.discover import _merge_peer
-from src.utils.config import REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS, TLS_VERIFY, ADMIN_PUB_PEM, KILL_SWITCH_CHECK_INTERVAL
+from src.utils.config import (
+    REGISTRY_URL, REGISTRY_HEARTBEAT_INTERVAL, PEER_EXPIRY_SECONDS,
+    TLS_VERIFY, ADMIN_PUB_PEM, KILL_SWITCH_CHECK_INTERVAL,
+    NODE_LISTEN_PORT, EXIT_LISTEN_PORT, NODE_WS_PORT, EXIT_WS_PORT,
+    NODE_ADVERTISED_HOST, EXIT_ADVERTISED_HOST,
+    NODE_KEY_PATH, EXIT_KEY_PATH,
+)
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -23,6 +31,106 @@ log = get_logger(__name__)
 # Public IP as seen by the registry - set on first successful registration.
 # Used to filter self out of the peer lists returned by the registry.
 _my_public_ip: str | None = None
+
+# Cache of local node/exit pubkeys (computed once from the local key files).
+# Lets a host process colocated with a node identify "self" peers by pubkey
+# even when host:port matching is ambiguous.
+_self_pubs_cache: set[str] | None = None
+
+
+def _normalize_pem(pem: str | None) -> str:
+    """Strip whitespace differences so two equivalent PEMs compare equal."""
+    if not pem:
+        return ""
+    return "".join(pem.split())
+
+
+def _local_interface_ips() -> set[str]:
+    """Best-effort enumeration of IPs bound to this machine."""
+    ips: set[str] = {"127.0.0.1", "::1", "localhost"}
+    try:
+        hostname = socket.gethostname()
+        try:
+            _, _, addrs = socket.gethostbyname_ex(hostname)
+            ips.update(a for a in addrs if a)
+        except Exception:
+            pass
+        try:
+            for info in socket.getaddrinfo(hostname, None):
+                ip = info[4][0]
+                if ip:
+                    ips.add(ip)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return ips
+
+
+def get_self_peer_keys() -> set[tuple[str, int]]:
+    """(host, port) tuples that identify peers running on this machine.
+
+    Combines: the public IP learned from registry registration, any
+    explicitly-configured advertised host, and local interface IPs - each
+    paired with the local node/exit listen ports.
+    """
+    keys: set[tuple[str, int]] = set()
+    hosts: set[str] = set()
+    if _my_public_ip:
+        hosts.add(_my_public_ip)
+    if NODE_ADVERTISED_HOST:
+        hosts.add(NODE_ADVERTISED_HOST)
+    if EXIT_ADVERTISED_HOST:
+        hosts.add(EXIT_ADVERTISED_HOST)
+    hosts.update(_local_interface_ips())
+    for h in hosts:
+        keys.add((h, NODE_LISTEN_PORT))
+        keys.add((h, EXIT_LISTEN_PORT))
+    return keys
+
+
+def get_self_peer_pubs() -> set[str]:
+    """Normalized PEM strings of locally-running node/exit pubkeys.
+
+    Read from the on-disk key files. Cached - changes to the files require
+    a process restart to take effect.
+    """
+    global _self_pubs_cache
+    if _self_pubs_cache is not None:
+        return _self_pubs_cache
+    pubs: set[str] = set()
+    for path in (NODE_KEY_PATH, EXIT_KEY_PATH):
+        try:
+            if path and os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    pem = f.read()
+                from Crypto.PublicKey import ECC
+                priv = ECC.import_key(pem)
+                pub_pem = priv.public_key().export_key(format="PEM")
+                pubs.add(_normalize_pem(pub_pem))
+        except Exception:
+            continue
+    _self_pubs_cache = pubs
+    return pubs
+
+
+def is_self_peer(peer: dict | None) -> bool:
+    """True if ``peer`` resolves to a node/exit running on this machine.
+
+    Used to filter our own machine out of HS route construction, intro-point
+    selection, and rendezvous-point selection - otherwise a circuit
+    originating from this machine would try to NAT-loop back to itself.
+    """
+    if not peer:
+        return False
+    host = peer.get("host")
+    port = peer.get("port")
+    if host and port and (host, port) in get_self_peer_keys():
+        return True
+    pub = peer.get("pub")
+    if pub and _normalize_pem(pub) in get_self_peer_pubs():
+        return True
+    return False
 
 # Cloudflare (and some WAFs) return 403 for urllib's default User-Agent (Python-urllib/x.x).
 _REGISTRY_UA = "Obscura47/1.0 (registry-client)"

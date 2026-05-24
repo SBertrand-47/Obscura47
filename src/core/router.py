@@ -333,16 +333,21 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
 
     Returns a list of peer dicts of length up to ``hops``, with
     ``terminal`` as the final hop. Middle hops are sampled from
-    ``peers`` excluding the terminal (by host:port). Returns just
-    ``[terminal]`` if no suitable padding relays exist.
+    ``peers`` excluding the terminal (by host:port) and excluding any
+    peer that resolves to this machine - inserting ourselves as a middle
+    hop would NAT-loop the circuit back through our own router.
+    Returns just ``[terminal]`` if no suitable padding relays exist.
     """
     if hops <= 1 or not peers:
         return [terminal]
+    from src.core.internet_discovery import is_self_peer
     t_key = (terminal.get('host'), terminal.get('port'))
     pool = [
         p for p in peers
         if p.get('host') and p.get('port') and p.get('pub')
         and (p.get('host'), p.get('port')) != t_key
+        and p.get('role') in (None, 'node')
+        and not is_self_peer(p)
     ]
     middle_count = min(max(hops - 1, 0), len(pool))
     if middle_count == 0:
