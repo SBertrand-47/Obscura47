@@ -132,6 +132,46 @@ def is_self_peer(peer: dict | None) -> bool:
         return True
     return False
 
+
+def is_private_peer(peer: dict | None) -> bool:
+    """True if ``peer`` advertises a non-routable host literal.
+
+    RFC1918 / loopback / link-local / multicast / unspecified addresses are
+    not reachable from a different network, so advertising one as an intro
+    point or proposing one as a rendezvous point strands any remote dialer:
+    its frames have no path back to the host. ``OBSCURA_ALLOW_LAN_PEERS=1``
+    disables the filter for fully-private testnets.
+    """
+    if not peer:
+        return False
+    host = peer.get("host")
+    if not host:
+        return False
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Hostnames are accepted as-is - we cannot resolve them without
+        # potentially leaking a DNS query, and a hostname is at least
+        # plausibly externally resolvable.
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+    )
+
+
+def allow_lan_peers() -> bool:
+    """``OBSCURA_ALLOW_LAN_PEERS=1`` opts back in to RFC1918 peers.
+
+    Useful for fully-private testnets where every machine is on the same
+    LAN and external reachability is irrelevant. Read fresh each call so
+    tests can toggle the env var without monkey-patching.
+    """
+    return os.environ.get("OBSCURA_ALLOW_LAN_PEERS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
 # Cloudflare (and some WAFs) return 403 for urllib's default User-Agent (Python-urllib/x.x).
 _REGISTRY_UA = "Obscura47/1.0 (registry-client)"
 
