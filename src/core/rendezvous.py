@@ -109,14 +109,20 @@ def _pick_rendezvous_point(
     # Accept any peer with host/port/pub. relay_peers by convention holds
     # node relays; registry-sourced peers also carry role='node'.
     # Self-peers are filtered too - we cannot rendezvous through our own
-    # NAT-bound relay from this machine.
-    from src.core.internet_discovery import is_self_peer
+    # NAT-bound relay from this machine. RFC1918 peers are filtered for
+    # the same reason from the host's side: if we picked a LAN-only rv
+    # point, the host's `rv_join` would have no path to it.
+    from src.core.internet_discovery import (
+        is_self_peer, is_private_peer, allow_lan_peers,
+    )
+    lan_ok = allow_lan_peers()
     candidates = [
         p for p in peers
         if p.get('pub') and p.get('host') and p.get('port')
         and (p.get('role') in (None, 'node'))
         and (p.get('host'), p.get('port')) not in exclude
         and not is_self_peer(p)
+        and (lan_ok or not is_private_peer(p))
     ]
     if not candidates:
         return None
