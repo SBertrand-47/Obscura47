@@ -739,6 +739,19 @@ async def health_check():
     return HealthResponse(status="ok", peers=total, breakdown=breakdown)
 
 
+@app.get("/whoami")
+async def whoami(request: Request):
+    """Return the caller's public IP as the registry sees it.
+
+    Lets a process that doesn't otherwise register (e.g. a hidden-service
+    host) learn its own WAN IP so it can avoid picking peers that resolve
+    to itself - critical when two LAN machines share a NAT and the
+    registry's (host, port) primary key collapses their distinct nodes
+    into one entry.
+    """
+    return {"ip": _get_client_ip(request)}
+
+
 @app.delete("/peers/{peer_id:path}")
 async def remove_peer(peer_id: str, request: Request, authorization: str | None = Header(default=None)):
     """Admin-only: remove a specific peer. Requires OBSCURA_REGISTRY_ADMIN_KEY."""
