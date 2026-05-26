@@ -59,7 +59,8 @@ def _merge_peer(peers: List[Dict], new_peer: Dict) -> None:
             else:
                 duplicate_idxs.append(idx)
 
-    if match_idx is None:
+    is_new = match_idx is None
+    if is_new:
         peers.append(dict(new_peer))
     else:
         merged = dict(peers[match_idx])
@@ -70,6 +71,55 @@ def _merge_peer(peers: List[Dict], new_peer: Dict) -> None:
 
     for idx in reversed(duplicate_idxs):
         peers.pop(idx)
+
+    # Warm peer_health for genuinely-new LAN-discovered peers. Without
+    # this, a peer that advertises an unreachable IP (e.g. a VPN-only
+    # interface) keeps getting picked for circuits until enough send
+    # attempts have failed for the cooldown to engage - meanwhile the
+    # user's traffic stalls. The probe is fire-and-forget so the
+    # discovery listener never blocks on it.
+    if is_new:
+        _kick_health_probe(new_peer)
+
+
+def _kick_health_probe(peer: Dict) -> None:
+    """Best-effort: spawn a background TCP probe of ``peer``'s WS port.
+
+    LAN discovery messages don't always carry ``ws_port``; fall back to
+    the configured default so a misconfigured peer (advertising an
+    unreachable IP on the standard node WS port) still gets caught.
+    """
+    host = peer.get("host")
+    if not host:
+        return
+    ws_port = peer.get("ws_port")
+    if not ws_port:
+        try:
+            from src.utils.config import NODE_WS_PORT
+            ws_port = NODE_WS_PORT
+        except Exception:
+            return
+    try:
+        from src.core.internet_discovery import is_self_peer
+        if is_self_peer({"host": host, "port": peer.get("port"), "pub": peer.get("pub")}):
+            return
+    except Exception:
+        pass
+
+    def _probe():
+        try:
+            from src.core.peer_health import probe_tcp, mark_success, mark_failure
+            ok, why = probe_tcp(host, int(ws_port), timeout=3.0)
+            if ok:
+                mark_success(host, int(ws_port))
+            else:
+                mark_failure(host, int(ws_port), reason=f"discovery probe: {why}")
+                mark_failure(host, int(ws_port), reason=f"discovery probe: {why}")
+        except Exception:
+            pass
+
+    import threading as _t
+    _t.Thread(target=_probe, daemon=True).start()
 
 def get_local_ip():
     """Returns the machine's LAN IP (avoids 127.0.0.1)."""
