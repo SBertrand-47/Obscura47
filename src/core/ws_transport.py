@@ -11,6 +11,7 @@ accepting frames.
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import ssl
@@ -21,12 +22,57 @@ from typing import Callable
 import websockets
 from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
+from websockets.exceptions import InvalidMessage
 
 from src.core.encryptions import ecdsa_sign, ecdsa_verify
 from src.core import peer_health
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+class _BenignHandshakeFilter(logging.Filter):
+    """Drop the 'opening handshake failed' record when the peer never sent any
+    HTTP request bytes.
+
+    Raw TCP connects to our WS port (port scanners, our own peer_health
+    self-probe, the discovery-time warm-up probe other nodes run) all trip
+    websockets into logging a full traceback at ERROR level. The traceback
+    is the same EOFError-at-byte-0 every time and carries no diagnostic
+    value over the absence of a connection. A genuine malformed-handshake
+    (some bytes received, then garbage) still passes the filter.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        if record.getMessage() != "opening handshake failed":
+            return True
+        exc_info = record.exc_info
+        if not exc_info or len(exc_info) < 2:
+            return True
+        exc = exc_info[1]
+        if not isinstance(exc, InvalidMessage):
+            return True
+        # The relevant case is "stream ends after 0 bytes" raised by
+        # websockets.http11.parse_line as the original cause. Walk the chain
+        # so we tolerate websockets re-wrapping the EOFError in future versions.
+        cause = exc.__cause__
+        while cause is not None:
+            if isinstance(cause, EOFError) and "0 bytes" in str(cause):
+                return False
+            cause = cause.__cause__
+        return True
+
+
+_FILTER_INSTALLED_ATTR = "_obscura_benign_handshake_filter"
+
+
+def _install_benign_handshake_filter() -> None:
+    """Attach the filter to ``websockets.server`` exactly once per process."""
+    target = logging.getLogger("websockets.server")
+    if getattr(target, _FILTER_INSTALLED_ATTR, False):
+        return
+    target.addFilter(_BenignHandshakeFilter())
+    setattr(target, _FILTER_INSTALLED_ATTR, True)
 
 
 def _bracket_ipv6(host: str) -> str:
@@ -211,6 +257,8 @@ class WSServer:
 
     def start(self):
         """Start the WebSocket server in a dedicated background thread."""
+        _install_benign_handshake_filter()
+
         def _run():
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
@@ -385,7 +433,18 @@ class WSClient:
                 return True
             except Exception as e2:
                 log.error(f"Failed to send to {host}:{port}: {e2}")
-                peer_health.mark_failure(host, port, reason=str(e2) or type(e2).__name__)
+                # ENETUNREACH / WinError 1231 / 10051 means the local host
+                # has no route to this peer (commonly: IPv6 peer advertised
+                # to an IPv4-only host). Treat as a host-level failure and
+                # flip straight to cooldown instead of waiting for a second
+                # live attempt to time out.
+                if peer_health.is_unreachable_network_error(e2):
+                    peer_health.mark_host_unreachable(
+                        {"host": host, "ws_port": port},
+                        reason=str(e2) or type(e2).__name__,
+                    )
+                else:
+                    peer_health.mark_failure(host, port, reason=str(e2) or type(e2).__name__)
                 return False
 
     def send_frame(self, host: str, port: int, frame_json: str,

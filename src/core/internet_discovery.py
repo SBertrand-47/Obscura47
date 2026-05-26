@@ -429,10 +429,38 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
                    priv_key=None, ws_port: int | None = None,
                    ws_tls: bool | None = None,
                    advertised_host: str | None = None):
-    """Periodically re-register to keep this node alive in the registry."""
+    """Periodically re-register to keep this node alive in the registry.
+
+    When the self-probe reports our WS port as unreachable (and the operator
+    opted in via ``OBSCURA_REQUIRE_WS_REACHABLE=1``) we drop ``ws_port`` from
+    the heartbeat so circuit builders stop picking us for WS hops they cannot
+    actually complete. The suppression flips back as soon as the probe
+    succeeds again.
+    """
+    from src.core import peer_health
+    last_advertised: bool | None = None
     while True:
+        advertise_ws = ws_port is not None and peer_health.should_advertise_ws(role)
+        if last_advertised is not None and advertise_ws != last_advertised:
+            if advertise_ws:
+                log.info(
+                    "WS advertisement resumed for %s: self-probe now reports "
+                    "ws_port=%s reachable",
+                    role, ws_port,
+                )
+            else:
+                log.warning(
+                    "WS advertisement suppressed for %s: self-probe reports "
+                    "ws_port=%s unreachable; heartbeat will omit ws_port until "
+                    "the probe recovers",
+                    role, ws_port,
+                )
+        last_advertised = advertise_ws
+
+        effective_ws_port = ws_port if advertise_ws else None
+        effective_ws_tls = ws_tls if advertise_ws else None
         register_with_registry(role, port, pub, priv_key=priv_key,
-                               ws_port=ws_port, ws_tls=ws_tls,
+                               ws_port=effective_ws_port, ws_tls=effective_ws_tls,
                                advertised_host=advertised_host)
         time.sleep(REGISTRY_HEARTBEAT_INTERVAL)
 

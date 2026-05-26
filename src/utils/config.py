@@ -109,6 +109,14 @@ SOCKET_CONNECT_TIMEOUT = float(os.getenv("OBSCURA_SOCKET_CONNECT_TIMEOUT", "5.0"
 # - so it is intentionally several times the steady-state send budget.
 WS_SEND_TIMEOUT = float(os.getenv("OBSCURA_WS_SEND_TIMEOUT", "12.0"))
 
+# When true, the heartbeat omits ``ws_port`` from registry registrations until
+# the peer_health self-probe confirms our WS port is reachable from the
+# outside. Stops a firewalled / CGNAT'd node from advertising a WS endpoint
+# that other peers will time out trying to dial. Default off preserves prior
+# log-only behavior. Read dynamically by peer_health.should_advertise_ws()
+# so tests can toggle the env var without reloading config.
+REQUIRE_WS_REACHABLE = getenv_str("OBSCURA_REQUIRE_WS_REACHABLE", "").strip().lower() in ("1", "true", "yes", "on")
+
 # Onion/observability
 ONION_ONLY = getenv_str("OBSCURA_ONION_ONLY", "false").lower() in ("1", "true", "yes")
 JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "yes")

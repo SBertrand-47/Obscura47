@@ -101,6 +101,14 @@ class ObscuraNode:
 
         self.ws_tls_enabled = WS_TLS_ACTIVE
 
+        # Construct the router before opening any frame-handling listeners.
+        # Router takes self.peers by reference so the discovery thread keeps
+        # populating it in place - there is no need to delay construction.
+        # If WSServer.start() came first the WS handler would receive frames
+        # while self.router is still missing and every frame would die with
+        # an AttributeError, dropping early traffic on the floor.
+        self.router = Router(self, self.peers)
+
         # Register with internet bootstrap registry (with ws_port and priv_key for auth)
         start_heartbeat("node", self.port, self.pub_pem,
                         priv_key=self.priv_key, ws_port=self.ws_port,
@@ -126,12 +134,6 @@ class ObscuraNode:
 
         log.info("Node Discovery started on port %s", NODE_MULTICAST_PORT)
         log.info("WebSocket server on port %s", self.ws_port)
-
-        # Allow time for initial discovery
-        time.sleep(5)
-
-        # Create the router with updated peers
-        self.router = Router(self, self.peers)
 
     def _on_ws_frame(self, message: str, reverse_send=None):
         """Handle a frame received via WebSocket (same logic as TCP)."""

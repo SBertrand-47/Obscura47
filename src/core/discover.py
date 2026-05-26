@@ -142,93 +142,126 @@ def broadcast_discovery(multicast_port=DISCOVERY_PORT):
         log.error(f"Error broadcasting discovery request: {e}")
 
 def listen_for_discovery(peers: List[Dict], local_port=5001, multicast_port=DISCOVERY_PORT, extra_fields: Dict | None = None):
-    """Listens for discovery requests and responds with node info."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except (AttributeError, OSError):
-                pass
-            _suppress_icmp_connreset(sock)
-            sock.bind(("", multicast_port))
+    """Listens for discovery requests and responds with node info.
 
-            mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-            log.info(f"Listening for discovery on {MULTICAST_GROUP}:{multicast_port}")
-
-            advertised_ip = get_local_ip()
-
-            while True:
+    Wrapped in an outer recreate-loop so that a fatal OSError on the UDP
+    socket (e.g. a Windows ICMP-port-unreachable echo that corrupts socket
+    state despite SIO_UDP_CONNRESET) drops back to fresh socket setup
+    instead of silently killing discovery for the process lifetime.
+    """
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
-                    data, addr = sock.recvfrom(1024)
-                    message = json.loads(data.decode())
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except (AttributeError, OSError):
+                    pass
+                _suppress_icmp_connreset(sock)
+                sock.bind(("", multicast_port))
 
-                    log.info(f"Received discovery message from {addr}: {message}")
+                mreq = struct.pack("=4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
 
-                    if message.get("type") == "discovery_request":
-                        resp = {
-                            "type": "discovery_response",
-                            "host": advertised_ip,
-                            "port": local_port
-                        }
-                        if isinstance(extra_fields, dict):
-                            # Only include JSON-serializable fields
-                            for k, v in extra_fields.items():
-                                resp[k] = v
-                        response = json.dumps(resp).encode()
-                        # Reply directly to requester
-                        sock.sendto(response, addr)
-                        # Also echo response to multicast so passive observers (e.g., proxy) can learn peers
-                        try:
-                            sock.sendto(response, (MULTICAST_GROUP, multicast_port))
-                        except Exception:
-                            pass
-                        log.info(f"Responded to discovery from {addr[0]} with {advertised_ip}:{local_port}")
+                log.info(f"Listening for discovery on {MULTICAST_GROUP}:{multicast_port}")
 
-                    elif message.get("type") == "discovery_response":
-                        new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
-                        if "pub" in message:
-                            new_peer["pub"] = message["pub"]
-                        is_self = (
-                            new_peer["host"] == advertised_ip
-                            and new_peer["port"] == local_port
+                advertised_ip = get_local_ip()
+
+                while True:
+                    try:
+                        data, addr = sock.recvfrom(1024)
+                        message = json.loads(data.decode())
+
+                        log.info(f"Received discovery message from {addr}: {message}")
+
+                        if message.get("type") == "discovery_request":
+                            resp = {
+                                "type": "discovery_response",
+                                "host": advertised_ip,
+                                "port": local_port
+                            }
+                            if isinstance(extra_fields, dict):
+                                # Only include JSON-serializable fields
+                                for k, v in extra_fields.items():
+                                    resp[k] = v
+                            response = json.dumps(resp).encode()
+                            # Reply directly to requester
+                            sock.sendto(response, addr)
+                            # Also echo response to multicast so passive observers (e.g., proxy) can learn peers
+                            try:
+                                sock.sendto(response, (MULTICAST_GROUP, multicast_port))
+                            except Exception:
+                                pass
+                            log.info(f"Responded to discovery from {addr[0]} with {advertised_ip}:{local_port}")
+
+                        elif message.get("type") == "discovery_response":
+                            new_peer = {"host": message["host"], "port": message["port"], "ts": time.time()}
+                            if "pub" in message:
+                                new_peer["pub"] = message["pub"]
+                            is_self = (
+                                new_peer["host"] == advertised_ip
+                                and new_peer["port"] == local_port
+                            )
+                            if not is_self:
+                                # TOFU: reject if public key changed
+                                if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
+                                    continue
+                                before = len(peers)
+                                _merge_peer(peers, new_peer)
+                                if len(peers) > before:
+                                    log.info(f"Discovered new peer: host={new_peer['host']}, port={new_peer['port']}")
+
+                            # Expire old peers
+                            cutoff = time.time() - PEER_EXPIRY_SECONDS
+                            peers[:] = [p for p in peers if p.get("ts", 0) >= cutoff]
+
+                    except json.JSONDecodeError:
+                        log.warning("Received malformed discovery message. Ignoring.")
+                    except OSError as e:
+                        # Windows surfaces WSAECONNRESET (10054) on a UDP recv
+                        # when an earlier unicast sendto provoked an ICMP
+                        # 'port unreachable' from a peer whose ephemeral port
+                        # already closed. SIO_UDP_CONNRESET=False is supposed
+                        # to swallow this but isn't always honored in time.
+                        # The error is benign: skip the log spam, keep looping.
+                        if getattr(e, "winerror", None) == 10054:
+                            log.debug(
+                                "Discovery listener (port %s): benign ICMP-unreachable echo: %s",
+                                multicast_port, e,
+                            )
+                            continue
+                        # Anything else is genuinely unusual - drop to the outer
+                        # loop so the socket is recreated, matching the
+                        # observe_discovery pattern.
+                        log.warning(
+                            "Socket error in discovery listener (port %s): %s - recreating socket",
+                            multicast_port, e,
                         )
-                        if not is_self:
-                            # TOFU: reject if public key changed
-                            if not _validate_peer_key(new_peer["host"], new_peer["port"], new_peer.get("pub")):
-                                continue
-                            before = len(peers)
-                            _merge_peer(peers, new_peer)
-                            if len(peers) > before:
-                                log.info(f"Discovered new peer: host={new_peer['host']}, port={new_peer['port']}")
+                        break
+                    except Exception as e:
+                        log.warning(f"Error in discovery listener: {e}")
+                        time.sleep(1)
 
-                        # Expire old peers
-                        cutoff = time.time() - PEER_EXPIRY_SECONDS
-                        peers[:] = [p for p in peers if p.get("ts", 0) >= cutoff]
-
-                except json.JSONDecodeError:
-                    log.warning("Received malformed discovery message. Ignoring.")
-                except Exception as e:
-                    log.warning(f"Error in discovery listener: {e}")
-                    time.sleep(1)
-
-    except Exception as e:
-        log.error(f"Error setting up discovery listener: {e}")
+        except Exception as e:
+            log.error(f"Error setting up discovery listener: {e}")
+        time.sleep(2)
 
 def _suppress_icmp_connreset(sock):
     """
     On Windows, UDP sockets raise WinError 10054 (WSAECONNRESET) when an ICMP
     'port unreachable' is received. Suppress this so multicast observers don't
     get stuck in an error loop. No-op on other platforms.
+
+    Logs at DEBUG when the ioctl rejects the call so a host where suppression
+    isn't actually installing is diagnosable instead of silently noisy.
     """
     SIO_UDP_CONNRESET = getattr(socket, "SIO_UDP_CONNRESET", None)
-    if SIO_UDP_CONNRESET is not None:
-        try:
-            sock.ioctl(SIO_UDP_CONNRESET, False)
-        except Exception:
-            pass
+    if SIO_UDP_CONNRESET is None:
+        return
+    try:
+        sock.ioctl(SIO_UDP_CONNRESET, False)
+    except Exception as e:
+        log.debug("SIO_UDP_CONNRESET ioctl failed: %s", e)
 
 
 def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
@@ -282,8 +315,18 @@ def observe_discovery(peers: List[Dict], multicast_port=DISCOVERY_PORT):
                     except json.JSONDecodeError:
                         continue
                     except OSError as e:
-                        # On Windows, WinError 10054 can permanently corrupt the socket state.
-                        # Break inner loop to recreate the socket.
+                        # WSAECONNRESET (10054) is a benign Windows quirk: an
+                        # ICMP 'port unreachable' from a unicast peer surfaces
+                        # on the next recv even when SIO_UDP_CONNRESET=False is
+                        # installed. Don't tear down the socket for that.
+                        if getattr(e, "winerror", None) == 10054:
+                            log.debug(
+                                "observe_discovery (port %s): benign ICMP-unreachable echo: %s",
+                                multicast_port, e,
+                            )
+                            continue
+                        # Anything else might have corrupted the socket state;
+                        # break out so the outer loop recreates it.
                         log.warning(f"Socket error in observe_discovery (port {multicast_port}): {e} - recreating socket")
                         break
                     except Exception as e:

@@ -318,6 +318,18 @@ class Router:
             except Exception:
                 pass
             log.error("Persistent send error to %s: %s", next_node, e)
+            # Mark the peer so route selection stops picking it. ENETUNREACH
+            # means we have no route to the host at all - flip both its TCP
+            # and WS ports to cooldown immediately. Other failures might be
+            # transient (peer refused, brief timeout) - mark just this port
+            # and let the normal threshold accumulate.
+            if peer_health.is_unreachable_network_error(e):
+                peer_health.mark_host_unreachable(next_node, reason=str(e) or type(e).__name__)
+            else:
+                peer_health.mark_failure(
+                    next_node.get('host'), next_node.get('port'),
+                    reason=str(e) or type(e).__name__,
+                )
 
     def send_to_next_hop(self, next_node, encrypted_message):
         """
@@ -338,6 +350,13 @@ class Router:
                 log.info("Sent encrypted message to %s:%s (TCP)", next_node['host'], next_node['port'])
         except Exception as e:
             log.error("Error sending to %s: %s", next_node, e)
+            if peer_health.is_unreachable_network_error(e):
+                peer_health.mark_host_unreachable(next_node, reason=str(e) or type(e).__name__)
+            else:
+                peer_health.mark_failure(
+                    next_node.get('host'), next_node.get('port'),
+                    reason=str(e) or type(e).__name__,
+                )
 
 def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
     """Build an onion route ending at ``terminal``, padded with middle relays.

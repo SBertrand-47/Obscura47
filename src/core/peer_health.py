@@ -23,10 +23,17 @@ silently; TCP failures surface immediately to the caller.
 
 from __future__ import annotations
 
+import errno
+import os
 import threading
 import time
 from typing import Iterable
 
+# Import config for its side effect: _load_dotenv() runs at config import time,
+# which guarantees OBSCURA_* values from a project-root .env file are visible
+# to our os.environ reads below even when peer_health is imported in isolation
+# (e.g. from a test or a CLI tool that skips the node/exit entry points).
+from src.utils import config as _config  # noqa: F401
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -35,6 +42,40 @@ log = get_logger(__name__)
 FAILURE_THRESHOLD = 2          # consecutive failures before peer is marked bad
 COOLDOWN_SECONDS = 120.0       # how long a bad peer stays excluded
 FAILURE_WINDOW_SECONDS = 60.0  # failures older than this don't count
+
+
+# OS error codes that indicate the local machine has no IP route to the
+# remote host - distinct from "peer refused / timed out", which would be
+# the peer's fault. ENETUNREACH usually means an IPv6 peer was advertised
+# to an IPv4-only host (or vice versa) or there's a routing outage on the
+# local side. Either way, the peer isn't broken globally - only from this
+# vantage point - so marking it locally is the right response.
+_UNREACHABLE_NETWORK_CODES: set[int] = set()
+for _name in ("ENETUNREACH", "EHOSTUNREACH"):
+    _code = getattr(errno, _name, None)
+    if isinstance(_code, int):
+        _UNREACHABLE_NETWORK_CODES.add(_code)
+# Windows surfaces these as WSA codes (10051/10065) on the WSA path and as
+# raw Win32 ERROR_NETWORK_UNREACHABLE (1231) / ERROR_HOST_UNREACHABLE (1232)
+# when a native connect() fails before sockets even get involved.
+_UNREACHABLE_NETWORK_CODES.update({10051, 10065, 1231, 1232})
+
+
+def is_unreachable_network_error(exc: BaseException | None) -> bool:
+    """True if ``exc`` indicates the local host has no route to the remote.
+
+    Inspects both ``winerror`` (set on Windows OSError for WSA / Win32
+    codes) and ``errno`` (set on POSIX). Returns False for any other
+    OSError so we don't conflate "I can't reach you" (local fact) with
+    "you refused me" (peer fact).
+    """
+    if exc is None:
+        return False
+    win = getattr(exc, "winerror", None)
+    if isinstance(win, int) and win in _UNREACHABLE_NETWORK_CODES:
+        return True
+    err = getattr(exc, "errno", None)
+    return isinstance(err, int) and err in _UNREACHABLE_NETWORK_CODES
 
 
 _lock = threading.Lock()
@@ -99,6 +140,35 @@ def mark_failure(host: str, port: int, reason: str = "") -> None:
         _state[key] = entry
 
 
+def mark_host_unreachable(peer: dict | None, reason: str = "") -> None:
+    """Mark every known port of ``peer`` as failed at threshold.
+
+    Used when an ENETUNREACH-class error surfaces - the local machine has
+    no route to the host at all, so any port on that host is also
+    unreachable from here. Records ``FAILURE_THRESHOLD`` failures at once
+    so the peer flips straight to cooldown instead of after another live
+    attempt eats another timeout. Local-only state: doesn't affect what
+    other peers think of this host.
+    """
+    if not isinstance(peer, dict):
+        return
+    host = peer.get("host")
+    if not host:
+        return
+    seen: set[int] = set()
+    for key in ("port", "ws_port"):
+        val = peer.get(key)
+        try:
+            port = int(val) if val else None
+        except (TypeError, ValueError):
+            continue
+        if not port or port in seen:
+            continue
+        seen.add(port)
+        for _ in range(FAILURE_THRESHOLD):
+            mark_failure(host, port, reason=reason or "network unreachable")
+
+
 def is_healthy(host: str | None, port: int | None) -> bool:
     """True if ``(host, port)`` is eligible for selection right now."""
     key = _key(host, port)
@@ -154,6 +224,71 @@ def reset() -> None:
 # Self-test: confirm our own WS port is reachable on the address we advertise
 # ---------------------------------------------------------------------------
 
+# Per-role outcome of the self-probe. ``ok`` is ``None`` until the first probe
+# completes (so callers gated on a known-good probe can stay conservative at
+# startup). ``consecutive_failures`` mirrors the (host, port) failure counter
+# above and uses the same FAILURE_THRESHOLD to decide when to flip ``ok``.
+_self_probe_lock = threading.Lock()
+_self_probe: dict[str, dict] = {}
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def should_advertise_ws(role: str) -> bool:
+    """Whether the heartbeat should include ``ws_port`` for ``role`` right now.
+
+    Default (env var unset): always True - preserves prior behavior where the
+    self-probe is purely diagnostic.
+
+    With ``OBSCURA_REQUIRE_WS_REACHABLE=1``: only advertise once the self-probe
+    has confirmed our WS port is reachable from the outside. A node behind a
+    firewall / CGNAT then never tells the registry it speaks WS, so circuit
+    builders never pick it for the WS hop and don't eat the dial timeout.
+    """
+    if not _env_truthy("OBSCURA_REQUIRE_WS_REACHABLE"):
+        return True
+    with _self_probe_lock:
+        entry = _self_probe.get(role)
+        if not entry or entry.get("ok") is None:
+            # Never probed - stay conservative until we have a verdict.
+            return False
+        return bool(entry["ok"])
+
+
+def _record_self_probe(role: str, ok: bool) -> bool:
+    """Update the per-role probe state. Returns True iff ``ok`` changed."""
+    with _self_probe_lock:
+        entry = _self_probe.get(role) or {
+            "ok": None, "consecutive_failures": 0, "last_check": 0.0,
+        }
+        prior_ok = entry.get("ok")
+        entry["last_check"] = time.time()
+        if ok:
+            entry["consecutive_failures"] = 0
+            entry["ok"] = True
+        else:
+            entry["consecutive_failures"] = int(entry.get("consecutive_failures", 0)) + 1
+            # Mirror the FAILURE_THRESHOLD policy used for peer health: a single
+            # transient failure doesn't flip the verdict, but a second one does.
+            if entry["consecutive_failures"] >= FAILURE_THRESHOLD:
+                entry["ok"] = False
+            elif entry["ok"] is None:
+                # First probe ever and it failed - leave verdict unknown so
+                # callers without a strict requirement still get to advertise,
+                # while strict callers (REQUIRE_WS_REACHABLE) stay suppressed.
+                entry["ok"] = None
+        _self_probe[role] = entry
+        return prior_ok != entry["ok"]
+
+
+def self_probe_snapshot() -> dict[str, dict]:
+    """Copy of the per-role self-probe state. For diagnostics/tests."""
+    with _self_probe_lock:
+        return {k: dict(v) for k, v in _self_probe.items()}
+
+
 def probe_tcp(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
     """Best-effort TCP reachability probe. Returns ``(ok, detail)``."""
     import socket
@@ -198,11 +333,13 @@ def start_self_ws_probe(
                 log.debug("peer_health self-probe (%s): no advertised host yet, skipping", role)
             else:
                 ok, why = probe_tcp(host, ws_port, timeout=3.0)
+                changed = _record_self_probe(role, ok)
                 if ok:
                     log.info(
                         "peer_health self-probe (%s): %s:%s reachable - ws_port is "
-                        "accepting external connections",
+                        "accepting external connections%s",
                         role, host, ws_port,
+                        " (recovered)" if changed else "",
                     )
                 else:
                     log.error(
