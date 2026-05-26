@@ -23,6 +23,7 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.asyncio.client import connect as ws_connect
 
 from src.core.encryptions import ecdsa_sign, ecdsa_verify
+from src.core import peer_health
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -360,6 +361,7 @@ class WSClient:
             with self._conn_lock:
                 if key in self._connections:
                     self._connections[key]["last"] = time.time()
+            peer_health.mark_success(host, port)
             return True
         except Exception as e:
             # Drop stale connection and retry once
@@ -379,9 +381,11 @@ class WSClient:
                         "last": time.time(),
                     }
                 await ws.send(frame_json)
+                peer_health.mark_success(host, port)
                 return True
             except Exception as e2:
                 log.error(f"Failed to send to {host}:{port}: {e2}")
+                peer_health.mark_failure(host, port, reason=str(e2) or type(e2).__name__)
                 return False
 
     def send_frame(self, host: str, port: int, frame_json: str,
@@ -390,14 +394,16 @@ class WSClient:
         Send a frame to a remote node via WebSocket. Thread-safe.
         Returns True on success, False on failure.
         """
+        from src.utils.config import WS_SEND_TIMEOUT
         future = asyncio.run_coroutine_threadsafe(
             self._send_frame_async(host, port, frame_json, tls),
             self._loop,
         )
         try:
-            return future.result(timeout=5.0)
+            return future.result(timeout=WS_SEND_TIMEOUT)
         except Exception as e:
             log.error(f"Send timeout/error to {host}:{port}: {e}")
+            peer_health.mark_failure(host, port, reason=str(e) or "send_timeout")
             return False
 
     def close_connection(self, host: str, port: int, tls: bool = False):
