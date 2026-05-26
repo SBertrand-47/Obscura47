@@ -40,6 +40,13 @@ FAILURE_WINDOW_SECONDS = 60.0  # failures older than this don't count
 _lock = threading.Lock()
 _state: dict[tuple[str, int], dict] = {}
 
+# Host-level cooldown. When any port on a host crosses the failure
+# threshold the host gets marked unhealthy for COOLDOWN_SECONDS so that
+# every peer entry sharing the host is excluded - even TCP-only entries
+# that don't carry a ws_port and would otherwise bypass the port-keyed
+# filter. Same machine, same unreachability.
+_host_cooldown: dict[str, float] = {}
+
 
 def _key(host: str | None, port: int | None) -> tuple[str, int] | None:
     if not host or not port:
@@ -54,7 +61,9 @@ def mark_success(host: str, port: int) -> None:
     """Record a successful WS send to ``(host, port)``.
 
     Clears any prior failure state so a peer that comes back online is
-    immediately eligible for selection again.
+    immediately eligible for selection again. Also clears the
+    host-level cooldown - a working port is strong evidence the host
+    itself is reachable.
     """
     key = _key(host, port)
     if key is None:
@@ -68,6 +77,7 @@ def mark_success(host: str, port: int) -> None:
             "last_fail": 0.0,
             "cooldown_until": 0.0,
         }
+        _host_cooldown.pop(str(host), None)
 
 
 def mark_failure(host: str, port: int, reason: str = "") -> None:
@@ -91,6 +101,7 @@ def mark_failure(host: str, port: int, reason: str = "") -> None:
         entry["last_fail"] = now
         if entry["fails"] >= FAILURE_THRESHOLD:
             entry["cooldown_until"] = now + COOLDOWN_SECONDS
+            _host_cooldown[str(host)] = now + COOLDOWN_SECONDS
             log.warning(
                 "peer_health: %s:%s marked unreachable (%d failures, reason=%s); "
                 "excluded from circuits for %ds",
@@ -99,8 +110,25 @@ def mark_failure(host: str, port: int, reason: str = "") -> None:
         _state[key] = entry
 
 
+def _host_in_cooldown(host: str | None) -> bool:
+    """True if the host itself is in a global cooldown (any-port failure)."""
+    if not host:
+        return False
+    with _lock:
+        until = _host_cooldown.get(str(host), 0.0)
+    return bool(until and time.time() < until)
+
+
 def is_healthy(host: str | None, port: int | None) -> bool:
-    """True if ``(host, port)`` is eligible for selection right now."""
+    """True if ``(host, port)`` is eligible for selection right now.
+
+    Returns False if either the specific port is in cooldown *or* the
+    host as a whole is in cooldown - one dead port on a host is strong
+    evidence other ports on the same host are unreachable too (same
+    machine, same firewall, same NAT).
+    """
+    if _host_in_cooldown(host):
+        return False
     key = _key(host, port)
     if key is None:
         return True
@@ -114,18 +142,22 @@ def is_healthy(host: str | None, port: int | None) -> bool:
 
 
 def is_peer_healthy(peer: dict | None) -> bool:
-    """True if ``peer``'s WS endpoint is healthy (or it has no WS endpoint).
+    """True if ``peer``'s host is reachable.
 
-    Peers without a ``ws_port`` are treated as healthy here because the
-    WS transport - which is what silently times out - is bypassed for
-    them; any TCP failure surfaces synchronously to the caller.
+    Checks the host-level cooldown first so a LAN peer that advertises
+    no ``ws_port`` (and would otherwise sneak past the port-keyed
+    filter) still gets excluded when its host is known-bad. Falls back
+    to the WS port check when available.
     """
     if not isinstance(peer, dict):
         return True
+    host = peer.get("host")
+    if _host_in_cooldown(host):
+        return False
     ws_port = peer.get("ws_port")
     if not ws_port:
         return True
-    return is_healthy(peer.get("host"), ws_port)
+    return is_healthy(host, ws_port)
 
 
 def filter_healthy(peers: Iterable[dict]) -> list[dict]:
@@ -148,6 +180,7 @@ def reset() -> None:
     """Clear all tracked health state. For tests."""
     with _lock:
         _state.clear()
+        _host_cooldown.clear()
 
 
 # ---------------------------------------------------------------------------
