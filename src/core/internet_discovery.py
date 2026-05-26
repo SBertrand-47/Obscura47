@@ -156,7 +156,48 @@ def is_self_peer(peer: dict | None) -> bool:
     pub = peer.get("pub")
     if pub and _normalize_pem(pub) in get_self_peer_pubs():
         return True
+    # Last line of defence: any peer at our public IP, regardless of port
+    # or pubkey, is on our network. When two LAN machines share a NAT the
+    # registry's (host, port) primary key collapses them into one entry
+    # whose pubkey may belong to the other machine - making the pubkey
+    # check above silently fail. Routing through our own WAN IP is
+    # never useful and tends to be unreachable anyway (no port forward).
+    if host and _my_public_ip and host == _my_public_ip:
+        return True
     return False
+
+
+def learn_public_ip(force: bool = False) -> str | None:
+    """Learn this machine's public IP from the registry.
+
+    Calls the registry's /whoami endpoint and caches the result in
+    ``_my_public_ip``. Useful for processes that don't otherwise
+    register (e.g. a hidden-service host) but still need to recognise
+    themselves in the peer list to avoid picking themselves as an
+    intro or rendezvous point.
+
+    Falls back to the ``OBSCURA_MY_PUBLIC_IP`` env var if the registry
+    doesn't implement /whoami (old deployment) so users can hard-set
+    the IP without redeploying anything.
+    """
+    global _my_public_ip
+    if _my_public_ip and not force:
+        return _my_public_ip
+    override = os.environ.get("OBSCURA_MY_PUBLIC_IP", "").strip()
+    if override:
+        _my_public_ip = override
+        log.info("Public IP set from OBSCURA_MY_PUBLIC_IP=%s", override)
+        return _my_public_ip
+    try:
+        result = registry_request_json(f"{REGISTRY_URL}/whoami", timeout=5)
+        ip = result.get("ip") if isinstance(result, dict) else None
+        if ip:
+            _my_public_ip = ip
+            log.info("Learned public IP from registry /whoami: %s", ip)
+            return ip
+    except Exception as e:
+        log.debug("Failed to learn public IP via /whoami: %s", e)
+    return _my_public_ip
 
 
 def is_private_peer(peer: dict | None) -> bool:

@@ -50,6 +50,7 @@ from src.core.router import (
 from src.core.ws_transport import WSClient
 from src.core.internet_discovery import (
     fetch_peers_from_registry,
+    learn_public_ip,
     registry_request_json,
     RegistryHTTPError,
 )
@@ -347,7 +348,7 @@ class HiddenServiceHost:
 
     def _pick_intro_points(self, peers: list[dict], count: int) -> list[dict]:
         from src.core.internet_discovery import (
-            is_self_peer, is_private_peer, allow_lan_peers,
+            is_self_peer, is_private_peer, is_public_internet_host, allow_lan_peers,
         )
         lan_ok = allow_lan_peers()
         candidates = [
@@ -469,6 +470,14 @@ class HiddenServiceHost:
     def run(self):
         set_reverse_frame_callback(self._on_tcp_reverse)
         set_proxy_ws_client(self.ws_client)
+
+        # Learn our public IP before picking intros. A host whose machine
+        # also runs a node ends up sharing the registry entry for that
+        # WAN IP with any colocated/sibling-NAT machine; without this
+        # call, the host can't recognise itself in the peer list and
+        # ends up publishing its own WAN IP as an intro point - which
+        # has no port forward and silently strands every client dial.
+        learn_public_ip()
 
         if not self.establish():
             return False
