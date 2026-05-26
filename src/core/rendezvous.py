@@ -110,14 +110,20 @@ def _pick_rendezvous_point(
     # Accept any peer with host/port/pub. relay_peers by convention holds
     # node relays; registry-sourced peers also carry role='node'.
     # Self-peers are filtered too - we cannot rendezvous through our own
-    # NAT-bound relay from this machine.
-    from src.core.internet_discovery import is_self_peer, is_public_internet_host
+    # NAT-bound relay from this machine. RFC1918 peers are filtered for
+    # the same reason from the host's side: if we picked a LAN-only rv
+    # point, the host's `rv_join` would have no path to it.
+    from src.core.internet_discovery import (
+        is_self_peer, is_private_peer, allow_lan_peers,
+    )
+    lan_ok = allow_lan_peers()
     candidates = [
         p for p in peers
         if p.get('pub') and p.get('host') and p.get('port')
         and (p.get('role') in (None, 'node'))
         and (p.get('host'), p.get('port')) not in exclude
         and not is_self_peer(p)
+        and (lan_ok or not is_private_peer(p))
     ]
     if not candidates:
         return None
@@ -173,45 +179,6 @@ def dial_hidden_service(
     from src.core.internet_discovery import is_self_peer, is_public_internet_host
     non_self_intros = [p for p in intros if not is_self_peer(p)]
     intro_candidates = non_self_intros or intros
-
-    # Synchronously probe each intro's WS port. The descriptor often
-    # carries stale intros that the host registered earlier but can no
-    # longer be reached; without a fresh probe, the dial picks one and
-    # eats a ~30s send-retry timeout before failing. Probes are short
-    # (3s each) and run sequentially - usually 1-3 intros - so total
-    # added latency is bounded and only on the first dial after
-    # discovery (peer_health caches the result).
-    for p in intro_candidates:
-        ws_port = p.get('ws_port')
-        if not ws_port or not p.get('host'):
-            continue
-        if not peer_health.is_peer_healthy(p):
-            continue
-        ok, why = peer_health.probe_tcp(p['host'], int(ws_port), timeout=3.0)
-        if ok:
-            peer_health.mark_success(p['host'], int(ws_port))
-        else:
-            peer_health.mark_failure(p['host'], int(ws_port),
-                                     reason=f"intro probe: {why}")
-            peer_health.mark_failure(p['host'], int(ws_port),
-                                     reason=f"intro probe: {why}")
-
-    # If every intro the descriptor advertises is now in cooldown, the
-    # dial is doomed - it would just burn the send-retry budget on a
-    # dead first hop. Fail fast so the browser sees an error in seconds
-    # instead of half a minute, and surface a clear log telling the
-    # operator the host needs to republish with reachable intros.
-    healthy_intros_count = sum(
-        1 for p in intro_candidates if peer_health.is_peer_healthy(p)
-    )
-    if healthy_intros_count == 0:
-        log.warning(
-            "HS dial %s aborted: all %d descriptor intro(s) are unreachable "
-            "from this machine. The host needs to republish with intros that "
-            "have publicly-routable WS ports.",
-            addr, len(intro_candidates),
-        )
-        return None
     # Order intros by preference: healthy + public first, then healthy +
     # private, then unhealthy. We try them in order on failure rather
     # than giving up after the first dead intro.
