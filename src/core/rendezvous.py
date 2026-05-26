@@ -189,6 +189,23 @@ def dial_hidden_service(
     ranked_intros = sorted(intro_candidates, key=_intro_rank)
     intro_point = ranked_intros[0]
 
+    # If every intro the descriptor advertises is in cooldown, the dial
+    # can only burn the send-retry budget on a dead first hop. Fail
+    # fast so the browser sees an error in seconds instead of half a
+    # minute, and surface a clear log telling the operator the host
+    # needs to republish with reachable intros.
+    healthy_intros_count = sum(
+        1 for p in intro_candidates if peer_health.is_peer_healthy(p)
+    )
+    if healthy_intros_count == 0:
+        log.warning(
+            "HS dial %s aborted: all %d descriptor intro(s) are unreachable "
+            "from this machine (peer_health cooldown). The host needs to "
+            "republish with intros that have publicly-routable WS ports.",
+            addr, len(intro_candidates),
+        )
+        return None
+
     if peers is None:
         peers = fetch_peers_from_registry() or []
     rv_point = _pick_rendezvous_point(
