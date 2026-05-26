@@ -11,6 +11,7 @@ from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypa
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer
+from src.core.peer_health import start_self_ws_probe
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -19,6 +20,7 @@ from src.utils.config import (
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE, TUNNEL_IDLE_SECONDS,
     EXIT_EGRESS_AUDIT_ENABLED, EXIT_EGRESS_AUDIT_PATH, AUDIT_RETENTION_DAYS,
     EXIT_DENY_PRIVATE_IPS, EXIT_ALLOW_DOMAINS, EXIT_DENY_DOMAINS,
+    EXIT_ORIGIN_CONNECT_TIMEOUT,
 )
 
 EXIT_NODE_MULTICAST_PORT = CFG_EXIT_NODE_MULTICAST_PORT  # Discovery port for exit nodes
@@ -76,6 +78,13 @@ class ExitNode:
         )
         self.ws_server.start()
         log.info(f"WebSocket server on port {self.ws_port}")
+
+        # Probe our own WS port from the outside so we notice immediately
+        # if the network/firewall isn't actually letting peers reach us.
+        start_self_ws_probe(
+            "exit", self.ws_port,
+            advertised_host=EXIT_ADVERTISED_HOST or None,
+        )
 
         # Periodic sweeper for abandoned tunnels
         threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
@@ -375,7 +384,21 @@ class ExitNode:
                 self.send_stream_close(return_path, request_id)
                 return
 
-            out = socket.create_connection((host, port))
+            connect_started = time.time()
+            try:
+                out = socket.create_connection(
+                    (host, port), timeout=EXIT_ORIGIN_CONNECT_TIMEOUT)
+            except Exception as e:
+                dt_ms = (time.time() - connect_started) * 1000.0
+                log.warning(
+                    "Exit origin connect failed | %s:%s | %.0fms | %s | request_id=%s",
+                    host, port, dt_ms, e, request_id)
+                raise
+            # Clear the connect timeout so subsequent reads/writes block normally.
+            out.settimeout(None)
+            log.info(
+                "Exit origin connected | %s:%s | %.0fms | request_id=%s",
+                host, port, (time.time() - connect_started) * 1000.0, request_id)
             # Store the live socket and flush any queued data frames
             if info:
                 info['sock'] = out
@@ -430,6 +453,14 @@ class ExitNode:
             if info:
                 self._audit_exit_event("egress_connect_failed", info, result="connect_failed", error=str(e))
             self.tunnels.pop(request_id, None)
+            # Tell the proxy the tunnel is dead so the browser sees a fast
+            # close instead of waiting for the proxy's idle-timeout GC.
+            try:
+                self.send_stream_close(return_path, request_id)
+            except Exception as send_err:
+                log.warning(
+                    "Failed to notify proxy of connect failure | request_id=%s | %s",
+                    request_id, send_err)
 
 if __name__ == "__main__":
     exit_node = ExitNode(port=6000)
