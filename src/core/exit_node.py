@@ -43,6 +43,7 @@ class ExitNode:
         self.ws_port = EXIT_WS_PORT
         self.lan_discovery = lan_discovery
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.running = True
         self._killed = False
         self.peers = []  # Stores discovered nodes
