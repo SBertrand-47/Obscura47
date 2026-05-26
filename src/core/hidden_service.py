@@ -370,12 +370,47 @@ class HiddenServiceHost:
             candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
         if not candidates:
             return []
+        # Reachability gate: a candidate that looks fine on paper (public IP,
+        # not self, registered in the registry) might still be unreachable
+        # from this host - common case is a dual-stack VPS that registered
+        # both its IPv4 and IPv6 address, and we have no IPv6 default route.
+        # Publishing such a peer as an intro silently strands every client
+        # dial. Skip candidates whose WS port doesn't accept TCP within 3s.
+        reachable: list[dict] = []
+        for p in candidates:
+            ws_port = p.get('ws_port')
+            host = p.get('host')
+            if ws_port and host:
+                if not peer_health.is_peer_healthy(p):
+                    log.info("HS skip intro candidate %s:%s (peer_health cooldown)",
+                             host, p.get('port'))
+                    continue
+                ok, why = peer_health.probe_tcp(host, int(ws_port), timeout=3.0)
+                if ok:
+                    peer_health.mark_success(host, int(ws_port))
+                else:
+                    peer_health.mark_failure(host, int(ws_port),
+                                             reason=f"host intro probe: {why}")
+                    peer_health.mark_failure(host, int(ws_port),
+                                             reason=f"host intro probe: {why}")
+                    log.info("HS skip intro candidate %s:%s (probe failed: %s)",
+                             host, p.get('port'), why)
+                    continue
+            reachable.append(p)
+        if not reachable:
+            log.warning(
+                "HS %s: every intro candidate failed reachability probe - "
+                "publishing nothing this cycle. Check that at least one "
+                "registered node is reachable on its WS port from this host.",
+                getattr(self, 'address', '?'),
+            )
+            return []
         # Prefer publicly-routable intros so clients on any network can
         # reach them. Fall back to private-IP relays only to fill the
         # quota if there aren't enough public ones.
-        random.shuffle(candidates)
-        public = [p for p in candidates if is_public_internet_host(p.get('host'))]
-        private = [p for p in candidates if not is_public_internet_host(p.get('host'))]
+        random.shuffle(reachable)
+        public = [p for p in reachable if is_public_internet_host(p.get('host'))]
+        private = [p for p in reachable if not is_public_internet_host(p.get('host'))]
         chosen = (public + private)[:count]
         if not public:
             log.warning(

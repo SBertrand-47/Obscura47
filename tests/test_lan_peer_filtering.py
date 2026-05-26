@@ -36,6 +36,18 @@ def _no_lan_override(monkeypatch):
     monkeypatch.delenv("OBSCURA_ALLOW_LAN_PEERS", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _stub_intro_probe(monkeypatch):
+    """Stub host-side reachability probe so IP-class tests don't hit the
+    network. The intro picker probes each candidate's WS port before
+    publishing; the synthetic peers in these tests can't accept TCP, so
+    without the stub every probe would fail and erase the filter logic
+    under test."""
+    from src.core import peer_health
+    monkeypatch.setattr(peer_health, "probe_tcp", lambda *a, **k: (True, ""))
+    peer_health.reset()
+
+
 def _fake_host():
     """Build a HiddenServiceHost-shaped object without running __init__."""
     from src.core import hidden_service as hs_mod

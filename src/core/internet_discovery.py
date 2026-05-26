@@ -49,12 +49,18 @@ def _normalize_pem(pem: str | None) -> str:
 def _local_interface_ips() -> set[str]:
     """Best-effort enumeration of IPs bound to this machine.
 
-    Combines hostname resolution with the UDP-connect trick (open a
-    socket, "connect" to a public address - which doesn't actually
-    send anything for UDP - and ask which source IP the OS would use).
-    The trick catches IPv6 interfaces that ``gethostbyname`` misses,
-    so a host on a dual-stack box won't accidentally publish its own
-    public IPv6 as an intro point.
+    Combines four sources so a dual-stack box doesn't accidentally
+    publish its own public IPv6 (or a privacy-extension temporary
+    address that differs from the routable one) as an intro point:
+
+    1. Hostname resolution (``gethostbyname_ex`` / ``getaddrinfo``).
+    2. UDP-connect source-IP trick (works for both v4 and v6).
+    3. Parsing ``ifconfig`` / ``ip -o addr`` output, which enumerates
+       *every* address on every interface even when there's no route
+       to an external probe target.
+    4. ``OBSCURA_EXTRA_SELF_IPS`` env var (comma-separated explicit
+       overrides for environments where automatic detection misses
+       something).
     """
     ips: set[str] = {"127.0.0.1", "::1", "localhost"}
     try:
@@ -68,7 +74,7 @@ def _local_interface_ips() -> set[str]:
             for info in socket.getaddrinfo(hostname, None):
                 ip = info[4][0]
                 if ip:
-                    ips.add(ip)
+                    ips.add(_strip_v6_zone(ip))
         except Exception:
             pass
     except Exception:
@@ -76,9 +82,7 @@ def _local_interface_ips() -> set[str]:
 
     # UDP-connect trick: ask the OS which source IP it would pick for
     # an outbound route to a public address. No packets are sent (UDP
-    # connect just sets the default destination). Captures both IPv4
-    # and IPv6 interface IPs even when the hostname only resolves to
-    # one family.
+    # connect just sets the default destination).
     for family, destination in (
         (socket.AF_INET, ("1.1.1.1", 80)),
         (socket.AF_INET6, ("2606:4700:4700::1111", 80)),
@@ -89,17 +93,69 @@ def _local_interface_ips() -> set[str]:
                 s.connect(destination)
                 ip = s.getsockname()[0]
                 if ip:
-                    # IPv6 source addresses can come with a zone suffix
-                    # like ``fe80::1%en0`` - strip it so equality checks
-                    # against peer-list hosts succeed.
-                    if "%" in ip:
-                        ip = ip.split("%", 1)[0]
-                    ips.add(ip)
+                    ips.add(_strip_v6_zone(ip))
             finally:
                 s.close()
         except Exception:
             pass
+
+    # Shell out to ifconfig / ip to enumerate every interface address.
+    # Works even when there's no outbound IPv6 route to the probe
+    # target, and catches IPv6 privacy temporary addresses that the
+    # UDP-connect trick misses (the OS may pick the temporary, while
+    # the node-registration code published the stable one).
+    ips.update(_enumerate_interface_ips_shell())
+
+    # Explicit env-var override.
+    extra = os.environ.get("OBSCURA_EXTRA_SELF_IPS", "").strip()
+    if extra:
+        for raw in extra.split(","):
+            ip = raw.strip()
+            if ip:
+                ips.add(_strip_v6_zone(ip))
     return ips
+
+
+def _strip_v6_zone(ip: str) -> str:
+    """Drop the ``%en0``-style zone suffix from a link-local IPv6."""
+    if "%" in ip:
+        return ip.split("%", 1)[0]
+    return ip
+
+
+def _enumerate_interface_ips_shell() -> set[str]:
+    """Parse ``ip -o addr`` or ``ifconfig`` output for interface IPs.
+
+    Cross-platform stdlib-only fallback - the UDP-connect trick relies
+    on an outbound route existing, but a host may have a publicly-
+    routable IPv6 address bound to an interface with no default v6
+    route (or with IPv6 firewalled outbound), in which case getsockname
+    fails or returns a different address than what's actually bound.
+    """
+    import re
+    import subprocess
+    candidates: set[str] = set()
+    for argv in (("ip", "-o", "addr"), ("ifconfig",)):
+        try:
+            out = subprocess.run(
+                argv, capture_output=True, text=True, timeout=2,
+            ).stdout
+        except Exception:
+            continue
+        if not out:
+            continue
+        # ``ip -o addr``:    "2: en0    inet 192.168.1.105/24 ..."
+        # ``ifconfig``:      "        inet 192.168.1.105 netmask 0xffffff00 ..."
+        #                    "        inet6 fe80::1%en0 prefixlen 64 ..."
+        for token in re.findall(
+            r"\binet6?\s+([0-9a-fA-F:.]+)(?:[/%]|\s)", out,
+        ):
+            ip = _strip_v6_zone(token)
+            if ip:
+                candidates.add(ip)
+        if candidates:
+            return candidates
+    return candidates
 
 
 def get_self_peer_keys() -> set[tuple[str, int]]:
