@@ -47,7 +47,15 @@ def _normalize_pem(pem: str | None) -> str:
 
 
 def _local_interface_ips() -> set[str]:
-    """Best-effort enumeration of IPs bound to this machine."""
+    """Best-effort enumeration of IPs bound to this machine.
+
+    Combines hostname resolution with the UDP-connect trick (open a
+    socket, "connect" to a public address - which doesn't actually
+    send anything for UDP - and ask which source IP the OS would use).
+    The trick catches IPv6 interfaces that ``gethostbyname`` misses,
+    so a host on a dual-stack box won't accidentally publish its own
+    public IPv6 as an intro point.
+    """
     ips: set[str] = {"127.0.0.1", "::1", "localhost"}
     try:
         hostname = socket.gethostname()
@@ -65,6 +73,32 @@ def _local_interface_ips() -> set[str]:
             pass
     except Exception:
         pass
+
+    # UDP-connect trick: ask the OS which source IP it would pick for
+    # an outbound route to a public address. No packets are sent (UDP
+    # connect just sets the default destination). Captures both IPv4
+    # and IPv6 interface IPs even when the hostname only resolves to
+    # one family.
+    for family, destination in (
+        (socket.AF_INET, ("1.1.1.1", 80)),
+        (socket.AF_INET6, ("2606:4700:4700::1111", 80)),
+    ):
+        try:
+            s = socket.socket(family, socket.SOCK_DGRAM)
+            try:
+                s.connect(destination)
+                ip = s.getsockname()[0]
+                if ip:
+                    # IPv6 source addresses can come with a zone suffix
+                    # like ``fe80::1%en0`` - strip it so equality checks
+                    # against peer-list hosts succeed.
+                    if "%" in ip:
+                        ip = ip.split("%", 1)[0]
+                    ips.add(ip)
+            finally:
+                s.close()
+        except Exception:
+            pass
     return ips
 
 
