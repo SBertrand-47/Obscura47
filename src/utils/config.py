@@ -103,6 +103,12 @@ CHANNEL_IDLE_CLOSE_SECONDS = float(os.getenv("OBSCURA_CHANNEL_IDLE_CLOSE_SECONDS
 # General socket connect timeout (seconds) for relay/router TCP connections
 SOCKET_CONNECT_TIMEOUT = float(os.getenv("OBSCURA_SOCKET_CONNECT_TIMEOUT", "5.0"))
 
+# WebSocket send timeout (seconds). Has to cover the worst case of TCP
+# handshake + WS upgrade + two-round-trip ECDSA challenge-response when
+# the connection is brand-new and the peer is across the public internet
+# - so it is intentionally several times the steady-state send budget.
+WS_SEND_TIMEOUT = float(os.getenv("OBSCURA_WS_SEND_TIMEOUT", "12.0"))
+
 # Onion/observability
 ONION_ONLY = getenv_str("OBSCURA_ONION_ONLY", "false").lower() in ("1", "true", "yes")
 JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "yes")
