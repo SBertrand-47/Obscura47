@@ -381,12 +381,15 @@ class HiddenServiceHost:
             ws_port = p.get('ws_port')
             host = p.get('host')
             if ws_port and host:
-                if not peer_health.is_peer_healthy(p):
-                    log.info("HS skip intro candidate %s:%s (peer_health cooldown)",
-                             host, p.get('port'))
-                    continue
+                # Always probe - the probe is the source of truth for
+                # reachability. Skipping just because peer_health is in
+                # cooldown would let one transient failure black-hole
+                # an otherwise-fine peer for 120s, and on small networks
+                # that means the host has nothing left to publish.
                 ok, why = peer_health.probe_tcp(host, int(ws_port), timeout=3.0)
                 if ok:
+                    # mark_success clears any prior cooldown so the rest
+                    # of the system stops avoiding this peer too.
                     peer_health.mark_success(host, int(ws_port))
                 else:
                     peer_health.mark_failure(host, int(ws_port),
