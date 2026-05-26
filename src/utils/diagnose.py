@@ -281,7 +281,106 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
                 "machine may be offline."
             ),
         ))
+        return report
+
+    # 5. End-to-end rendezvous dial.
+    #
+    # The descriptor-level checks above only confirm the host is *publishing*
+    # and that its intro points appear in the live peer list. They do not
+    # prove a dialer can actually splice an rv circuit with the host - and
+    # we have seen real-world cases where they cannot, e.g. the host
+    # advertises an intro on an RFC1918 LAN address, the host's intro-WS
+    # idle-closed so reverse_data has no path back, or the host process
+    # exited inside the descriptor's 1-hour TTL window.
+    #
+    # We attempt a real dial with an ephemeral keypair so the diagnostic
+    # exercises the same code path as the browser-driven dial and surfaces
+    # those failures explicitly.
+    _append_rendezvous_step(report, address, intros)
     return report
+
+
+def _append_rendezvous_step(
+    report: "DiagnosticReport",
+    address: str,
+    intros: list[dict],
+) -> None:
+    import time
+    from src.core.rendezvous import dial_hidden_service, close_hs
+
+    try:
+        from Crypto.PublicKey import ECC
+        priv = ECC.generate(curve="P-256")
+        pub_pem = priv.public_key().export_key(format="PEM")
+    except Exception as e:
+        report.steps.append(DiagnosticStep(
+            name="Rendezvous dial",
+            ok=False,
+            summary=f"could not generate ephemeral key: {e}",
+        ))
+        return
+
+    timeout = 12.0
+    t0 = time.monotonic()
+    try:
+        dialed = dial_hidden_service(address, pub_pem, ready_timeout=timeout)
+    except Exception as e:
+        report.steps.append(DiagnosticStep(
+            name="Rendezvous dial",
+            ok=False,
+            summary=f"raised {type(e).__name__}: {e}",
+        ))
+        return
+    elapsed = time.monotonic() - t0
+
+    if not dialed:
+        from src.core.internet_discovery import is_private_peer
+        lan_intros = [
+            f"{p.get('host')}:{p.get('port')}"
+            for p in intros if is_private_peer(p)
+        ]
+        causes = [
+            "the host process exited while its descriptor was still within "
+            "the 1-hour TTL (the descriptor lookup above only proves the "
+            "descriptor exists, not that the host is currently alive)",
+            "the host's intro-point WS channel idle-closed, so reverse_data "
+            "frames from the intro point have no path back to the host - "
+            "the host's republish loop normally re-establishes within ~50s",
+            "the descriptor advertises an intro on a network address that "
+            "is not reachable from this dialer (e.g. an RFC1918 LAN IP)",
+        ]
+        detail = (
+            "The introduce + rv_ready handshake did not complete within "
+            f"{timeout:.0f}s. Common causes: "
+            + "; ".join(f"({chr(ord('a')+i)}) {c}" for i, c in enumerate(causes))
+            + "."
+        )
+        if lan_intros:
+            detail += (
+                "\n\nThis descriptor currently advertises intro point(s) on a "
+                "private LAN address: " + ", ".join(lan_intros) + ". External "
+                "dialers cannot reach those, so any rotation onto them will "
+                "fail. Cause (c) is the most likely fit here."
+            )
+        report.steps.append(DiagnosticStep(
+            name="Rendezvous dial",
+            ok=False,
+            summary=f"rv_ready timeout after {elapsed:.1f}s",
+            detail=detail,
+        ))
+        return
+
+    # Success - tear the rendezvous circuit down so we don't leak it.
+    route, rv_req_id, _ = dialed
+    try:
+        close_hs(route, rv_req_id)
+    except Exception:
+        pass
+    report.steps.append(DiagnosticStep(
+        name="Rendezvous dial",
+        ok=True,
+        summary=f"introduce + rv_ready completed in {elapsed:.1f}s",
+    ))
 
 
 def format_report_text(report: DiagnosticReport) -> str:

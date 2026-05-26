@@ -345,15 +345,26 @@ class HiddenServiceHost:
     # ── Startup ───────────────────────────────────────────────────
 
     def _pick_intro_points(self, peers: list[dict], count: int) -> list[dict]:
-        from src.core.internet_discovery import is_self_peer, is_public_internet_host
+        from src.core.internet_discovery import (
+            is_self_peer, is_private_peer, allow_lan_peers,
+        )
+        lan_ok = allow_lan_peers()
         candidates = [
             p for p in peers
-            if p.get('role') == 'node' and p.get('pub') and not is_self_peer(p)
+            if p.get('role') == 'node' and p.get('pub')
+            and not is_self_peer(p)
+            and (lan_ok or not is_private_peer(p))
         ]
         if not candidates:
-            # All nodes resolve to self - fall back so the host can still
-            # publish an intro (it will fail to reach itself, but at least
-            # we surface the empty-network condition via the warning path).
+            # All public nodes are filtered (self or LAN-only) - fall back
+            # so the host can still publish an intro. The dialer will fail
+            # to reach it, but the diagnose path surfaces that explicitly
+            # so we prefer the warning over silent unreachability.
+            log.warning(
+                "HS %s: no externally-reachable intro candidates "
+                "(self-filter or RFC1918); falling back to any node",
+                getattr(self, 'address', '?'),
+            )
             candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
         if not candidates:
             return []
