@@ -41,6 +41,27 @@ class DiagnosticReport:
         return None
 
 
+def _probe_ws_reachable(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    """Best-effort TCP probe of a peer's WebSocket port.
+
+    Returns ``(ok, detail)``. ``ok=True`` means a TCP connection
+    completed within ``timeout``; ``False`` means the port refused or
+    timed out. A passing TCP probe doesn't prove the WS upgrade or auth
+    handshake will succeed, but a failing one is conclusive proof the
+    peer cannot be used as a hop, which is what diagnose was missing.
+    """
+    import socket
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True, ""
+    except socket.timeout:
+        return False, "timed out"
+    except OSError as e:
+        return False, str(e) or e.__class__.__name__
+    except Exception as e:
+        return False, f"{e.__class__.__name__}: {e}"
+
+
 def run_diagnostics(address: str | None = None) -> DiagnosticReport:
     """Run the registry/HS lookup walk and return a structured report.
 
@@ -48,13 +69,20 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
     even when the user never triggers a diagnostic.
     """
     from src.utils.config import REGISTRY_URL
-    from src.utils.onion_addr import is_obscura_address
+    from src.utils.onion_addr import is_obscura_address, normalize_obscura_input
     from src.core.internet_discovery import (
         registry_request_json,
         RegistryHTTPError,
         fetch_peers_from_registry,
+        is_self_peer,
+        is_public_internet_host,
     )
 
+    # Accept the same shapes a user is likely to paste from a browser
+    # (``http://x.obscura/``, ``x.obscura:80``). The display address keeps
+    # the user's original input so they can see what was parsed; downstream
+    # checks use the bare hostname.
+    address = normalize_obscura_input(address) if address else address
     report = DiagnosticReport(registry_url=REGISTRY_URL, address=address)
 
     # 1. Registry health
@@ -89,6 +117,70 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
             "one relay) heartbeating against this registry."
         ) if no_peers else None,
     ))
+
+    # 2a. Private-IP peers. A relay registered on an RFC1918 address is
+    # only useful inside that LAN; off-LAN clients and hosts cannot
+    # reach it, so picking it as rv/intro silently breaks dials. Doesn't
+    # block the dial (peers may legitimately serve same-LAN traffic) but
+    # surfaces the risk loudly.
+    private_peers = [
+        p for p in peers
+        if p.get("host") and not is_public_internet_host(p["host"])
+        and not is_self_peer(p)
+    ]
+    public_count = len([p for p in peers if is_public_internet_host(p.get("host"))])
+    if private_peers:
+        labels = [f"{p['host']}:{p.get('port')}" for p in private_peers]
+        report.steps.append(DiagnosticStep(
+            name="Public-routable peers",
+            ok=public_count > 0,
+            summary=(
+                f"{public_count} public, {len(private_peers)} private-IP peer(s)"
+            ),
+            detail=(
+                "These peers are heartbeating the registry on private IPs, so "
+                "they are only reachable inside that LAN. Picking one as a "
+                "rendezvous or intro point silently breaks .obscura dials "
+                "from hosts on a different network (rv_join from the host "
+                "never lands). Private-IP peers: " + ", ".join(labels)
+            ),
+        ))
+
+    # 2b. Peer WS reachability. Catches the case the registry calls a
+    # peer alive (HTTP heartbeat works) but its WS port is firewalled
+    # or its WS server never bound - the dominant silent-failure mode
+    # for .obscura dials, since every circuit through such a peer dies
+    # on a 15s handshake timeout.
+    probe_targets = [p for p in peers if p.get("ws_port") and not is_self_peer(p)]
+    if probe_targets:
+        reachable: list[str] = []
+        unreachable: list[str] = []
+        for p in probe_targets:
+            ok, why = _probe_ws_reachable(p["host"], p["ws_port"], timeout=3.0)
+            label = f"{p['host']}:{p['ws_port']}"
+            if ok:
+                reachable.append(label)
+            else:
+                unreachable.append(f"{label} ({why})")
+        if unreachable:
+            report.steps.append(DiagnosticStep(
+                name="Peer WS reachability",
+                ok=False,
+                summary=f"{len(reachable)}/{len(probe_targets)} WS ports reachable",
+                detail=(
+                    "These peers heartbeat the registry but their WebSocket "
+                    "port doesn't accept TCP from this machine. Circuits "
+                    "that pick them will time out (~15s) and .obscura dials "
+                    "may fail even when the registry says everything is "
+                    "fine. Unreachable: " + ", ".join(unreachable)
+                ),
+            ))
+        else:
+            report.steps.append(DiagnosticStep(
+                name="Peer WS reachability",
+                ok=True,
+                summary=f"all {len(reachable)} WS ports reachable",
+            ))
 
     if not address:
         return report

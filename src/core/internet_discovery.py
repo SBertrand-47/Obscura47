@@ -7,6 +7,7 @@ Proxies call `fetch_peers_from_registry()` to get internet-wide peers.
 Supports ECDSA challenge-response auth when a node provides its ECC private key.
 """
 
+import ipaddress
 import json
 import os
 import socket
@@ -112,6 +113,31 @@ def get_self_peer_pubs() -> set[str]:
             continue
     _self_pubs_cache = pubs
     return pubs
+
+
+def is_public_internet_host(host: str | None) -> bool:
+    """True if ``host`` looks routable across the public internet.
+
+    A peer advertised on an RFC1918 / link-local / loopback address is
+    only useful to clients on the same LAN. Picking such a peer as a
+    rendezvous point silently breaks `.obscura` dials whenever the host
+    sits on a different network - its rv_join never reaches the LAN-only
+    relay and the splice never happens.
+    """
+    if not host:
+        return False
+    s = str(host).strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    try:
+        ip = ipaddress.ip_address(s)
+    except ValueError:
+        # Hostnames are assumed public; DNS will resolve them at dial time.
+        return True
+    return not (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+    )
 
 
 def is_self_peer(peer: dict | None) -> bool:
@@ -405,6 +431,27 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
         return []
 
 
+def _warm_peer_health(host: str, port: int) -> None:
+    """Cheap TCP probe of a peer's WS port to seed peer_health.
+
+    Runs in a worker thread so newly-discovered peers don't block the
+    discovery loop. Without this seeding, the first circuit attempt
+    after startup picks blindly from all advertised peers - including
+    ones whose WS is firewalled - and we eat a ~30s timeout per dead
+    peer before health tracking kicks in.
+    """
+    try:
+        from src.core.peer_health import probe_tcp, mark_success, mark_failure
+        ok, why = probe_tcp(host, port, timeout=3.0)
+        if ok:
+            mark_success(host, port)
+        else:
+            mark_failure(host, port, reason=f"discovery probe: {why}")
+            mark_failure(host, port, reason=f"discovery probe: {why}")
+    except Exception:
+        pass
+
+
 def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None):
     """
     Fetch peers from the registry and merge them into a local peer list.
@@ -413,6 +460,7 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
     """
     remote = fetch_peers_from_registry(role_filter=role_filter)
     now = time.time()
+    newly_discovered: list[tuple[str, int]] = []
     for p in remote:
         if role_filter and p.get("role") != role_filter:
             continue
@@ -428,6 +476,15 @@ def merge_internet_peers(target_list: List[Dict], role_filter: str | None = None
         if len(target_list) > before:
             log.info(f"Discovered {p.get('role', '?')} at {p['host']}:{p['port']}"
                      + (f" (ws:{p['ws_port']})" if p.get('ws_port') else ""))
+            if entry.get("ws_port") and not is_self_peer(entry):
+                newly_discovered.append((p["host"], int(p["ws_port"])))
+
+    # Warm peer_health for new peers in the background so the very first
+    # circuit doesn't blindly pick a peer whose WS port is firewalled.
+    for host, ws_port in newly_discovered:
+        threading.Thread(
+            target=_warm_peer_health, args=(host, ws_port), daemon=True,
+        ).start()
 
     # Expire old peers
     cutoff = now - PEER_EXPIRY_SECONDS
