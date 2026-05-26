@@ -11,6 +11,7 @@ from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypa
 from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer
+from src.core.peer_health import start_self_ws_probe
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -77,6 +78,13 @@ class ExitNode:
         )
         self.ws_server.start()
         log.info(f"WebSocket server on port {self.ws_port}")
+
+        # Probe our own WS port from the outside so we notice immediately
+        # if the network/firewall isn't actually letting peers reach us.
+        start_self_ws_probe(
+            "exit", self.ws_port,
+            advertised_host=EXIT_ADVERTISED_HOST or None,
+        )
 
         # Periodic sweeper for abandoned tunnels
         threading.Thread(target=self._tunnel_sweeper, daemon=True).start()
