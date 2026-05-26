@@ -5,6 +5,7 @@ import time
 import base64
 import threading
 from src.core.encryptions import onion_encrypt_for_peer
+from src.core import peer_health
 from src.utils.logger import get_logger
 from src.utils.config import (
     FRAME_RETRY_ATTEMPTS, FRAME_RETRY_BASE_DELAY_MS,
@@ -154,24 +155,34 @@ class Router:
         If there aren't enough peers, use as many as available.
         First hop is pinned to a guard when GuardSet is installed.
         """
-        if len(self.peers) < hops:
+        # Drop our own node before sampling - routing through the local
+        # process is a wasteful self-loop that traffic doesn't actually
+        # need to take, and a NAT-bound self entry might be unreachable
+        # from the next hop's perspective.
+        from src.core.internet_discovery import is_self_peer
+        non_self = [p for p in self.peers if not is_self_peer(p)]
+        # Skip peers whose WS port has been failing recently. Fall back to
+        # the unfiltered pool if filtering would leave us with nothing -
+        # better to retry (and possibly re-mark) than refuse to route.
+        candidate_pool = peer_health.filter_healthy(non_self) or non_self or self.peers
+        if len(candidate_pool) < hops:
             log.warning("Not enough peers for full hop count")
-            hops = len(self.peers)
+            hops = len(candidate_pool)
         if hops <= 0:
             return []
 
         from src.core.guards import get_guards
         guards = get_guards()
         if guards is not None:
-            first = guards.pick_first_hop(self.peers)
+            first = guards.pick_first_hop(candidate_pool)
             if first is not None:
                 first_key = (first.get("host"), first.get("port"))
-                remaining = [p for p in self.peers if (p.get("host"), p.get("port")) != first_key]
+                remaining = [p for p in candidate_pool if (p.get("host"), p.get("port")) != first_key]
                 tail_count = min(max(0, hops - 1), len(remaining))
                 tail = random.sample(remaining, tail_count) if tail_count else []
                 return [first] + tail
 
-        return random.sample(self.peers, hops)
+        return random.sample(candidate_pool, hops)
 
     def relay_message(self, data, destination, return_path=None, request_id=None):
         """
@@ -340,7 +351,7 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
     """
     if hops <= 1 or not peers:
         return [terminal]
-    from src.core.internet_discovery import is_self_peer
+    from src.core.internet_discovery import is_self_peer, is_public_internet_host
     t_key = (terminal.get('host'), terminal.get('port'))
     pool = [
         p for p in peers
@@ -349,10 +360,32 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
         and p.get('role') in (None, 'node')
         and not is_self_peer(p)
     ]
-    middle_count = min(max(hops - 1, 0), len(pool))
+    # Drop peers currently in WS cooldown - they would just timeout the
+    # circuit. Keep the unfiltered pool as a fallback so a network-wide
+    # blip can still produce *some* route.
+    healthy_pool = peer_health.filter_healthy(pool) or pool
+    # If the terminal sits on a private network, a public-IP middle hop
+    # cannot reach it (NAT only allows outbound from private to public,
+    # not the other way around). Restrict middles to private peers in
+    # that case; if none exist, fall back to a direct route - hoping the
+    # caller is on the same LAN as the terminal - rather than building
+    # a guaranteed-to-fail circuit through a public middle.
+    if not is_public_internet_host(terminal.get('host')):
+        same_network = [p for p in healthy_pool if not is_public_internet_host(p.get('host'))]
+        if same_network:
+            healthy_pool = same_network
+        else:
+            log.warning(
+                "build_hs_route: terminal %s:%s is on a private network and "
+                "no private middle hops available; using direct route "
+                "(the caller must be on the same LAN as the terminal)",
+                terminal.get('host'), terminal.get('port'),
+            )
+            return [terminal]
+    middle_count = min(max(hops - 1, 0), len(healthy_pool))
     if middle_count == 0:
         return [terminal]
-    middles = random.sample(pool, middle_count)
+    middles = random.sample(healthy_pool, middle_count)
     return middles + [terminal]
 
 
@@ -364,8 +397,17 @@ def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     """
     if not peers:
         return []
+    # Drop our own node before sizing the route. The proxy talking to
+    # its own colocated relay forces a wasteful localhost round-trip and
+    # if the local node is NAT-bound the next hop may not be able to
+    # reach back through it for reverse-channel frames.
+    from src.core.internet_discovery import is_self_peer
+    non_self = [p for p in peers if not is_self_peer(p)]
+    # Drop peers in WS cooldown before sizing the route - otherwise we'd
+    # pick a hop count assuming relays we can't actually reach.
+    candidate_pool = peer_health.filter_healthy(non_self) or non_self or peers
     hop_target = random.randint(min_hops, max_hops)
-    hop_target = min(hop_target, len(peers))
+    hop_target = min(hop_target, len(candidate_pool))
     if hop_target <= 0:
         return []
 
@@ -373,16 +415,16 @@ def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     from src.core.guards import get_guards
     guards = get_guards()
     if guards is not None:
-        first = guards.pick_first_hop(peers)
+        first = guards.pick_first_hop(candidate_pool)
         if first is not None:
             first_key = (first.get("host"), first.get("port"))
-            remaining_pool = [p for p in peers if (p.get("host"), p.get("port")) != first_key]
+            remaining_pool = [p for p in candidate_pool if (p.get("host"), p.get("port")) != first_key]
             tail_count = max(0, hop_target - 1)
             tail_count = min(tail_count, len(remaining_pool))
             tail = random.sample(remaining_pool, tail_count) if tail_count else []
             return [first] + tail
 
-    return random.sample(peers, hop_target)
+    return random.sample(candidate_pool, hop_target)
 
 def _send_raw_frame(next_hop: dict, envelope: dict, ws_client=None) -> bool:
     """Send a pre-built envelope (already encrypted) to a peer without adding encryption.
