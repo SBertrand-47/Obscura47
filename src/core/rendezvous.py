@@ -114,7 +114,7 @@ def _pick_rendezvous_point(
     # the same reason from the host's side: if we picked a LAN-only rv
     # point, the host's `rv_join` would have no path to it.
     from src.core.internet_discovery import (
-        is_self_peer, is_private_peer, allow_lan_peers,
+        is_self_peer, is_private_peer, is_public_internet_host, allow_lan_peers,
     )
     lan_ok = allow_lan_peers()
     candidates = [
