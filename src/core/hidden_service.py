@@ -40,6 +40,7 @@ from src.core.encryptions import (
     onion_decrypt_with_priv,
     onion_encrypt_for_peer,
 )
+from src.core import peer_health
 from src.core.router import (
     build_hs_route,
     send_hs_frame,
