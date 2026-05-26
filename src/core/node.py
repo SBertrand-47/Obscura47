@@ -8,6 +8,7 @@ from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypa
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer, WSClient
+from src.core.peer_health import start_self_ws_probe
 from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
@@ -115,6 +116,13 @@ class ObscuraNode:
             tls_key=WS_TLS_KEY if WS_TLS_ACTIVE else None,
         )
         self.ws_server.start()
+
+        # Probe our own WS port from the outside so we notice immediately
+        # if the network/firewall isn't actually letting peers reach us.
+        start_self_ws_probe(
+            "node", self.ws_port,
+            advertised_host=NODE_ADVERTISED_HOST or None,
+        )
 
         log.info("Node Discovery started on port %s", NODE_MULTICAST_PORT)
         log.info("WebSocket server on port %s", self.ws_port)
