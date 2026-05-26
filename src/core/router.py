@@ -380,9 +380,20 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
         and not is_self_peer(p)
     ]
     # Drop peers currently in WS cooldown - they would just timeout the
-    # circuit. Keep the unfiltered pool as a fallback so a network-wide
-    # blip can still produce *some* route.
-    healthy_pool = peer_health.filter_healthy(pool) or pool
+    # circuit. If every remaining peer is unhealthy, prefer a direct
+    # (zero-middle) route over padding with a known-bad middle - a
+    # direct hop to a reachable terminal beats a multi-hop route whose
+    # first hop will time out anyway.
+    healthy_pool = peer_health.filter_healthy(pool)
+    if not healthy_pool:
+        if pool:
+            log.warning(
+                "build_hs_route: every middle-hop candidate is in cooldown; "
+                "using direct route to %s:%s instead of a guaranteed-broken "
+                "padded circuit",
+                terminal.get('host'), terminal.get('port'),
+            )
+        return [terminal]
     # If the terminal sits on a private network, a public-IP middle hop
     # cannot reach it (NAT only allows outbound from private to public,
     # not the other way around). Restrict middles to private peers in
