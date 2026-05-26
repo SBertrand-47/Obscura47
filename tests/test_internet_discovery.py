@@ -80,3 +80,46 @@ def test_merge_internet_peers_rekeys_existing_node_when_port_changes(monkeypatch
     assert updated["host"] == "203.0.113.10"
     assert updated["port"] == 5002
     assert updated["ws_port"] == 5003
+
+
+# ---------------------------------------------------------------------------
+# is_private_peer / allow_lan_peers
+# ---------------------------------------------------------------------------
+
+
+def test_is_private_peer_flags_rfc1918():
+    assert disc.is_private_peer({"host": "192.168.1.86", "port": 5001})
+    assert disc.is_private_peer({"host": "10.2.0.2", "port": 5001})
+    assert disc.is_private_peer({"host": "172.16.0.1", "port": 5001})
+
+
+def test_is_private_peer_flags_loopback_and_linklocal():
+    assert disc.is_private_peer({"host": "127.0.0.1", "port": 5001})
+    assert disc.is_private_peer({"host": "169.254.10.10", "port": 5001})
+    assert disc.is_private_peer({"host": "::1", "port": 5001})
+
+
+def test_is_private_peer_passes_public_addresses():
+    assert not disc.is_private_peer({"host": "95.173.221.72", "port": 5001})
+    assert not disc.is_private_peer({"host": "154.38.172.2", "port": 5001})
+    assert not disc.is_private_peer({"host": "8.8.8.8", "port": 53})
+
+
+def test_is_private_peer_tolerates_missing_or_hostname():
+    # We don't resolve hostnames - treat them as plausibly public so we
+    # never block a registered .com peer because of an unrelated DNS quirk.
+    assert not disc.is_private_peer(None)
+    assert not disc.is_private_peer({})
+    assert not disc.is_private_peer({"host": "", "port": 5001})
+    assert not disc.is_private_peer({"host": "node.example.com", "port": 5001})
+
+
+def test_allow_lan_peers_env_override(monkeypatch):
+    monkeypatch.delenv("OBSCURA_ALLOW_LAN_PEERS", raising=False)
+    assert disc.allow_lan_peers() is False
+    monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
+    assert disc.allow_lan_peers() is True
+    monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "yes")
+    assert disc.allow_lan_peers() is True
+    monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "0")
+    assert disc.allow_lan_peers() is False
