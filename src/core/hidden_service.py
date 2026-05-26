@@ -346,57 +346,35 @@ class HiddenServiceHost:
     # ── Startup ───────────────────────────────────────────────────
 
     def _pick_intro_points(self, peers: list[dict], count: int) -> list[dict]:
-        from src.core.internet_discovery import is_self_peer, is_public_internet_host
+        from src.core.internet_discovery import (
+            is_self_peer, is_private_peer, allow_lan_peers,
+        )
+        lan_ok = allow_lan_peers()
         candidates = [
             p for p in peers
-            if p.get('role') == 'node' and p.get('pub') and not is_self_peer(p)
+            if p.get('role') == 'node' and p.get('pub')
+            and not is_self_peer(p)
+            and (lan_ok or not is_private_peer(p))
         ]
         if not candidates:
-            # All nodes resolve to self - fall back so the host can still
-            # publish an intro (it will fail to reach itself, but at least
-            # we surface the empty-network condition via the warning path).
+            # All public nodes are filtered (self or LAN-only) - fall back
+            # so the host can still publish an intro. The dialer will fail
+            # to reach it, but the diagnose path surfaces that explicitly
+            # so we prefer the warning over silent unreachability.
+            log.warning(
+                "HS %s: no externally-reachable intro candidates "
+                "(self-filter or RFC1918); falling back to any node",
+                getattr(self, 'address', '?'),
+            )
             candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
         if not candidates:
-            return []
-        # Drop peers known to be unreachable - publishing them in the
-        # descriptor would just strand every client dial on a dead intro.
-        # Probe ws_port now (3s budget each) so the host's own view of
-        # reachability matches the client's; without this, the host
-        # picks peers it has never tried to talk to and trusts that the
-        # later hs_establish frame will get through.
-        probed: list[dict] = []
-        for p in candidates:
-            ws_port = p.get('ws_port')
-            if ws_port and p.get('host'):
-                if not peer_health.is_peer_healthy(p):
-                    log.info("Skipping intro candidate %s:%s (peer_health cooldown)",
-                             p.get('host'), p.get('port'))
-                    continue
-                ok, why = peer_health.probe_tcp(p['host'], int(ws_port), timeout=3.0)
-                if ok:
-                    peer_health.mark_success(p['host'], int(ws_port))
-                else:
-                    peer_health.mark_failure(p['host'], int(ws_port),
-                                             reason=f"intro candidate probe: {why}")
-                    peer_health.mark_failure(p['host'], int(ws_port),
-                                             reason=f"intro candidate probe: {why}")
-                    log.info("Skipping intro candidate %s:%s (probe failed: %s)",
-                             p.get('host'), p.get('port'), why)
-                    continue
-            probed.append(p)
-        if not probed:
-            log.warning(
-                "All %d intro candidates failed reachability probe; "
-                "the host has no usable intro points to publish",
-                len(candidates),
-            )
             return []
         # Prefer publicly-routable intros so clients on any network can
         # reach them. Fall back to private-IP relays only to fill the
         # quota if there aren't enough public ones.
-        random.shuffle(probed)
-        public = [p for p in probed if is_public_internet_host(p.get('host'))]
-        private = [p for p in probed if not is_public_internet_host(p.get('host'))]
+        random.shuffle(candidates)
+        public = [p for p in candidates if is_public_internet_host(p.get('host'))]
+        private = [p for p in candidates if not is_public_internet_host(p.get('host'))]
         chosen = (public + private)[:count]
         if not public:
             log.warning(
