@@ -54,6 +54,35 @@ def is_obscura_address(host: str) -> bool:
     return all(c in "abcdefghijklmnopqrstuvwxyz234567" for c in label)
 
 
+def normalize_obscura_input(value: str | None) -> str:
+    """Coerce free-form user input into a bare `.obscura` hostname.
+
+    Accepts the same shapes a user might paste from a browser address
+    bar (``http://x.obscura/``, ``x.obscura:80``, ``x.obscura/path``)
+    and returns just the hostname. Returns the input unchanged if it
+    doesn't look URL-shaped, leaving downstream validators to reject it
+    with a clear message.
+    """
+    if not value:
+        return ""
+    s = value.strip()
+    if "://" in s:
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(s)
+            if parsed.hostname:
+                s = parsed.hostname
+        except Exception:
+            pass
+    # Strip any leftover path, query, fragment, port, or trailing slash.
+    for sep in ("/", "?", "#"):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    if ":" in s and not s.startswith("["):
+        s = s.split(":", 1)[0]
+    return s.lower()
+
+
 def _canonical(desc: dict[str, Any]) -> bytes:
     """Deterministic byte form of a descriptor (for signing/verifying)."""
     body = {k: v for k, v in desc.items() if k != "sig"}

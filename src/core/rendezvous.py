@@ -34,6 +34,7 @@ from src.core.internet_discovery import (
     registry_request_json,
     RegistryHTTPError,
 )
+from src.core import peer_health
 from src.core.router import build_hs_route, send_hs_frame
 from src.utils.config import HS_CIRCUIT_HOPS, REGISTRY_URL
 from src.utils.logger import get_logger
@@ -126,7 +127,26 @@ def _pick_rendezvous_point(
     ]
     if not candidates:
         return None
-    return random.choice(candidates)
+    # Prefer peers whose WS port is reachable. Fall back to the full
+    # candidate set if every relay is currently in cooldown - the next
+    # attempt will re-probe and refresh health state.
+    healthy = peer_health.filter_healthy(candidates) or candidates
+    # Further prefer publicly-routable peers. The host - which may be on
+    # any network - has to reach the rendezvous point too; a LAN-only
+    # relay (192.168.x.x) is unreachable from anywhere off that LAN and
+    # silently breaks the splice. Fall back to private-IP peers only if
+    # there is no public-IP option, with a warning so the failure is
+    # attributable instead of a mysterious rv_ready timeout.
+    public = [p for p in healthy if is_public_internet_host(p.get('host'))]
+    if public:
+        return random.choice(public)
+    log.warning(
+        "rendezvous-point pool has no publicly-routable peers; "
+        "falling back to private-IP relay. Hosts on a different network "
+        "will not be able to reach the rendezvous point and the dial "
+        "will time out. Add a public-IP relay to the network.",
+    )
+    return random.choice(healthy)
 
 
 def dial_hidden_service(
@@ -156,9 +176,18 @@ def dial_hidden_service(
     # Prefer intro points that aren't us - dialing our own relay would
     # NAT-loop. Fall back to any intro if all of them resolve to self
     # (better to try and fail than refuse to dial).
-    from src.core.internet_discovery import is_self_peer
+    from src.core.internet_discovery import is_self_peer, is_public_internet_host
     non_self_intros = [p for p in intros if not is_self_peer(p)]
-    intro_point = random.choice(non_self_intros or intros)
+    intro_candidates = non_self_intros or intros
+    # Order intros by preference: healthy + public first, then healthy +
+    # private, then unhealthy. We try them in order on failure rather
+    # than giving up after the first dead intro.
+    def _intro_rank(p: dict) -> tuple[int, int]:
+        healthy = 0 if peer_health.is_peer_healthy(p) else 1
+        public = 0 if is_public_internet_host(p.get('host')) else 1
+        return (healthy, public)
+    ranked_intros = sorted(intro_candidates, key=_intro_rank)
+    intro_point = ranked_intros[0]
 
     if peers is None:
         peers = fetch_peers_from_registry() or []
@@ -185,6 +214,15 @@ def dial_hidden_service(
 
     # Shared relay pool for padding both the rv and intro circuits.
     relay_pool = [p for p in peers if p.get('pub')]
+
+    log.info(
+        "HS dial %s | intro=%s:%s rv=%s:%s | relay_pool=%d | intro_fallbacks=%d",
+        addr,
+        intro_point.get('host'), intro_point.get('port'),
+        rv_point.get('host'), rv_point.get('port'),
+        len(relay_pool),
+        max(0, len(ranked_intros) - 1),
+    )
 
     # 1. Rendezvous circuit: establish with a cookie.
     cookie = base64.b64encode(os.urandom(16)).decode()
@@ -217,25 +255,65 @@ def dial_hidden_service(
     })
     sealed_introduce = onion_encrypt_for_peer(service_pub, payload)
 
-    intro_req_id = f"I{time.time_ns()}"
-    intro_route = build_hs_route(relay_pool, intro_point, HS_CIRCUIT_HOPS)
-    intro_env = {
-        'type': 'hs_introduce',
-        'request_id': intro_req_id,
-        'service_addr': addr,
-        'introduce_payload': sealed_introduce,
-    }
-    if not send_hs_frame(intro_route, intro_env):
+    # Try each ranked intro in turn. A dead intro fails the send (route
+    # first hop timeout); marking it unhealthy and moving on is much
+    # better than returning a generic failure to the browser.
+    intro_sent = False
+    for candidate in ranked_intros:
+        intro_req_id = f"I{time.time_ns()}"
+        intro_route = build_hs_route(relay_pool, candidate, HS_CIRCUIT_HOPS)
+        intro_env = {
+            'type': 'hs_introduce',
+            'request_id': intro_req_id,
+            'service_addr': addr,
+            'introduce_payload': sealed_introduce,
+        }
+        if send_hs_frame(intro_route, intro_env):
+            intro_point = candidate
+            intro_sent = True
+            break
+        log.warning(
+            "hs_introduce send failed via intro %s:%s; trying next",
+            candidate.get('host'), candidate.get('port'),
+        )
+        # Don't let a dead intro be picked again on the next dial.
+        if candidate.get('ws_port'):
+            peer_health.mark_failure(
+                candidate.get('host'), candidate.get('ws_port'),
+                reason="hs_introduce send failed",
+            )
+    if not intro_sent:
         pop_ready_event(rv_req_id)
-        log.warning("hs_introduce send failed for %s", addr)
+        log.warning("hs_introduce send failed via all %d intro(s) for %s",
+                    len(ranked_intros), addr)
         return None
 
     # 3. Wait for the rv point to confirm the host joined.
+    wait_start = time.time()
     if not ready.wait(timeout=ready_timeout):
         pop_ready_event(rv_req_id)
-        log.warning("rv_ready timeout for %s", addr)
+        from src.core.internet_discovery import is_public_internet_host
+        hints = []
+        if not is_public_internet_host(rv_point.get('host')):
+            hints.append(
+                f"rv_point {rv_point.get('host')} is on a private network - the "
+                "host may be unable to reach it"
+            )
+        if not is_public_internet_host(intro_point.get('host')):
+            hints.append(
+                f"intro_point {intro_point.get('host')} is on a private network - "
+                "introduces from off-LAN clients cannot reach it"
+            )
+        log.warning(
+            "rv_ready timeout for %s after %.1fs (rv=%s:%s intro=%s:%s)%s",
+            addr, ready_timeout,
+            rv_point.get('host'), rv_point.get('port'),
+            intro_point.get('host'), intro_point.get('port'),
+            (" | " + "; ".join(hints)) if hints else "",
+        )
         return None
     pop_ready_event(rv_req_id)
+    log.info("HS dial %s ready in %.2fs", addr, time.time() - wait_start)
 
     return rv_route, rv_req_id, service_pub
 

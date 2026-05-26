@@ -163,6 +163,13 @@ class HiddenServiceHost:
             log.warning("Host: malformed introduce payload")
             return
 
+        log.info(
+            "Host: introduce received for %s | rv_point=%s:%s cookie=%s…",
+            self.address,
+            rv_point.get('host'), rv_point.get('port'),
+            (cookie or '')[:8],
+        )
+
         threading.Thread(
             target=self._open_rv_session,
             args=(rv_point, cookie, client_pub),
@@ -188,13 +195,26 @@ class HiddenServiceHost:
             'pub': self.pub_pem,
         }
         if not send_hs_frame(route, envelope):
-            log.warning("rv_join send failed for session %s", rv_req_id)
+            log.warning(
+                "rv_join send failed for session %s | rv_point=%s:%s",
+                rv_req_id, rv_point.get('host'), rv_point.get('port'),
+            )
             self._drop_session(rv_req_id)
             return
 
         # Wait for the rendezvous to confirm the splice before dialling local.
         if not ready.wait(timeout=10):
-            log.warning("rv_ready not received for session %s", rv_req_id)
+            from src.core.internet_discovery import is_public_internet_host
+            extra = ""
+            if not is_public_internet_host(rv_point.get('host')):
+                extra = (
+                    f" | rv_point {rv_point.get('host')} is on a private "
+                    "network and is unreachable from this host"
+                )
+            log.warning(
+                "rv_ready not received for session %s | rv_point=%s:%s%s",
+                rv_req_id, rv_point.get('host'), rv_point.get('port'), extra,
+            )
             self._drop_session(rv_req_id)
             return
 
@@ -348,8 +368,19 @@ class HiddenServiceHost:
             candidates = [p for p in peers if p.get('role') == 'node' and p.get('pub')]
         if not candidates:
             return []
+        # Prefer publicly-routable intros so clients on any network can
+        # reach them. Fall back to private-IP relays only to fill the
+        # quota if there aren't enough public ones.
         random.shuffle(candidates)
-        return candidates[:count]
+        public = [p for p in candidates if is_public_internet_host(p.get('host'))]
+        private = [p for p in candidates if not is_public_internet_host(p.get('host'))]
+        chosen = (public + private)[:count]
+        if not public:
+            log.warning(
+                "No publicly-routable intro candidates; using private-IP relays. "
+                "Off-LAN clients will not be able to introduce.",
+            )
+        return chosen
 
     def establish(self, peers: list[dict] | None = None,
                   *, refresh: bool = False) -> bool:
