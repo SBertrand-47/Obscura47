@@ -173,6 +173,28 @@ def dial_hidden_service(
     from src.core.internet_discovery import is_self_peer, is_public_internet_host
     non_self_intros = [p for p in intros if not is_self_peer(p)]
     intro_candidates = non_self_intros or intros
+
+    # Synchronously probe each intro's WS port. The descriptor often
+    # carries stale intros that the host registered earlier but can no
+    # longer be reached; without a fresh probe, the dial picks one and
+    # eats a ~30s send-retry timeout before failing. Probes are short
+    # (3s each) and run sequentially - usually 1-3 intros - so total
+    # added latency is bounded and only on the first dial after
+    # discovery (peer_health caches the result).
+    for p in intro_candidates:
+        ws_port = p.get('ws_port')
+        if not ws_port or not p.get('host'):
+            continue
+        if not peer_health.is_peer_healthy(p):
+            continue
+        ok, why = peer_health.probe_tcp(p['host'], int(ws_port), timeout=3.0)
+        if ok:
+            peer_health.mark_success(p['host'], int(ws_port))
+        else:
+            peer_health.mark_failure(p['host'], int(ws_port),
+                                     reason=f"intro probe: {why}")
+            peer_health.mark_failure(p['host'], int(ws_port),
+                                     reason=f"intro probe: {why}")
     # Order intros by preference: healthy + public first, then healthy +
     # private, then unhealthy. We try them in order on failure rather
     # than giving up after the first dead intro.
