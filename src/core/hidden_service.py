@@ -394,8 +394,6 @@ class HiddenServiceHost:
                 else:
                     peer_health.mark_failure(host, int(ws_port),
                                              reason=f"host intro probe: {why}")
-                    peer_health.mark_failure(host, int(ws_port),
-                                             reason=f"host intro probe: {why}")
                     log.info("HS skip intro candidate %s:%s (probe failed: %s)",
                              host, p.get('port'), why)
                     continue
@@ -482,7 +480,7 @@ class HiddenServiceHost:
         )
         body = json.dumps(desc).encode()
         try:
-            registry_request_json(
+            reply = registry_request_json(
                 f"{REGISTRY_URL}/hs/descriptor",
                 method='POST',
                 data=body,
@@ -500,6 +498,18 @@ class HiddenServiceHost:
             else:
                 log.error("Failed to publish descriptor for %s [%s]: %s",
                           self.address, e.kind, e)
+            return False
+        # Confirm the registry actually stored what we sent. A 2xx with the
+        # wrong addr (or missing expires) means a future fetch will 404 even
+        # though publish "succeeded" - log it loudly instead of silently
+        # claiming success.
+        if not isinstance(reply, dict) or reply.get("addr") != self.address \
+                or "expires" not in reply:
+            log.error(
+                "Descriptor publish for %s returned unexpected body %r - "
+                "treating as failure",
+                self.address, reply,
+            )
             return False
         log.info("Descriptor published for %s (%d intros)",
                  self.address, len(intro))
