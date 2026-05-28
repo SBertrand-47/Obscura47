@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import secrets
+import threading
 import time
 import base64
 from contextlib import asynccontextmanager
@@ -58,6 +59,16 @@ REGISTRY_ADMIN_AUDIT_PATH = os.getenv(
     "OBSCURA_REGISTRY_ADMIN_AUDIT_PATH",
     os.path.join(os.path.expanduser("~"), ".obscura47", "audit", "registry_admin.jsonl"),
 )
+# Diagnostic event collection. Off unless OBSCURA_DIAG_TOKEN is set; nodes
+# include the same token in their X-Diag-Token header. The collected events
+# go to a rolling JSONL file under ~/.obscura47, separate from audit logs.
+DIAG_TOKEN = os.getenv("OBSCURA_DIAG_TOKEN", "")
+DIAG_PATH = os.getenv(
+    "OBSCURA_DIAG_PATH",
+    os.path.join(os.path.expanduser("~"), ".obscura47", "diag.jsonl"),
+)
+DIAG_MAX_BYTES = int(os.getenv("OBSCURA_DIAG_MAX_BYTES", str(50 * 1024 * 1024)))  # 50MB
+DIAG_MAX_BATCH = int(os.getenv("OBSCURA_DIAG_MAX_BATCH", "100"))
 DASHBOARD_DIR = Path(__file__).resolve().parent / "dashboard"
 DASHBOARD_DIST_DIR = DASHBOARD_DIR / "dist"
 # Admin public key: read from inline PEM or file path
@@ -827,6 +838,91 @@ async def verify_registration(body: AuthVerification, request: Request):
                        data["pub"], data.get("ws_port"), data.get("ws_tls"))
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
     return {"ok": True, "your_ip": ip, "registered_host": data["host"], "peer_id": body.peer_id}
+
+
+# ── Diagnostic event collection ──────────────────────────────────
+_diag_file_lock = threading.Lock()
+
+
+def _diag_roll_if_needed(path: str) -> None:
+    try:
+        if os.path.getsize(path) >= DIAG_MAX_BYTES:
+            rolled = path + ".1"
+            if os.path.exists(rolled):
+                os.remove(rolled)
+            os.rename(path, rolled)
+    except OSError:
+        pass
+
+
+def _diag_append(events: list[dict]) -> None:
+    """Append validated events to the rolling JSONL diag file."""
+    parent = os.path.dirname(DIAG_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with _diag_file_lock:
+        _diag_roll_if_needed(DIAG_PATH)
+        with open(DIAG_PATH, "a", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev, separators=(",", ":")) + "\n")
+
+
+@app.post("/diag")
+async def submit_diag(request: Request):
+    """Receive structured diagnostic events from nodes.
+
+    Disabled unless ``OBSCURA_DIAG_TOKEN`` is set on the registry. Nodes
+    authenticate by sending the same value in ``X-Diag-Token``. This is a
+    development aid,turning it on tells the registry which peer did what
+    when, which is a privacy regression versus the normal opaque-routing
+    design. Only run with diag enabled on networks you own.
+    """
+    if not DIAG_TOKEN:
+        raise HTTPException(503, detail="Diagnostic collection not enabled on this registry")
+
+    presented = request.headers.get("x-diag-token", "")
+    if presented != DIAG_TOKEN:
+        raise HTTPException(401, detail="Invalid diag token")
+
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, detail="Invalid JSON")
+
+    # Accept either a single event or {"events": [...]}.
+    if isinstance(body, dict) and "events" in body:
+        events = body["events"]
+    elif isinstance(body, dict):
+        events = [body]
+    else:
+        raise HTTPException(400, detail="Expected an object or {events: [...]}")
+
+    if not isinstance(events, list):
+        raise HTTPException(400, detail="events must be a list")
+    if len(events) > DIAG_MAX_BATCH:
+        raise HTTPException(400, detail=f"Batch exceeds DIAG_MAX_BATCH={DIAG_MAX_BATCH}")
+
+    # Validate each event minimally and stamp registry-side receive time so
+    # we can detect clock-skewed nodes.
+    now = time.time()
+    cleaned: list[dict] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            raise HTTPException(400, detail="each event must be an object")
+        if "event" not in ev:
+            raise HTTPException(400, detail="each event must have an 'event' field")
+        ev = dict(ev)
+        ev.setdefault("ts", now)
+        ev["received_at"] = now
+        ev["source_ip"] = ip
+        cleaned.append(ev)
+
+    _diag_append(cleaned)
+    return {"ok": True, "accepted": len(cleaned)}
 
 
 @app.post("/deregister")

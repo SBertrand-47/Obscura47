@@ -26,6 +26,7 @@ from src.utils.config import (
     NODE_ADVERTISED_HOST, EXIT_ADVERTISED_HOST,
     NODE_KEY_PATH, EXIT_KEY_PATH,
 )
+from src.utils import diag
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -575,7 +576,11 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
         if isinstance(result, dict) and result.get("peer_id"):
             with _heartbeat_lock:
                 st = _heartbeat_state.setdefault(role, {"running": True})
+                prior_peer_id = st.get("peer_id")
                 st["peer_id"] = result["peer_id"]
+            if prior_peer_id != result["peer_id"]:
+                diag.set_node_id(result["peer_id"])
+                diag.emit("register_ok", role=role, peer_id=result["peer_id"])
         time.sleep(REGISTRY_HEARTBEAT_INTERVAL)
 
 
@@ -649,9 +654,12 @@ def deregister_with_registry(role: str) -> bool:
         with urllib.request.urlopen(req, timeout=5, context=registry_ssl_ctx()) as resp:
             result = json.loads(resp.read())
         log.info(f"Deregistered {role} ({peer_id}) from registry: {result}")
+        diag.emit("deregister", role=role, peer_id=peer_id, ok=True,
+                  deleted=bool(result.get("deleted")))
         return True
     except Exception as e:
         log.warning(f"Deregister failed for {role} ({peer_id}): {e}")
+        diag.emit("deregister", role=role, peer_id=peer_id, ok=False, err=str(e))
         return False
 
 

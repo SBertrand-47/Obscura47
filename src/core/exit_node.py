@@ -12,6 +12,7 @@ from src.core.discover import broadcast_discovery, listen_for_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer
 from src.core.peer_health import start_self_ws_probe
+from src.utils import diag
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -38,6 +39,7 @@ class ExitNode:
                            unapproved exit nodes to prevent them from being
                            discovered by local proxies before admin approval.
         """
+        diag.set_role("exit")
         self.host = host
         self.port = port
         self.ws_port = EXIT_WS_PORT
@@ -394,12 +396,28 @@ class ExitNode:
                 log.warning(
                     "Exit origin connect failed | %s:%s | %.0fms | %s | request_id=%s",
                     host, port, dt_ms, e, request_id)
+                diag.emit(
+                    "origin_connect",
+                    request_id=request_id,
+                    target=f"{host}:{port}",
+                    ok=False,
+                    dur_ms=round(dt_ms, 1),
+                    err=str(e) or e.__class__.__name__,
+                )
                 raise
             # Clear the connect timeout so subsequent reads/writes block normally.
             out.settimeout(None)
+            dt_ms = (time.time() - connect_started) * 1000.0
             log.info(
                 "Exit origin connected | %s:%s | %.0fms | request_id=%s",
-                host, port, (time.time() - connect_started) * 1000.0, request_id)
+                host, port, dt_ms, request_id)
+            diag.emit(
+                "origin_connect",
+                request_id=request_id,
+                target=f"{host}:{port}",
+                ok=True,
+                dur_ms=round(dt_ms, 1),
+            )
             # Store the live socket and flush any queued data frames
             if info:
                 info['sock'] = out

@@ -16,6 +16,7 @@ from src.core.internet_discovery import start_internet_discovery, start_kill_swi
 from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv, onion_encrypt_for_peer
 from src.core.ws_transport import WSClient
 from src.core import peer_health
+from src.utils import diag
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
@@ -196,8 +197,20 @@ def choose_best_exit():
     # Drop exits that are currently in backoff
     available = [k for k in candidates if score(k) is not None]
     if not available:
+        diag.emit("exit_pick_failed", total=len(exit_peers), healthy=len(healthy_peers),
+                  reason="all candidates in backoff")
         return None
     best = min(available, key=lambda k: score(k))
+    stats = exit_health.get(best) or {}
+    diag.emit(
+        "exit_pick",
+        exit=f"{best[0]}:{best[1]}",
+        total=len(exit_peers),
+        healthy=len(healthy_peers),
+        rtt_ms=stats.get("rtt_ms"),
+        ok=stats.get("ok", 0),
+        fail=stats.get("fail", 0),
+    )
     # Return the full peer dict so downstream hops have pub, ws_port, etc.
     for p in healthy_peers:
         if p['host'] == best[0] and p['port'] == best[1]:
@@ -276,6 +289,15 @@ def _handle_exit_response_data(raw_data):
                         log.info(json.dumps({"event":"tunnel_closed","request_id":request_id,"dur_s":round(dur,1),"up":summary.get('bytes_up',0),"down":summary.get('bytes_down',0),"exit":summary.get('exit')}))
                     else:
                         log.info(f"Tunnel closed | req={request_id} | dur={dur:.1f}s | up={summary.get('bytes_up',0)}B | down={summary.get('bytes_down',0)}B | exit={summary.get('exit')}")
+                    diag.emit(
+                        "tunnel_closed",
+                        request_id=request_id,
+                        exit=summary.get("exit"),
+                        bytes_up=summary.get("bytes_up", 0),
+                        bytes_down=summary.get("bytes_down", 0),
+                        dur_s=round(dur, 2),
+                        kind=typ,
+                    )
             else:
                 log.warning(f"Unknown tunnel frame type: {typ} | request_id={request_id}")
         except Exception as e:
@@ -373,6 +395,7 @@ def _init_proxy_ws_client():
 def start_proxy():
     """Starts the proxy server and continuously listens for clients."""
     global running
+    diag.set_role("proxy")
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
 

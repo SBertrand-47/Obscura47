@@ -9,6 +9,7 @@ from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
 from src.core.ws_transport import WSServer, WSClient
 from src.core.peer_health import start_self_ws_probe
+from src.utils import diag
 from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
@@ -29,6 +30,7 @@ class ObscuraNode:
         """
         Initialize a relay node that listens for encrypted messages.
         """
+        diag.set_role("node")
         self.host = host
         self.port = port
         self.ws_port = NODE_WS_PORT

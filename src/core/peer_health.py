@@ -34,6 +34,7 @@ from typing import Iterable
 # to our os.environ reads below even when peer_health is imported in isolation
 # (e.g. from a test or a CLI tool that skips the node/exit entry points).
 from src.utils import config as _config  # noqa: F401
+from src.utils import diag
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -104,6 +105,8 @@ def mark_success(host: str, port: int) -> None:
         entry = _state.get(key)
         if entry and entry.get("fails"):
             log.info("peer_health: %s:%s recovered", host, port)
+            diag.emit("peer_recovered", peer=f"{host}:{port}",
+                      prior_fails=entry.get("fails"))
         _state[key] = {
             "fails": 0,
             "last_fail": 0.0,
@@ -131,12 +134,21 @@ def mark_failure(host: str, port: int, reason: str = "") -> None:
         entry["fails"] += 1
         entry["last_fail"] = now
         if entry["fails"] >= FAILURE_THRESHOLD:
+            was_already_cool = entry.get("cooldown_until", 0.0) > now
             entry["cooldown_until"] = now + COOLDOWN_SECONDS
             log.warning(
                 "peer_health: %s:%s marked unreachable (%d failures, reason=%s); "
                 "excluded from circuits for %ds",
                 host, port, entry["fails"], reason or "timeout", int(COOLDOWN_SECONDS),
             )
+            if not was_already_cool:
+                diag.emit(
+                    "peer_cooled",
+                    peer=f"{host}:{port}",
+                    fails=entry["fails"],
+                    reason=reason or "timeout",
+                    cooldown_s=int(COOLDOWN_SECONDS),
+                )
         _state[key] = entry
 
 

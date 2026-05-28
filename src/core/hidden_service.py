@@ -35,6 +35,7 @@ import time
 import urllib.request
 from typing import Any
 
+from src.utils import diag
 from src.core.encryptions import (
     ecc_load_or_create_keypair,
     onion_decrypt_with_priv,
@@ -99,6 +100,8 @@ class HiddenServiceHost:
         self._sessions_lock = threading.Lock()
 
         self._stopped = threading.Event()
+        diag.set_role("host")
+        diag.set_node_id(self.address)
 
         self.ws_client = WSClient(
             self.priv, self.pub_pem,
@@ -494,9 +497,11 @@ class HiddenServiceHost:
                 timeout=5,
             )
             log.info("Descriptor deleted from registry for %s", self.address)
+            diag.emit("desc_delete", addr=self.address, ok=True)
             return True
         except Exception as e:
             log.warning("Failed to delete descriptor for %s: %s", self.address, e)
+            diag.emit("desc_delete", addr=self.address, ok=False, err=str(e))
             return False
 
     def stop(self):
@@ -562,6 +567,7 @@ class HiddenServiceHost:
             return False
         log.info("Descriptor published for %s (%d intros)",
                  self.address, len(intro))
+        diag.emit("desc_publish", addr=self.address, intros=len(intro))
         return True
 
     def run(self):
