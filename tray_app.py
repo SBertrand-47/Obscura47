@@ -31,7 +31,7 @@ class Obscura47Tray:
         self._running_roles: set[str] = set()
         self._threads: dict[str, threading.Thread] = {}
         self._hosted_sites: dict[str, threading.Thread] = {}
-        self._peer_counts = {"relays": 0, "exits": 0}
+        self._peer_counts = {"relays": 0, "healthy": 0, "exits": 0}
         self._tray_icon: Optional[pystray.Icon] = None
         self._dashboard_process: Optional[subprocess.Popen] = None
         self._stop_event = threading.Event()
@@ -53,12 +53,17 @@ class Obscura47Tray:
 
     def _get_peer_counts(self) -> dict:
         """Read live peer counts from the proxy module."""
-        counts = {"relays": 0, "exits": 0}
+        counts = {"relays": 0, "healthy": 0, "exits": 0}
         try:
             import src.core.proxy as proxy_mod
+            from src.core import peer_health
 
-            counts["relays"] = count_unique_peers(getattr(proxy_mod, "relay_peers", []))
+            relay_list = getattr(proxy_mod, "relay_peers", [])
+            counts["relays"] = count_unique_peers(relay_list)
             counts["exits"] = count_unique_peers(getattr(proxy_mod, "exit_peers", []))
+            # Relays this client can actually route through, per our own WS
+            # probes (peer_health) - not just how many are listed.
+            counts["healthy"] = count_unique_peers(peer_health.filter_healthy(relay_list))
         except Exception:
             pass
         self._peer_counts = counts
@@ -78,7 +83,11 @@ class Obscura47Tray:
         )
 
         # Network info
-        peer_info = f"Network: {self._peer_counts['relays']} relays, {self._peer_counts['exits']} exits"
+        peer_info = (
+            f"Network: {self._peer_counts['relays']} relays "
+            f"({self._peer_counts['healthy']} healthy), "
+            f"{self._peer_counts['exits']} exits"
+        )
         items.append(pystray.MenuItem(peer_info, action=None, enabled=False))
 
         # Proxy address hint

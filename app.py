@@ -346,10 +346,18 @@ class ObscuraApp(tk.Tk):
         counters.pack(fill="x", padx=14, pady=(0, 4))
 
         self._peer_labels = {}
-        for key, label in [("relays", "Relay Nodes"), ("exits", "Exit Nodes")]:
+        # "Healthy" is the count that actually matters for routing: relays this
+        # client can currently reach (peer_health hasn't seen them fail). Shown
+        # in green between the raw totals so a user can tell at a glance whether
+        # the network can carry their traffic, not just how many peers exist.
+        for key, label, color in [
+            ("relays", "Relay Nodes", ACCENT),
+            ("healthy", "Healthy", GREEN),
+            ("exits", "Exit Nodes", ACCENT),
+        ]:
             col = tk.Frame(counters, bg=BG_CARD)
             col.pack(side="left", expand=True, fill="x")
-            num = tk.Label(col, text="0", font=self._title_font, fg=ACCENT, bg=BG_CARD)
+            num = tk.Label(col, text="0", font=self._title_font, fg=color, bg=BG_CARD)
             num.pack()
             tk.Label(col, text=label, font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD).pack()
             self._peer_labels[key] = num
@@ -1102,9 +1110,10 @@ class ObscuraApp(tk.Tk):
     # ── Status polling ────────────────────────────────────────────
 
     def _get_peer_counts(self) -> dict:
-        counts = {"relays": 0, "exits": 0}
+        counts = {"relays": 0, "healthy": 0, "exits": 0}
         try:
             import src.core.proxy as proxy_mod
+            from src.core import peer_health
             from src.utils.config import PEER_EXPIRY_SECONDS
 
             # Purge stale peers before counting - observe_discovery only
@@ -1119,6 +1128,11 @@ class ObscuraApp(tk.Tk):
 
             counts["relays"] = count_unique_peers(relay_list)
             counts["exits"] = count_unique_peers(exit_list)
+            # Healthy = relays this client can actually route through right now,
+            # judged by what our own WS probes have observed (peer_health). A
+            # relay we've seen fail repeatedly is excluded even while it's still
+            # in the list and heartbeating to the registry.
+            counts["healthy"] = count_unique_peers(peer_health.filter_healthy(relay_list))
         except Exception:
             pass
         return counts
