@@ -800,10 +800,35 @@ async def register_peer(body: PeerRegistration, request: Request):
 
     peer_id = f"{advertised_host}:{body.port}"
 
+    # First-claimant binding (trust-on-first-use): a live slot owned by an
+    # established pubkey may only be re-claimed by that same key. This makes
+    # the registry first-come-first-served for a given advertised host:port -
+    # a second machine behind the same NAT can't silently clobber the first,
+    # and an attacker can't overwrite a healthy node's entry with a foreign
+    # key. The slot frees once its holder goes stale (no heartbeat within
+    # PEER_TTL) or signs a /deregister with the owning key.
+    existing = await get_peer_by_id(peer_id)
+    if (
+        existing
+        and existing.get("pub")
+        and existing["pub"] != body.pub
+        and (time.time() - existing["last_seen"]) <= PEER_TTL
+    ):
+        age = time.time() - existing["last_seen"]
+        print(f"[registry] x rejected takeover of live slot {peer_id} "
+              f"(held by another key, {age:.0f}s since heartbeat)")
+        raise HTTPException(
+            409,
+            detail=(
+                f"{peer_id} is held by another node's key and is still live "
+                f"(heartbeat {age:.0f}s ago); the holder must /deregister or "
+                f"expire (TTL {PEER_TTL}s) before another key can claim it"
+            ),
+        )
+
     # If peer has a public key, require challenge-response auth
     if body.pub:
-        # Check if this peer is already registered with the same pubkey (heartbeat)
-        existing = await get_peer_by_id(peer_id)
+        # Known peer heartbeat - same key re-registering, skip re-auth.
         if existing and existing.get("pub") == body.pub:
             # Known peer heartbeat - update timestamp without re-auth.
             # Re-probe ws_port (throttled by WS_PROBE_INTERVAL) so a peer
@@ -844,7 +869,7 @@ async def register_peer(body: PeerRegistration, request: Request):
             detail=f"role={body.role!r} requires a public key and challenge-response auth",
         )
 
-    is_new = await get_peer_by_id(peer_id) is None
+    is_new = existing is None
     if body.ws_port:
         await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
     await upsert_peer(peer_id, advertised_host, body.port, body.role,

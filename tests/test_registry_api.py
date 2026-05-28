@@ -441,3 +441,52 @@ class TestNatScopedPeers:
                         advertised_host="192.168.1.50", headers=self.LAN_NAT)
         peers = client.get("/peers", headers=self.OTHER_NAT).json()
         assert any(p["host"] == "192.168.1.50" for p in peers)
+
+
+class TestSlotBinding:
+    """First-claimant binding: a live host:port slot is owned by the first key."""
+
+    def test_live_slot_rejects_foreign_key(self, client):
+        # Key A claims 9.9.9.9:5001 and is live.
+        register_authed(client, role="node", port=5001, advertised_host="9.9.9.9")
+        # A different key tries to claim the same slot while A is live → 409.
+        _priv_b, pub_b = ecc_generate_keypair()
+        r = client.post("/register", json={
+            "role": "node", "port": 5001, "pub": pub_b, "advertised_host": "9.9.9.9",
+        })
+        assert r.status_code == 409, r.text
+        # A still owns the slot; the foreign key never replaced it.
+        slot = [p for p in client.get("/peers").json()
+                if p["host"] == "9.9.9.9" and p["port"] == 5001]
+        assert len(slot) == 1
+        assert slot[0]["pub"] != pub_b
+
+    def test_same_key_heartbeat_not_blocked(self, client):
+        # The owning key re-registering is a heartbeat, not a takeover.
+        priv, pub = ecc_generate_keypair()
+        body = {"role": "node", "port": 5001, "pub": pub, "advertised_host": "9.9.9.9"}
+        r1 = client.post("/register", json=body)
+        sig = ecdsa_sign(priv, r1.json()["challenge"].encode())
+        client.post("/register/verify",
+                    json={"peer_id": r1.json()["peer_id"], "signature": sig})
+        r2 = client.post("/register", json=body)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["ok"] is True
+
+    def test_stale_slot_can_be_reclaimed(self, client, monkeypatch):
+        import registry_server
+        register_authed(client, role="node", port=5001, advertised_host="9.9.9.9")
+        # Age every existing peer past the TTL so the slot is free to reclaim.
+        monkeypatch.setattr(registry_server, "PEER_TTL", -1)
+        _peer_id, data = register_authed(client, role="node", port=5001,
+                                         advertised_host="9.9.9.9")
+        assert data["ok"] is True
+
+    def test_unauth_proxy_cannot_clobber_live_keyed_slot(self, client):
+        # An unauthenticated (keyless) registration can't overwrite a live
+        # slot that an established key owns.
+        register_authed(client, role="node", port=5001, advertised_host="9.9.9.9")
+        r = client.post("/register", json={
+            "role": "proxy", "port": 5001, "advertised_host": "9.9.9.9",
+        })
+        assert r.status_code == 409, r.text
