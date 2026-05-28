@@ -15,6 +15,7 @@ from src.core.discover import broadcast_discovery, listen_for_discovery, observe
 from src.core.internet_discovery import start_internet_discovery, start_kill_switch_monitor
 from src.core.encryptions import ecc_load_or_create_keypair, onion_decrypt_with_priv, onion_encrypt_for_peer
 from src.core.ws_transport import WSClient
+from src.core import peer_health
 from src.utils.config import (
     PROXY_HOST as CFG_PROXY_HOST,
     PROXY_PORT as CFG_PROXY_PORT,
@@ -166,7 +167,16 @@ def choose_best_exit():
     from src.utils.config import PEER_EXPIRY_SECONDS
     cutoff = now - PEER_EXPIRY_SECONDS
     exit_peers[:] = [p for p in exit_peers if p.get("ts", 0) >= cutoff]
-    candidates = [(p['host'], p['port']) for p in list(exit_peers)]
+    # Drop peers whose WS endpoint is in peer_health cooldown - probes or
+    # circuit builders elsewhere already saw them as unreachable, so
+    # picking them here just burns another connect timeout.
+    healthy_peers = peer_health.filter_healthy(exit_peers)
+    if not healthy_peers:
+        # Every exit is in cooldown. Fall back to the unfiltered pool so a
+        # full-pool outage still gets one re-try; the per-exit exit_health
+        # backoff below still gates known-bad ones.
+        healthy_peers = list(exit_peers)
+    candidates = [(p['host'], p['port']) for p in healthy_peers]
     if not candidates:
         return None
     def score(key):
@@ -189,7 +199,7 @@ def choose_best_exit():
         return None
     best = min(available, key=lambda k: score(k))
     # Return the full peer dict so downstream hops have pub, ws_port, etc.
-    for p in exit_peers:
+    for p in healthy_peers:
         if p['host'] == best[0] and p['port'] == best[1]:
             return dict(p)
     return {'host': best[0], 'port': best[1]}

@@ -4,7 +4,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from src.core.encryptions import ecc_generate_keypair
+from src.core.encryptions import ecc_generate_keypair, ecdsa_sign
 from src.utils.onion_addr import build_descriptor
 
 
@@ -86,3 +86,63 @@ def test_republish_replaces_descriptor(client):
 
     got = client.get(f"/hs/descriptor/{desc1['addr']}").json()
     assert got["port"] == 9000
+
+
+# ── Signed HS descriptor delete ───────────────────────────────────
+
+def test_signed_delete_removes_descriptor(client):
+    import time
+    priv, _, desc = _fresh_descriptor()
+    client.post("/hs/descriptor", json=desc)
+
+    ts = time.time()
+    sig = ecdsa_sign(priv, f"hs-delete:{desc['addr']}:{ts}".encode())
+    r = client.post("/hs/descriptor/delete", json={
+        "addr": desc["addr"], "timestamp": ts, "signature": sig,
+    })
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+    assert client.get(f"/hs/descriptor/{desc['addr']}").status_code == 404
+
+
+def test_delete_with_wrong_key_rejected(client):
+    import time
+    _, _, desc = _fresh_descriptor()
+    client.post("/hs/descriptor", json=desc)
+
+    wrong_priv, _ = ecc_generate_keypair()
+    ts = time.time()
+    sig = ecdsa_sign(wrong_priv, f"hs-delete:{desc['addr']}:{ts}".encode())
+    r = client.post("/hs/descriptor/delete", json={
+        "addr": desc["addr"], "timestamp": ts, "signature": sig,
+    })
+    assert r.status_code == 403
+    # Descriptor must still be there
+    assert client.get(f"/hs/descriptor/{desc['addr']}").status_code == 200
+
+
+def test_delete_stale_timestamp_rejected(client):
+    import time
+    priv, _, desc = _fresh_descriptor()
+    client.post("/hs/descriptor", json=desc)
+
+    stale = time.time() - 600
+    sig = ecdsa_sign(priv, f"hs-delete:{desc['addr']}:{stale}".encode())
+    r = client.post("/hs/descriptor/delete", json={
+        "addr": desc["addr"], "timestamp": stale, "signature": sig,
+    })
+    assert r.status_code == 400
+    assert client.get(f"/hs/descriptor/{desc['addr']}").status_code == 200
+
+
+def test_delete_missing_descriptor_is_noop(client):
+    import time
+    priv, _ = ecc_generate_keypair()
+    ts = time.time()
+    addr = "nonexistentaddr12.obscura"
+    sig = ecdsa_sign(priv, f"hs-delete:{addr}:{ts}".encode())
+    r = client.post("/hs/descriptor/delete", json={
+        "addr": addr, "timestamp": ts, "signature": sig,
+    })
+    assert r.status_code == 200
+    assert r.json()["deleted"] is False

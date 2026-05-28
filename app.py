@@ -557,6 +557,15 @@ class ObscuraApp(tk.Tk):
         for role in self._running:
             self._running[role] = False
         self._log("Disconnecting from the Obscura Network...")
+        # Signed self-deregister so the registry drops us within seconds
+        # instead of waiting out PEER_TTL. Best-effort; we log and move on
+        # if it fails (e.g. registry unreachable on local cleanup).
+        try:
+            from src.core.internet_discovery import stop_heartbeat
+            for role in ("node", "proxy"):
+                stop_heartbeat(role)
+        except Exception as exc:
+            self._log(f"[disconnect] deregister failed: {exc}")
 
     def _run_component(self, role: str):
         try:

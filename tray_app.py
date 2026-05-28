@@ -236,6 +236,14 @@ class Obscura47Tray:
 
         self._running_roles.discard(role)
         print(f"[Obscura47 Tray] Stopping {role}...", flush=True)
+        # Signed deregister so the registry purges us in seconds instead of
+        # the ~120s PEER_TTL wait. Best-effort; failure logs but doesn't
+        # block the UI.
+        try:
+            from src.core.internet_discovery import stop_heartbeat
+            stop_heartbeat(role)
+        except Exception as exc:
+            print(f"[Obscura47 Tray] deregister {role} failed: {exc}", flush=True)
 
     def _run_component(self, role: str):
         """Run a component in a daemon thread."""

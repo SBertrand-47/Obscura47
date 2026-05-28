@@ -7,6 +7,7 @@ Proxies call `fetch_peers_from_registry()` to get internet-wide peers.
 Supports ECDSA challenge-response auth when a node provides its ECC private key.
 """
 
+import atexit
 import ipaddress
 import json
 import os
@@ -32,6 +33,14 @@ log = get_logger(__name__)
 # Public IP as seen by the registry - set on first successful registration.
 # Used to filter self out of the peer lists returned by the registry.
 _my_public_ip: str | None = None
+
+# Per-role heartbeat state. ``peer_id`` and ``priv_key`` let us send a signed
+# deregister at shutdown so the registry purges us immediately instead of
+# waiting out PEER_TTL (~120s). Without this hook other peers would keep
+# routing through us for up to two minutes after the user clicks Disconnect.
+_heartbeat_state: dict[str, dict] = {}
+_heartbeat_lock = threading.Lock()
+_atexit_registered = False
 
 # Cache of local node/exit pubkeys (computed once from the local key files).
 # Lets a host process colocated with a node identify "self" peers by pubkey
@@ -526,10 +535,17 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
     the heartbeat so circuit builders stop picking us for WS hops they cannot
     actually complete. The suppression flips back as soon as the probe
     succeeds again.
+
+    Exits when ``_heartbeat_state[role]['running']`` flips False (via
+    ``stop_heartbeat``); that path also issues the signed deregister.
     """
     from src.core import peer_health
     last_advertised: bool | None = None
     while True:
+        with _heartbeat_lock:
+            st = _heartbeat_state.get(role)
+            if st is not None and not st.get("running", True):
+                return
         advertise_ws = ws_port is not None and peer_health.should_advertise_ws(role)
         if last_advertised is not None and advertise_ws != last_advertised:
             if advertise_ws:
@@ -549,9 +565,17 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
 
         effective_ws_port = ws_port if advertise_ws else None
         effective_ws_tls = ws_tls if advertise_ws else None
-        register_with_registry(role, port, pub, priv_key=priv_key,
-                               ws_port=effective_ws_port, ws_tls=effective_ws_tls,
-                               advertised_host=advertised_host)
+        result = register_with_registry(role, port, pub, priv_key=priv_key,
+                                        ws_port=effective_ws_port,
+                                        ws_tls=effective_ws_tls,
+                                        advertised_host=advertised_host)
+        # Capture the peer_id assigned by the registry,the deregister flow
+        # needs it, and the registry constructs it from advertised_host+port
+        # which we don't always know in advance (it may rewrite our host).
+        if isinstance(result, dict) and result.get("peer_id"):
+            with _heartbeat_lock:
+                st = _heartbeat_state.setdefault(role, {"running": True})
+                st["peer_id"] = result["peer_id"]
         time.sleep(REGISTRY_HEARTBEAT_INTERVAL)
 
 
@@ -560,6 +584,16 @@ def start_heartbeat(role: str, port: int, pub: str | None = None,
                     ws_tls: bool | None = None,
                     advertised_host: str | None = None):
     """Start the heartbeat in a background daemon thread."""
+    global _atexit_registered
+    with _heartbeat_lock:
+        _heartbeat_state[role] = {
+            "running": True,
+            "peer_id": None,
+            "priv_key": priv_key,
+        }
+        if not _atexit_registered:
+            atexit.register(_deregister_all_on_exit)
+            _atexit_registered = True
     t = threading.Thread(
         target=heartbeat_loop,
         args=(role, port, pub),
@@ -573,6 +607,82 @@ def start_heartbeat(role: str, port: int, pub: str | None = None,
     )
     t.start()
     return t
+
+
+def deregister_with_registry(role: str) -> bool:
+    """Send a signed deregister to the registry for ``role``.
+
+    Returns True on a successful round-trip (including idempotent no-ops when
+    the peer was already gone), False on any failure. Best-effort: callers
+    should not block shutdown on this.
+    """
+    with _heartbeat_lock:
+        st = _heartbeat_state.get(role)
+        if not st:
+            return False
+        peer_id = st.get("peer_id")
+        priv_key = st.get("priv_key")
+    if not peer_id or priv_key is None:
+        return False
+
+    from src.core.encryptions import ecdsa_sign
+    timestamp = time.time()
+    message = f"deregister:{peer_id}:{timestamp}".encode()
+    try:
+        signature = ecdsa_sign(priv_key, message)
+    except Exception as e:
+        log.warning(f"Deregister signature failed for {role}: {e}")
+        return False
+
+    body = json.dumps({
+        "peer_id": peer_id,
+        "timestamp": timestamp,
+        "signature": signature,
+    }).encode()
+    req = urllib.request.Request(
+        f"{REGISTRY_URL}/deregister",
+        data=body,
+        headers=_registry_headers({"Content-Type": "application/json"}),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5, context=registry_ssl_ctx()) as resp:
+            result = json.loads(resp.read())
+        log.info(f"Deregistered {role} ({peer_id}) from registry: {result}")
+        return True
+    except Exception as e:
+        log.warning(f"Deregister failed for {role} ({peer_id}): {e}")
+        return False
+
+
+def stop_heartbeat(role: str) -> bool:
+    """Stop heartbeating for ``role`` and send a signed deregister.
+
+    Used by the tray / GUI Disconnect button and by the host shutdown path.
+    Safe to call repeatedly; subsequent calls are no-ops.
+    """
+    with _heartbeat_lock:
+        st = _heartbeat_state.get(role)
+        if not st or not st.get("running", True):
+            return False
+        st["running"] = False
+    return deregister_with_registry(role)
+
+
+def _deregister_all_on_exit():
+    """atexit hook: signed deregister for every still-running role.
+
+    Catches the case where the process exits via ``sys.exit`` or a returning
+    main thread,signal handlers run in those paths too but only if the
+    entry point installed any. atexit is the belt-and-suspenders backstop.
+    """
+    with _heartbeat_lock:
+        roles = [r for r, st in _heartbeat_state.items() if st.get("running", True)]
+    for role in roles:
+        try:
+            stop_heartbeat(role)
+        except Exception as e:
+            log.warning(f"atexit deregister failed for {role}: {e}")
 
 
 def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:

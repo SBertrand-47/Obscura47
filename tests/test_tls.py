@@ -9,7 +9,7 @@ import importlib
 import pytest
 from fastapi.testclient import TestClient
 
-from src.core.encryptions import ecc_generate_keypair
+from src.core.encryptions import ecc_generate_keypair, ecdsa_sign
 from src.core.ws_transport import WSServer, WSClient
 
 
@@ -119,6 +119,25 @@ class TestWSSTransport:
 
 # ── Registry: ws_tls field round-trip ─────────────────────────────
 
+def _register_node_authed(c, port: int, *, ws_port: int | None = None,
+                          ws_tls: bool | None = None):
+    """Tiny local helper,same flow as register_authed() in test_registry_api."""
+    priv, pub = ecc_generate_keypair()
+    body = {"role": "node", "port": port, "pub": pub}
+    if ws_port is not None:
+        body["ws_port"] = ws_port
+    if ws_tls is not None:
+        body["ws_tls"] = ws_tls
+    r1 = c.post("/register", json=body)
+    assert r1.status_code == 200, r1.text
+    challenge = r1.json()["challenge"]
+    peer_id = r1.json()["peer_id"]
+    sig = ecdsa_sign(priv, challenge.encode())
+    r2 = c.post("/register/verify", json={"peer_id": peer_id, "signature": sig})
+    assert r2.status_code == 200, r2.text
+    return peer_id
+
+
 class TestRegistryWSTLS:
     def test_ws_tls_field_persisted_and_returned(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "tls_registry.db")
@@ -129,13 +148,13 @@ class TestRegistryWSTLS:
         importlib.reload(registry_server)
         registry_server._pending_challenges.clear()
         registry_server._rate_buckets.clear()
+        registry_server._ws_probe_cache.clear()
 
         with TestClient(registry_server.app) as c:
-            r = c.post("/register", json={
-                "role": "node", "port": 5001,
-                "ws_port": 5002, "ws_tls": True,
-            })
-            assert r.status_code == 200
+            peer_id = _register_node_authed(c, 5001, ws_port=5002, ws_tls=True)
+            # Pre-seed the probe cache as healthy so the ws_port mask doesn't
+            # strip the field we're asserting on.
+            registry_server._ws_probe_cache[peer_id] = (time.time(), True)
             peers = c.get("/peers").json()
             assert len(peers) == 1
             assert peers[0]["ws_port"] == 5002
@@ -151,8 +170,10 @@ class TestRegistryWSTLS:
         importlib.reload(registry_server)
         registry_server._pending_challenges.clear()
         registry_server._rate_buckets.clear()
+        registry_server._ws_probe_cache.clear()
 
         with TestClient(registry_server.app) as c:
-            c.post("/register", json={"role": "node", "port": 5001, "ws_port": 5002})
+            peer_id = _register_node_authed(c, 5001, ws_port=5002)
+            registry_server._ws_probe_cache[peer_id] = (time.time(), True)
             peers = c.get("/peers").json()
             assert peers[0]["ws_tls"] is None

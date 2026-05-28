@@ -120,6 +120,67 @@ def _check_rate_limit(ip: str) -> bool:
     return True
 
 
+# ── WS-port reachability probe (registry-side) ───────────────────
+# A peer can heartbeat HTTP just fine while its advertised ws_port is
+# blocked by a firewall (corporate network, NAT without forward, etc.).
+# Without a probe here, the registry happily advertises that ws_port to
+# everyone else, and every circuit/intro that picks the peer eats a
+# multi-second timeout. We probe from the registry's vantage at most
+# once per WS_PROBE_INTERVAL and mask ws_port to None in /peers responses
+# when the probe fails. Heartbeats refresh the verdict; a peer whose
+# firewall later opens recovers automatically on the next probe.
+_ws_probe_cache: dict[str, tuple[float, bool]] = {}  # peer_id -> (ts, reachable)
+WS_PROBE_INTERVAL = 60.0
+WS_PROBE_TIMEOUT = 3.0
+
+
+async def _probe_ws_endpoint(host: str, port: int, timeout: float = WS_PROBE_TIMEOUT) -> bool:
+    """Best-effort async TCP probe,does anything accept on host:port?"""
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=timeout
+        )
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except (asyncio.TimeoutError, OSError, ConnectionError):
+        return False
+    except Exception:
+        return False
+
+
+async def _verify_ws_reachable(peer_id: str, host: str, ws_port: int) -> bool:
+    """Cached probe of ``host:ws_port``. Probes at most once per WS_PROBE_INTERVAL."""
+    if not host or not ws_port:
+        return True
+    now = time.time()
+    cached = _ws_probe_cache.get(peer_id)
+    if cached and (now - cached[0]) < WS_PROBE_INTERVAL:
+        return cached[1]
+    ok = await _probe_ws_endpoint(host, int(ws_port))
+    _ws_probe_cache[peer_id] = (now, ok)
+    if not ok:
+        print(f"[registry] ws_port unreachable for {peer_id} (probed {host}:{ws_port}); "
+              f"masking from /peers responses")
+    return ok
+
+
+def _ws_recently_unreachable(peer_id: str) -> bool:
+    """True if the cached probe verdict for peer_id is recent and False."""
+    entry = _ws_probe_cache.get(peer_id)
+    if not entry:
+        return False
+    ts, ok = entry
+    if (time.time() - ts) >= WS_PROBE_INTERVAL * 2:
+        # Stale verdict,let the next consumer try and let peer_health on
+        # their side mark it bad if it really is.
+        return False
+    return not ok
+
+
 # ── Pydantic Models ──────────────────────────────────────────────
 
 class PeerRegistration(BaseModel):
@@ -134,6 +195,24 @@ class PeerRegistration(BaseModel):
 class AuthVerification(BaseModel):
     peer_id: str
     signature: str  # base64-encoded ECDSA signature of the challenge nonce
+
+
+class Deregistration(BaseModel):
+    """Signed self-deregister payload. Sig is over ``deregister:{peer_id}:{timestamp}``."""
+    peer_id: str
+    timestamp: float
+    signature: str
+
+
+class HSDescriptorDelete(BaseModel):
+    """Signed HS descriptor deletion. Sig is over ``hs-delete:{addr}:{timestamp}`` by the service key."""
+    addr: str
+    timestamp: float
+    signature: str
+
+
+# Max clock skew between client and registry for replay protection.
+DEREGISTER_MAX_SKEW = 60.0
 
 
 class PeerInfo(BaseModel):
@@ -304,15 +383,25 @@ async def get_peers(role_filter: str | None = None) -> list[dict]:
             (cutoff,)
         )
     rows = await cursor.fetchall()
-    return [
-        {
-            "host": r[0], "port": r[1], "role": r[2],
-            "pub": r[3], "ws_port": r[4],
-            "ws_tls": bool(r[5]) if r[5] is not None else None,
-            "last_seen": r[6],
-        }
-        for r in rows
-    ]
+    out: list[dict] = []
+    for r in rows:
+        host, port, role, pub, ws_port, ws_tls, last_seen = r
+        # Mask ws_port for peers whose registry-side probe recently failed.
+        # The peer stays in the listing as a TCP-only candidate, so HTTP
+        # heartbeats keep working and they recover the moment their probe
+        # succeeds again (on the next heartbeat-triggered re-probe).
+        if ws_port is not None:
+            peer_id = f"{host}:{port}"
+            if _ws_recently_unreachable(peer_id):
+                ws_port = None
+                ws_tls = None
+        out.append({
+            "host": host, "port": port, "role": role,
+            "pub": pub, "ws_port": ws_port,
+            "ws_tls": bool(ws_tls) if ws_tls is not None else None,
+            "last_seen": last_seen,
+        })
+    return out
 
 
 async def expire_stale():
@@ -654,7 +743,11 @@ async def register_peer(body: PeerRegistration, request: Request):
         # Check if this peer is already registered with the same pubkey (heartbeat)
         existing = await get_peer_by_id(peer_id)
         if existing and existing.get("pub") == body.pub:
-            # Known peer heartbeat - update timestamp without re-auth
+            # Known peer heartbeat - update timestamp without re-auth.
+            # Re-probe ws_port (throttled by WS_PROBE_INTERVAL) so a peer
+            # whose firewall opens/closes mid-session recovers/degrades.
+            if body.ws_port:
+                await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
             await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
                               body.ws_port, body.ws_tls)
             return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
@@ -677,8 +770,21 @@ async def register_peer(body: PeerRegistration, request: Request):
         print(f"[registry] Challenge issued for {body.role} at {peer_id}")
         return {"ok": False, "challenge": nonce, "peer_id": peer_id, "your_ip": ip, "registered_host": advertised_host}
 
-    # No public key - register immediately (unauthenticated)
+    # No public key. Relays and exits MUST authenticate - otherwise anyone
+    # can flood the pool with self-asserted entries that every consumer then
+    # pays a probe/timeout for. Proxies remain allowed unauthenticated so
+    # legacy client-only proxies that never minted a long-lived key keep
+    # working; they don't get picked as a routing hop.
+    if body.role in ("node", "exit"):
+        print(f"[registry] x rejected unauthenticated {body.role} registration from {peer_id}")
+        raise HTTPException(
+            401,
+            detail=f"role={body.role!r} requires a public key and challenge-response auth",
+        )
+
     is_new = await get_peer_by_id(peer_id) is None
+    if body.ws_port:
+        await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
     await upsert_peer(peer_id, advertised_host, body.port, body.role,
                       ws_port=body.ws_port, ws_tls=body.ws_tls)
     if is_new:
@@ -715,10 +821,94 @@ async def verify_registration(body: AuthVerification, request: Request):
     data = challenge["peer_data"]
     del _pending_challenges[body.peer_id]
 
+    if data.get("ws_port"):
+        await _verify_ws_reachable(body.peer_id, data["host"], int(data["ws_port"]))
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
                        data["pub"], data.get("ws_port"), data.get("ws_tls"))
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
     return {"ok": True, "your_ip": ip, "registered_host": data["host"], "peer_id": body.peer_id}
+
+
+@app.post("/deregister")
+async def deregister_peer(body: Deregistration, request: Request):
+    """Authenticated self-removal. Lets a node clear itself from the registry
+    on graceful disconnect instead of waiting out PEER_TTL.
+
+    Signature is over ``deregister:{peer_id}:{timestamp}`` with the peer's
+    private key; verified against the stored ``pub_pem``. A bounded clock skew
+    (DEREGISTER_MAX_SKEW) prevents replay of a captured signature.
+    """
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    now = time.time()
+    if abs(now - body.timestamp) > DEREGISTER_MAX_SKEW:
+        raise HTTPException(400, detail="Timestamp outside allowed skew window")
+
+    peer = await get_peer_by_id(body.peer_id)
+    if not peer:
+        # Idempotent: deregistering an already-gone peer is a no-op success.
+        return {"ok": True, "deleted": False}
+
+    pub_pem = peer.get("pub")
+    if not pub_pem:
+        # Unauth-registered peers (legacy proxies) can't be authenticated for
+        # deregister. They expire via TTL like before.
+        raise HTTPException(403, detail="Peer has no registered public key; cannot authenticate deregister")
+
+    message = f"deregister:{body.peer_id}:{body.timestamp}".encode()
+    if not _ecdsa_verify(pub_pem, message, body.signature):
+        raise HTTPException(403, detail="Invalid signature")
+
+    deleted = await delete_peer(body.peer_id)
+    _ws_probe_cache.pop(body.peer_id, None)
+    if deleted:
+        print(f"[registry] - {peer.get('role')} at {body.peer_id} deregistered (signed)")
+    return {"ok": True, "deleted": deleted}
+
+
+@app.post("/hs/descriptor/delete")
+async def delete_hs_descriptor(body: HSDescriptorDelete, request: Request):
+    """Authenticated removal of a hidden-service descriptor.
+
+    A stopped HS otherwise lingers in the registry for DESCRIPTOR_TTL (1 hour),
+    causing clients to keep dialing dead intro points. The service signs
+    ``hs-delete:{addr}:{timestamp}`` with the service key; the registry
+    verifies against the descriptor's stored ``pubkey`` before deleting.
+    """
+    ip = _get_client_ip(request)
+    if not _check_rate_limit(ip):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    now = time.time()
+    if abs(now - body.timestamp) > DEREGISTER_MAX_SKEW:
+        raise HTTPException(400, detail="Timestamp outside allowed skew window")
+
+    cursor = await DB.execute(
+        "SELECT descriptor FROM hs_descriptors WHERE addr = ?", (body.addr,)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        # Idempotent: nothing to delete.
+        return {"ok": True, "deleted": False}
+
+    try:
+        desc = json.loads(row[0])
+        pub_pem = desc.get("pubkey")
+    except Exception:
+        raise HTTPException(500, detail="Stored descriptor unparseable")
+    if not pub_pem:
+        raise HTTPException(500, detail="Stored descriptor missing pubkey")
+
+    message = f"hs-delete:{body.addr}:{body.timestamp}".encode()
+    if not _ecdsa_verify(pub_pem, message, body.signature):
+        raise HTTPException(403, detail="Invalid signature")
+
+    await DB.execute("DELETE FROM hs_descriptors WHERE addr = ?", (body.addr,))
+    await DB.commit()
+    print(f"[registry] - HS descriptor {body.addr} deleted (signed)")
+    return {"ok": True, "deleted": True}
 
 
 @app.get("/peers")

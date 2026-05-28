@@ -463,6 +463,55 @@ class HiddenServiceHost:
 
         return established > 0
 
+    def delete_descriptor(self) -> bool:
+        """Tell the registry to drop our descriptor immediately.
+
+        Without this, a stopped HS lingers for DESCRIPTOR_TTL (1 hour) and
+        clients keep dialing dead intro points. Signs ``hs-delete:{addr}:{ts}``
+        with the service key; the registry verifies against the stored
+        descriptor's pubkey before deleting.
+        """
+        from src.core.encryptions import ecdsa_sign
+        timestamp = time.time()
+        message = f"hs-delete:{self.address}:{timestamp}".encode()
+        try:
+            signature = ecdsa_sign(self.priv, message)
+        except Exception as e:
+            log.warning("HS descriptor delete signature failed for %s: %s",
+                        self.address, e)
+            return False
+        body = json.dumps({
+            "addr": self.address,
+            "timestamp": timestamp,
+            "signature": signature,
+        }).encode()
+        try:
+            registry_request_json(
+                f"{REGISTRY_URL}/hs/descriptor/delete",
+                method='POST',
+                data=body,
+                extra_headers={'Content-Type': 'application/json'},
+                timeout=5,
+            )
+            log.info("Descriptor deleted from registry for %s", self.address)
+            return True
+        except Exception as e:
+            log.warning("Failed to delete descriptor for %s: %s", self.address, e)
+            return False
+
+    def stop(self):
+        """Trigger graceful shutdown: stop loops and purge descriptor.
+
+        Idempotent on the registry-delete side (registry treats a missing
+        descriptor as a no-op success) so calling stop() multiple times via
+        atexit + an explicit caller is safe.
+        """
+        self._stopped.set()
+        try:
+            self.delete_descriptor()
+        except Exception as e:
+            log.warning("delete_descriptor during stop failed: %s", e)
+
     def publish_descriptor(self) -> bool:
         if not self._intro_peers:
             return False
@@ -527,6 +576,12 @@ class HiddenServiceHost:
         # has no port forward and silently strands every client dial.
         learn_public_ip()
 
+        # Belt-and-suspenders backstop: even if the caller forgets stop(),
+        # interpreter shutdown still purges our descriptor so clients don't
+        # keep dialing for an hour.
+        import atexit as _atexit
+        _atexit.register(self.delete_descriptor)
+
         if not self.establish():
             return False
         if not self.publish_descriptor():
@@ -563,15 +618,23 @@ class HiddenServiceHost:
 
 def main():
     import argparse
+    from src.utils.sites import load_or_create_site_key
     parser = argparse.ArgumentParser(description="Obscura hidden service host")
     parser.add_argument('--target', default='127.0.0.1:8000',
                         help='local TCP target, host:port (default 127.0.0.1:8000)')
-    parser.add_argument('--key', default='hs_service.pem',
-                        help='path to service keypair (PEM); created if missing')
+    parser.add_argument('--name', default=None,
+                        help='site name under ~/.obscura47/sites (default "default")')
+    parser.add_argument('--key', default=None,
+                        help='explicit path to service keypair (PEM); overrides --name')
     args = parser.parse_args()
 
+    _priv, _pub, resolved_key, _created = load_or_create_site_key(
+        name=args.name, key=args.key,
+    )
+
     host_str, port_str = args.target.rsplit(':', 1)
-    host = HiddenServiceHost(host_str, int(port_str), args.key)
+    host = HiddenServiceHost(host_str, int(port_str), resolved_key)
+    print(f"[hs] key  = {resolved_key}")
     print(f"[hs] address = {host.address}")
     host.run()
 

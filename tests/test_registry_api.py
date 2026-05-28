@@ -9,6 +9,32 @@ from fastapi.testclient import TestClient
 from src.core.encryptions import ecc_generate_keypair, ecdsa_sign
 
 
+def register_authed(client, role: str, port: int, *, ws_port: int | None = None,
+                    ws_tls: bool | None = None, advertised_host: str | None = None):
+    """Run the full ECDSA challenge-response flow. Returns (peer_id, response_json).
+
+    Relay (``role=node``) and ``role=exit`` registrations now require a pubkey
+    plus signed nonce; the registry rejects unauth attempts with 401. Tests
+    that just want a peer in the listing should use this helper.
+    """
+    priv, pub = ecc_generate_keypair()
+    body = {"role": role, "port": port, "pub": pub}
+    if ws_port is not None:
+        body["ws_port"] = ws_port
+    if ws_tls is not None:
+        body["ws_tls"] = ws_tls
+    if advertised_host is not None:
+        body["advertised_host"] = advertised_host
+    r1 = client.post("/register", json=body)
+    assert r1.status_code == 200, r1.text
+    data = r1.json()
+    peer_id = data["peer_id"]
+    sig = ecdsa_sign(priv, data["challenge"].encode())
+    r2 = client.post("/register/verify", json={"peer_id": peer_id, "signature": sig})
+    assert r2.status_code == 200, r2.text
+    return peer_id, r2.json()
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """Return a FastAPI TestClient with a fresh isolated SQLite database."""
@@ -41,21 +67,25 @@ class TestBasicEndpoints:
         assert r.json()["status"] == "ok"
         assert r.json()["peers"] == 0
 
-    def test_register_no_auth(self, client):
+    def test_register_no_auth_rejected_for_relay(self, client):
+        # Relays and exits must complete ECDSA challenge-response; the unauth
+        # path is reserved for proxies (client-side, never picked as a hop).
         r = client.post("/register", json={"role": "node", "port": 5001})
+        assert r.status_code == 401
+        r = client.post("/register", json={"role": "exit", "port": 6000})
+        assert r.status_code == 401
+
+    def test_register_proxy_unauth_still_allowed(self, client):
+        r = client.post("/register", json={"role": "proxy", "port": 5050})
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
-        assert "your_ip" in data
         assert data["registered_host"] == "testclient"
 
     def test_register_uses_advertised_host_override(self, client):
-        r = client.post(
-            "/register",
-            json={"role": "exit", "port": 6000, "advertised_host": "154.38.172.2"},
+        _peer_id, data = register_authed(
+            client, role="exit", port=6000, advertised_host="154.38.172.2",
         )
-        assert r.status_code == 200
-        data = r.json()
         assert data["registered_host"] == "154.38.172.2"
         assert data["peer_id"] == "154.38.172.2:6000"
 
@@ -67,34 +97,40 @@ class TestBasicEndpoints:
         assert exit_peer["host"] == "154.38.172.2"
 
     def test_peers_after_register(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
-        client.post("/register", json={"role": "exit", "port": 6000, "ws_port": 6001})
+        register_authed(client, role="node", port=5001)
+        register_authed(client, role="exit", port=6000, ws_port=6001)
         r = client.get("/peers")
         assert r.status_code == 200
         peers = r.json()
+        # Exits are pending approval by default → excluded from /peers
         assert len(peers) == 1
         roles = {p["role"] for p in peers}
         assert roles == {"node"}
 
     def test_peers_role_filter(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
-        client.post("/register", json={"role": "exit", "port": 6000})
+        register_authed(client, role="node", port=5001)
+        register_authed(client, role="exit", port=6000)
         r = client.get("/peers?role=node")
         assert len(r.json()) == 1
         assert r.json()[0]["role"] == "node"
 
     def test_register_validates_port(self, client):
+        # Pydantic validation runs before the auth gate.
         r = client.post("/register", json={"role": "node", "port": 99999})
-        assert r.status_code == 422  # Pydantic validation error
+        assert r.status_code == 422
 
     def test_register_validates_role(self, client):
         r = client.post("/register", json={"role": "invalid", "port": 5001})
         assert r.status_code == 422
 
     def test_ws_port_in_peer_list(self, client):
-        client.post("/register", json={"role": "node", "port": 5001, "ws_port": 5002})
+        register_authed(client, role="node", port=5001, ws_port=5002)
         peers = client.get("/peers").json()
-        assert peers[0]["ws_port"] == 5002
+        # Probe will fail against testclient:5002 → ws_port masked. That's the
+        # new contract: an unreachable ws_port doesn't get advertised. The
+        # peer itself still shows up in the listing.
+        assert len(peers) == 1
+        assert peers[0]["port"] == 5001
 
 
 # ── ECDSA Challenge-Response Auth ─────────────────────────────────
@@ -175,16 +211,90 @@ class TestAuthFlow:
         assert r2.json()["ok"] is True
 
 
+# ── Signed self-deregister ────────────────────────────────────────
+
+class TestDeregister:
+    def _register(self, client, port=5001):
+        priv, pub = ecc_generate_keypair()
+        r1 = client.post("/register", json={"role": "node", "port": port, "pub": pub})
+        peer_id = r1.json()["peer_id"]
+        sig = ecdsa_sign(priv, r1.json()["challenge"].encode())
+        r2 = client.post("/register/verify", json={"peer_id": peer_id, "signature": sig})
+        assert r2.status_code == 200
+        return priv, pub, peer_id
+
+    def test_signed_deregister_removes_peer(self, client):
+        import time as _time
+        priv, _, peer_id = self._register(client)
+        ts = _time.time()
+        sig = ecdsa_sign(priv, f"deregister:{peer_id}:{ts}".encode())
+        r = client.post("/deregister", json={
+            "peer_id": peer_id, "timestamp": ts, "signature": sig,
+        })
+        assert r.status_code == 200
+        assert r.json()["deleted"] is True
+        assert client.get("/peers").json() == []
+
+    def test_deregister_with_wrong_signature_rejected(self, client):
+        import time as _time
+        _, _, peer_id = self._register(client)
+        wrong_priv, _ = ecc_generate_keypair()
+        ts = _time.time()
+        sig = ecdsa_sign(wrong_priv, f"deregister:{peer_id}:{ts}".encode())
+        r = client.post("/deregister", json={
+            "peer_id": peer_id, "timestamp": ts, "signature": sig,
+        })
+        assert r.status_code == 403
+        # Peer must still be there
+        assert len(client.get("/peers").json()) == 1
+
+    def test_deregister_replay_outside_skew_rejected(self, client):
+        import time as _time
+        priv, _, peer_id = self._register(client)
+        stale_ts = _time.time() - 600  # 10 minutes old
+        sig = ecdsa_sign(priv, f"deregister:{peer_id}:{stale_ts}".encode())
+        r = client.post("/deregister", json={
+            "peer_id": peer_id, "timestamp": stale_ts, "signature": sig,
+        })
+        assert r.status_code == 400
+        assert len(client.get("/peers").json()) == 1
+
+    def test_deregister_missing_peer_is_noop(self, client):
+        import time as _time
+        priv, _ = ecc_generate_keypair()
+        ts = _time.time()
+        sig = ecdsa_sign(priv, f"deregister:ghost:9999:{ts}".encode())
+        r = client.post("/deregister", json={
+            "peer_id": "ghost:9999", "timestamp": ts, "signature": sig,
+        })
+        assert r.status_code == 200
+        assert r.json()["deleted"] is False
+
+    def test_deregister_signature_for_different_peer_rejected(self, client):
+        """Signing your own peer_id then submitting it for someone else's must fail."""
+        import time as _time
+        priv_a, _, peer_a = self._register(client, port=5001)
+        _, _, peer_b = self._register(client, port=5002)
+        ts = _time.time()
+        # priv_a signs B's peer_id,but registry verifies against B's pubkey.
+        sig = ecdsa_sign(priv_a, f"deregister:{peer_b}:{ts}".encode())
+        r = client.post("/deregister", json={
+            "peer_id": peer_b, "timestamp": ts, "signature": sig,
+        })
+        assert r.status_code == 403
+        assert len(client.get("/peers").json()) == 2
+
+
 # ── Admin Endpoints ───────────────────────────────────────────────
 
 class TestAdminAPI:
     def test_delete_requires_admin_key(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
+        register_authed(client, role="node", port=5001)
         r = client.delete("/peers/testclient:5001")
         assert r.status_code == 403
 
     def test_delete_with_admin_key(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
+        register_authed(client, role="node", port=5001)
         r = client.delete(
             "/peers/testclient:5001",
             headers={"Authorization": "Bearer test-admin-key"},
@@ -202,7 +312,7 @@ class TestAdminAPI:
         assert r.status_code == 404
 
     def test_delete_with_admin_key_writes_audit_event(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
+        register_authed(client, role="node", port=5001)
         r = client.delete(
             "/peers/testclient:5001",
             headers={"Authorization": "Bearer test-admin-key"},
@@ -220,8 +330,8 @@ class TestAdminAPI:
         assert events[0]["target"] == "testclient:5001"
 
     def test_admin_peers_lists_sqlite_registry_peers(self, client):
-        client.post("/register", json={"role": "node", "port": 5001, "ws_port": 5002})
-        client.post("/register", json={"role": "exit", "port": 6000, "ws_port": 6001})
+        register_authed(client, role="node", port=5001, ws_port=5002)
+        register_authed(client, role="exit", port=6000, ws_port=6001)
 
         r = client.get(
             "/admin/peers",
@@ -234,11 +344,12 @@ class TestAdminAPI:
         assert {p["role"] for p in data["peers"]} == {"node", "exit"}
         exit_peer = next(p for p in data["peers"] if p["role"] == "exit")
         assert exit_peer["approved"] is False
+        # Admin view shows raw DB values,ws_port not masked by probe state.
         assert exit_peer["ws_port"] == 6001
 
     def test_dashboard_data_highlights_pending_exits(self, client):
-        client.post("/register", json={"role": "node", "port": 5001})
-        client.post("/register", json={"role": "exit", "port": 6000, "ws_port": 6001})
+        register_authed(client, role="node", port=5001)
+        register_authed(client, role="exit", port=6000, ws_port=6001)
 
         r = client.get(
             "/admin/dashboard/data",
@@ -276,7 +387,7 @@ class TestPersistence:
 
         # First instance: register a peer
         with TestClient(registry_server.app) as c1:
-            c1.post("/register", json={"role": "node", "port": 5001})
+            register_authed(c1, role="node", port=5001)
             assert len(c1.get("/peers").json()) == 1
 
         # Second instance: same DB file, peer should still be there
