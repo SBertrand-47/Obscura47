@@ -22,6 +22,7 @@ Features:
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import secrets
@@ -303,6 +304,14 @@ async def init_db():
         await DB.execute("ALTER TABLE peers ADD COLUMN approved INTEGER DEFAULT 1")
     except Exception:
         pass
+    # Additive migration - record the public IP the registry observed at
+    # registration. Used to scope private (RFC1918) advertised hosts to peers
+    # behind the same NAT, so a LAN-only address is never served to a node
+    # that cannot route to it.
+    try:
+        await DB.execute("ALTER TABLE peers ADD COLUMN source_ip TEXT")
+    except Exception:
+        pass
     # Network status table for kill switch
     await DB.execute("""
         CREATE TABLE IF NOT EXISTS network_status (
@@ -339,7 +348,7 @@ async def close_db():
 
 async def upsert_peer(peer_id: str, host: str, port: int, role: str,
                        pub_pem: str | None = None, ws_port: int | None = None,
-                       ws_tls: bool | None = None):
+                       ws_tls: bool | None = None, source_ip: str | None = None):
     ws_tls_int = None if ws_tls is None else (1 if ws_tls else 0)
 
     # Determine approved status: nodes/proxies auto-approved, exits pending
@@ -360,8 +369,8 @@ async def upsert_peer(peer_id: str, host: str, port: int, role: str,
             approved_val = 1 if role in ("node", "proxy") else 0
 
     await DB.execute("""
-        INSERT INTO peers (id, host, port, role, pub_pem, ws_port, ws_tls, approved, last_heartbeat)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO peers (id, host, port, role, pub_pem, ws_port, ws_tls, approved, last_heartbeat, source_ip)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             host=excluded.host,
             port=excluded.port,
@@ -374,29 +383,40 @@ async def upsert_peer(peer_id: str, host: str, port: int, role: str,
                 WHEN excluded.role = 'exit' AND peers.role = 'exit' THEN peers.approved
                 ELSE 0
             END,
-            last_heartbeat=excluded.last_heartbeat
-    """, (peer_id, host, port, role, pub_pem, ws_port, ws_tls_int, approved_val, time.time()))
+            last_heartbeat=excluded.last_heartbeat,
+            source_ip=COALESCE(excluded.source_ip, peers.source_ip)
+    """, (peer_id, host, port, role, pub_pem, ws_port, ws_tls_int, approved_val, time.time(), source_ip))
     await DB.commit()
 
 
-async def get_peers(role_filter: str | None = None) -> list[dict]:
+async def get_peers(role_filter: str | None = None,
+                    requester_ip: str | None = None) -> list[dict]:
     cutoff = time.time() - PEER_TTL
     # Filter: include all approved peers, or unapproved non-exit peers
     # This excludes unapproved exit nodes from being returned to proxies
     if role_filter:
         cursor = await DB.execute(
-            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers WHERE last_heartbeat > ? AND role = ? AND (approved = 1 OR role != 'exit')",
+            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat, source_ip FROM peers WHERE last_heartbeat > ? AND role = ? AND (approved = 1 OR role != 'exit')",
             (cutoff, role_filter)
         )
     else:
         cursor = await DB.execute(
-            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat FROM peers WHERE last_heartbeat > ? AND (approved = 1 OR role != 'exit')",
+            "SELECT host, port, role, pub_pem, ws_port, ws_tls, last_heartbeat, source_ip FROM peers WHERE last_heartbeat > ? AND (approved = 1 OR role != 'exit')",
             (cutoff,)
         )
     rows = await cursor.fetchall()
     out: list[dict] = []
     for r in rows:
-        host, port, role, pub, ws_port, ws_tls, last_seen = r
+        host, port, role, pub, ws_port, ws_tls, last_seen, source_ip = r
+        # NAT-scoped visibility: a peer advertising a private (RFC1918) host is
+        # only reachable from inside its own NAT, so serve it only to a
+        # requester the registry observed behind that same public IP. Public
+        # hosts are served to everyone. When the requester IP is unknown
+        # (internal call), don't filter. OBSCURA_ALLOW_LAN_PEERS=1 disables the
+        # scoping for fully-private testnets, mirroring the client-side opt-in.
+        if requester_ip is not None and _is_private_host(host) and not _allow_lan_peers():
+            if not source_ip or source_ip != requester_ip:
+                continue
         # Mask ws_port for peers whose registry-side probe recently failed.
         # The peer stays in the listing as a TCP-only candidate, so HTTP
         # heartbeats keep working and they recover the moment their probe
@@ -692,6 +712,37 @@ def _normalise_ip(ip: str) -> str:
     return ip
 
 
+def _allow_lan_peers() -> bool:
+    """``OBSCURA_ALLOW_LAN_PEERS=1`` serves private hosts to everyone.
+
+    Mirrors the client-side opt-in so a fully-private testnet can run without
+    NAT-scoping. Off by default - private hosts stay scoped to their own NAT.
+    """
+    return os.environ.get("OBSCURA_ALLOW_LAN_PEERS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _is_private_host(host: str | None) -> bool:
+    """True if ``host`` is a non-routable address literal.
+
+    RFC1918 / loopback / link-local / multicast / unspecified hosts are only
+    reachable from the same network, so the registry must not serve them to
+    peers behind a different NAT. Hostnames are treated as public - DNS
+    resolves them at dial time.
+    """
+    if not host:
+        return False
+    try:
+        ip = ipaddress.ip_address(str(host).strip())
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_multicast or ip.is_unspecified or ip.is_reserved
+    )
+
+
 def _audit_admin_event(action: str, *, request: Request | None = None, target: str | None = None,
                        allowed: bool, reason: str | None = None) -> None:
     write_audit_event(
@@ -760,7 +811,7 @@ async def register_peer(body: PeerRegistration, request: Request):
             if body.ws_port:
                 await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
             await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
-                              body.ws_port, body.ws_tls)
+                              body.ws_port, body.ws_tls, source_ip=ip)
             return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
 
         # New peer or pubkey change - issue challenge
@@ -797,7 +848,7 @@ async def register_peer(body: PeerRegistration, request: Request):
     if body.ws_port:
         await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
     await upsert_peer(peer_id, advertised_host, body.port, body.role,
-                      ws_port=body.ws_port, ws_tls=body.ws_tls)
+                      ws_port=body.ws_port, ws_tls=body.ws_tls, source_ip=ip)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
     return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
@@ -835,7 +886,7 @@ async def verify_registration(body: AuthVerification, request: Request):
     if data.get("ws_port"):
         await _verify_ws_reachable(body.peer_id, data["host"], int(data["ws_port"]))
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
-                       data["pub"], data.get("ws_port"), data.get("ws_tls"))
+                       data["pub"], data.get("ws_port"), data.get("ws_tls"), source_ip=ip)
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
     return {"ok": True, "your_ip": ip, "registered_host": data["host"], "peer_id": body.peer_id}
 
@@ -1014,7 +1065,7 @@ async def list_peers(role: str | None = None, request: Request = None):
     if not _check_rate_limit(ip):
         raise HTTPException(429, detail="Rate limit exceeded")
 
-    peers = await get_peers(role_filter=role)
+    peers = await get_peers(role_filter=role, requester_ip=ip)
     return peers
 
 

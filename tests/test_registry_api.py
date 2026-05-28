@@ -10,12 +10,15 @@ from src.core.encryptions import ecc_generate_keypair, ecdsa_sign
 
 
 def register_authed(client, role: str, port: int, *, ws_port: int | None = None,
-                    ws_tls: bool | None = None, advertised_host: str | None = None):
+                    ws_tls: bool | None = None, advertised_host: str | None = None,
+                    headers: dict | None = None):
     """Run the full ECDSA challenge-response flow. Returns (peer_id, response_json).
 
     Relay (``role=node``) and ``role=exit`` registrations now require a pubkey
     plus signed nonce; the registry rejects unauth attempts with 401. Tests
-    that just want a peer in the listing should use this helper.
+    that just want a peer in the listing should use this helper. ``headers``
+    (e.g. an ``X-Forwarded-For``) is applied to both round-trips so the
+    challenge IP-match check still passes.
     """
     priv, pub = ecc_generate_keypair()
     body = {"role": role, "port": port, "pub": pub}
@@ -25,12 +28,13 @@ def register_authed(client, role: str, port: int, *, ws_port: int | None = None,
         body["ws_tls"] = ws_tls
     if advertised_host is not None:
         body["advertised_host"] = advertised_host
-    r1 = client.post("/register", json=body)
+    r1 = client.post("/register", json=body, headers=headers)
     assert r1.status_code == 200, r1.text
     data = r1.json()
     peer_id = data["peer_id"]
     sig = ecdsa_sign(priv, data["challenge"].encode())
-    r2 = client.post("/register/verify", json={"peer_id": peer_id, "signature": sig})
+    r2 = client.post("/register/verify", json={"peer_id": peer_id, "signature": sig},
+                     headers=headers)
     assert r2.status_code == 200, r2.text
     return peer_id, r2.json()
 
@@ -398,3 +402,42 @@ class TestPersistence:
             peers = c2.get("/peers").json()
             assert len(peers) == 1
             assert peers[0]["role"] == "node"
+
+
+# ── NAT-scoped visibility for private (LAN) hosts ─────────────────
+
+class TestNatScopedPeers:
+    """A peer advertising an RFC1918 host must only be served to requesters
+    the registry observed behind the same public IP. Public hosts stay
+    globally visible, so a growing WAN network is unaffected."""
+
+    LAN_NAT = {"X-Forwarded-For": "203.0.113.7"}      # the home NAT's public IP
+    OTHER_NAT = {"X-Forwarded-For": "198.51.100.9"}   # an unrelated node (e.g. VPS)
+
+    def test_lan_peer_hidden_from_other_nat(self, client):
+        # A home machine registers its LAN address from behind the home NAT.
+        register_authed(client, role="node", port=5001,
+                        advertised_host="192.168.1.50", headers=self.LAN_NAT)
+        # A node on a different public IP must not see the unreachable LAN host.
+        peers = client.get("/peers", headers=self.OTHER_NAT).json()
+        assert all(p["host"] != "192.168.1.50" for p in peers)
+
+    def test_lan_peer_visible_to_same_nat(self, client):
+        register_authed(client, role="node", port=5001,
+                        advertised_host="192.168.1.50", headers=self.LAN_NAT)
+        # A second machine behind the same NAT should see it (LAN routing).
+        peers = client.get("/peers", headers=self.LAN_NAT).json()
+        assert any(p["host"] == "192.168.1.50" for p in peers)
+
+    def test_public_peer_visible_across_nats(self, client):
+        register_authed(client, role="node", port=5001,
+                        advertised_host="154.38.172.2", headers=self.LAN_NAT)
+        peers = client.get("/peers", headers=self.OTHER_NAT).json()
+        assert any(p["host"] == "154.38.172.2" for p in peers)
+
+    def test_opt_in_serves_lan_to_everyone(self, client, monkeypatch):
+        monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
+        register_authed(client, role="node", port=5001,
+                        advertised_host="192.168.1.50", headers=self.LAN_NAT)
+        peers = client.get("/peers", headers=self.OTHER_NAT).json()
+        assert any(p["host"] == "192.168.1.50" for p in peers)
