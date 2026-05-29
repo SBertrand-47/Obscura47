@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import secrets
 import ssl
 import threading
@@ -29,6 +30,13 @@ from src.core import peer_health
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# Max frames buffered per inbound connection before we apply backpressure to
+# that one connection. on_frame() does *blocking* onward dials, so a stuck
+# next hop must never be allowed to block the server event loop (that freezes
+# every other connection's opening handshake); instead it backs up here and,
+# once full, slows only the connection feeding it.
+_FRAME_QUEUE_MAX = int(os.getenv("OBSCURA_FRAME_WORKER_QUEUE_MAX", "256"))
 
 
 class _BenignHandshakeFilter(logging.Filter):
@@ -204,7 +212,21 @@ class WSServer:
             return False
 
     async def _handler(self, websocket):
-        """Handle a single WebSocket connection after authentication."""
+        """Handle a single WebSocket connection after authentication.
+
+        Received frames are handed to a dedicated per-connection worker
+        thread rather than processed inline on the event loop. ``on_frame``
+        ultimately performs *blocking* onward dials (router.forward_message →
+        socket.create_connection / WSClient.send_frame, each with multi-second
+        timeouts). Running that on this server's single event-loop thread is a
+        latent deadlock: while one relayed frame waits out a dead next hop's
+        connect timeout, the loop cannot complete the opening WebSocket
+        handshake for *any* other connection, so every peer dialing this node
+        times out "during opening handshake" and the whole relay mesh freezes.
+
+        Offloading keeps the loop responsive while preserving per-connection
+        frame ordering (one worker, FIFO queue).
+        """
         if not await self._authenticate(websocket):
             return
 
@@ -225,17 +247,47 @@ class WSServer:
             except Exception as exc:
                 log.error("_reverse_send schedule failed: %s", exc)
 
+        work: "queue.Queue" = queue.Queue(maxsize=_FRAME_QUEUE_MAX)
+        _STOP = object()
+
+        def _worker():
+            while True:
+                msg = work.get()
+                if msg is _STOP:
+                    return
+                try:
+                    try:
+                        self.on_frame(msg, _reverse_send)
+                    except TypeError:
+                        # Backward compat: on_frame doesn't accept reverse_send
+                        self.on_frame(msg)
+                except Exception as e:
+                    log.error(f"Frame handler error: {e}")
+
+        worker = threading.Thread(
+            target=_worker, name="ws-frame-worker", daemon=True)
+        worker.start()
         try:
             async for message in websocket:
                 try:
-                    self.on_frame(message, _reverse_send)
-                except TypeError:
-                    # Backward compat: on_frame doesn't accept reverse_send
-                    self.on_frame(message)
-                except Exception as e:
-                    log.error(f"Frame handler error: {e}")
+                    work.put_nowait(message)
+                except queue.Full:
+                    # Worker is backed up behind a slow/stuck next hop. Apply
+                    # backpressure to *this* connection only, off the loop
+                    # thread, so other connections and new handshakes stay live.
+                    await loop.run_in_executor(None, work.put, message)
         except websockets.exceptions.ConnectionClosed:
             pass
+        finally:
+            # Signal the worker to exit. The queue may be full because the
+            # worker is wedged on a dead next hop, so a plain blocking put()
+            # here would stall the event-loop thread on connection close -
+            # exactly what the offloading is meant to prevent. Push the
+            # sentinel off the loop instead.
+            try:
+                work.put_nowait(_STOP)
+            except queue.Full:
+                await loop.run_in_executor(None, work.put, _STOP)
 
     async def _serve(self):
         """Start the WebSocket server."""

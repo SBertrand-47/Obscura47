@@ -315,6 +315,124 @@ def probe_tcp(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
         return False, f"{e.__class__.__name__}: {e}"
 
 
+def _registry_ws_masked(role: str, host: str, ws_port: int) -> bool | None:
+    """Authoritative external verdict on our ws_port reachability.
+
+    The registry probes every advertised ws_port from its own vantage and
+    *masks* it out of ``/peers`` when the probe fails - so if our own entry
+    still carries ``ws_port``, the wider network can dial us; if it has been
+    masked, it cannot. This is a true "reachable from obscura" signal because
+    the registry dials us from outside our host (unlike a local self-connect,
+    which a cloud security group can let through while still blocking peers).
+
+    Returns ``True`` if masked (unreachable), ``False`` if still advertised
+    (reachable), or ``None`` when the registry can't be consulted / doesn't
+    list us yet.
+    """
+    try:
+        from src.core import internet_discovery
+        peers = internet_discovery.fetch_peers_from_registry(role_filter=role) or []
+        candidate_hosts = {h for h in (host, internet_discovery._my_public_ip) if h}
+    except Exception as e:
+        log.debug("self-probe: registry verdict unavailable: %s", e)
+        return None
+    mine = [p for p in peers
+            if p.get("role") == role and p.get("host") in candidate_hosts]
+    if not mine:
+        return None
+    for p in mine:
+        try:
+            if p.get("ws_port") is not None and int(p["ws_port"]) == int(ws_port):
+                return False  # still advertised -> reachable
+        except (TypeError, ValueError):
+            continue
+    return True  # we appear, but ws_port has been masked everywhere -> unreachable
+
+
+def _firewall_open_plan(port: int) -> tuple[str | None, list[str] | None]:
+    """Best-effort (human-readable command, argv) to allow inbound TCP on
+    ``port`` for the detected platform firewall, or ``(None, None)``."""
+    import platform
+    import shutil
+    if platform.system().lower().startswith("win"):
+        argv = ["netsh", "advfirewall", "firewall", "add", "rule",
+                f"name=Obscura47 {port}", "dir=in", "action=allow",
+                "protocol=TCP", f"localport={port}"]
+        return " ".join(argv), argv
+    if shutil.which("ufw"):
+        return f"sudo ufw allow {port}/tcp", ["ufw", "allow", f"{port}/tcp"]
+    if shutil.which("firewall-cmd"):
+        return (f"sudo firewall-cmd --add-port={port}/tcp  (add --permanent to persist)",
+                ["firewall-cmd", f"--add-port={port}/tcp"])
+    if shutil.which("iptables"):
+        return (f"sudo iptables -I INPUT -p tcp --dport {port} -j ACCEPT",
+                ["iptables", "-I", "INPUT", "-p", "tcp", "--dport", str(port), "-j", "ACCEPT"])
+    return None, None
+
+
+def _auto_open_enabled() -> bool:
+    """``OBSCURA_AUTO_OPEN_PORTS=1`` lets the node open its own port.
+
+    This is the operator's consent: you own the box, so with the flag set we
+    run the firewall command for you instead of only printing it.
+    """
+    return os.environ.get("OBSCURA_AUTO_OPEN_PORTS", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _try_open_firewall(port: int) -> tuple[bool, str]:
+    """Attempt to open inbound TCP on ``port`` via the platform firewall.
+
+    Non-interactive by design (``sudo -n``): if it needs privileges we don't
+    have, it fails fast and the caller logs the manual command rather than
+    hanging a background thread on a password prompt.
+    """
+    import shutil
+    import subprocess
+    desc, argv = _firewall_open_plan(port)
+    if not argv:
+        return False, "no supported firewall tool found (ufw/firewall-cmd/iptables/netsh)"
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0:
+        if shutil.which("sudo"):
+            argv = ["sudo", "-n", *argv]
+        else:
+            return False, f"need root to run `{desc}` and sudo is unavailable"
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return True, f"ran `{desc}`"
+        return False, f"`{desc}` failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:200]}"
+    except Exception as e:
+        return False, f"could not run `{desc}`: {e}"
+
+
+def diagnose_ws_reachability(role: str, host: str, ws_port: int,
+                              timeout: float = 3.0) -> dict:
+    """Decide whether our ``ws_port`` is reachable and explain why.
+
+    Prefers the registry's external verdict (authoritative "reachable from
+    obscura"); falls back to a local self-connect when the registry can't be
+    consulted. Always includes a concrete fix command when one is available.
+    """
+    masked = _registry_ws_masked(role, host, ws_port)
+    if masked is True:
+        reachable, source = False, "registry"
+        detail = "the registry probed your ws_port from the public internet and could not reach it"
+    elif masked is False:
+        reachable, source = True, "registry"
+        detail = "the registry can reach your ws_port from the public internet"
+    else:
+        reachable, why = probe_tcp(host, ws_port, timeout=timeout)
+        source = "local"
+        detail = ("local self-connect to your advertised address succeeded"
+                  if reachable else f"local self-connect failed ({why})")
+    desc, _argv = _firewall_open_plan(ws_port)
+    return {
+        "reachable": reachable, "source": source, "detail": detail,
+        "role": role, "host": host, "ws_port": ws_port, "fix_command": desc,
+    }
+
+
 def start_self_ws_probe(
     role: str,
     ws_port: int,
@@ -343,26 +461,48 @@ def start_self_ws_probe(
             host = advertised_host or internet_discovery._my_public_ip
             if not host:
                 log.debug("peer_health self-probe (%s): no advertised host yet, skipping", role)
+                time.sleep(min(interval, 30.0))
+                continue
+
+            verdict = diagnose_ws_reachability(role, host, ws_port)
+            ok = verdict["reachable"]
+
+            # With the operator's consent, try to open the port ourselves
+            # before giving up - then re-check so a successful open flips us
+            # back to healthy immediately.
+            opened_note = ""
+            if not ok and _auto_open_enabled():
+                done, msg = _try_open_firewall(ws_port)
+                opened_note = f" | auto-open: {msg}"
+                if done:
+                    time.sleep(1.0)
+                    verdict = diagnose_ws_reachability(role, host, ws_port)
+                    ok = verdict["reachable"]
+
+            changed = _record_self_probe(role, ok)
+            if ok:
+                log.info(
+                    "peer_health self-probe (%s): %s:%s reachable via %s - %s%s%s",
+                    role, host, ws_port, verdict["source"], verdict["detail"],
+                    opened_note, " (recovered)" if changed else "",
+                )
             else:
-                ok, why = probe_tcp(host, ws_port, timeout=3.0)
-                changed = _record_self_probe(role, ok)
-                if ok:
-                    log.info(
-                        "peer_health self-probe (%s): %s:%s reachable - ws_port is "
-                        "accepting external connections%s",
-                        role, host, ws_port,
-                        " (recovered)" if changed else "",
-                    )
+                fix = verdict.get("fix_command")
+                if opened_note:
+                    next_step = opened_note
+                elif fix:
+                    next_step = (f" Fix: open inbound TCP on {ws_port}, e.g. `{fix}` "
+                                 f"(or set OBSCURA_AUTO_OPEN_PORTS=1 to let Obscura47 run it).")
                 else:
-                    log.error(
-                        "peer_health self-probe (%s): %s:%s UNREACHABLE (%s). "
-                        "Other peers will time out building circuits through "
-                        "this node. Likely causes: (1) firewall blocking "
-                        "inbound TCP on %s, (2) NAT without port forward, "
-                        "(3) WSServer never bound. Open the port or stop "
-                        "advertising ws_port to keep the network healthy.",
-                        role, host, ws_port, why, ws_port,
-                    )
+                    next_step = (f" Fix: allow inbound TCP on {ws_port} in your firewall, "
+                                 f"cloud security group, or NAT port-forward.")
+                log.error(
+                    "peer_health self-probe (%s): %s:%s UNREACHABLE (%s) - %s. "
+                    "Peers cannot build circuits through this node, so traffic "
+                    "to the clearnet and .obscura sites fails.%s",
+                    role, host, ws_port, verdict["source"], verdict["detail"],
+                    next_step,
+                )
             time.sleep(interval)
 
     t = threading.Thread(target=_loop, name=f"ws-self-probe-{role}", daemon=True)
