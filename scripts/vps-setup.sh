@@ -65,8 +65,13 @@ OBSCURA_REGISTRY_ADMIN_KEY=CHANGE_ME_TO_A_STRONG_SECRET
 OBSCURA_EXIT_LISTEN_PORT=6000
 OBSCURA_EXIT_WS_PORT=6001
 
-# Relay node - gives the public network a reachable HS intro point so
-# users behind NAT can host services that are dialable from anywhere.
+# Relay node: DISABLED on this box. This VPS is registry + exit only; a
+# dedicated relay node runs on a separate host (see vps-node-setup.sh). If
+# the exit's IP were also advertised as a relay hop, circuit builders could
+# pick it as a middle node instead of as the exit - starving exit selection
+# and breaking clearnet/.obscura egress. Set OBSCURA_RUN_NODE=true (and open
+# the node ports below) only for an all-in-one single-box deploy.
+OBSCURA_RUN_NODE=false
 OBSCURA_NODE_LISTEN_PORT=5001
 OBSCURA_NODE_WS_PORT=5002
 
@@ -103,10 +108,12 @@ echo "[+] Systemd service installed and enabled"
 echo ""
 echo "=== Setup complete ==="
 echo "  1. Edit $APP_DIR/.env (set OBSCURA_REGISTRY_ADMIN_KEY)"
-echo "  2. Open firewall ports for the relay node:"
-echo "       ufw allow 5001/tcp   # node TCP"
-echo "       ufw allow 5002/tcp   # node WebSocket"
-echo "     (exit ports 6000/6001 and registry 8470/443 should already be open)"
+echo "  2. Ensure firewall ports are open (registry + exit only):"
+echo "       ufw allow 8470/tcp   # registry  (443 too if TLS-fronted)"
+echo "       ufw allow 6000/tcp   # exit TCP"
+echo "       ufw allow 6001/tcp   # exit WebSocket"
+echo "     The relay node is DISABLED here (OBSCURA_RUN_NODE=false); run it on a"
+echo "     dedicated host via scripts/vps-node-setup.sh. Do NOT open 5001/5002."
 echo "  3. Start: systemctl start obscura47-server"
 echo "  4. Logs:  journalctl -u obscura47-server -f"
 echo ""

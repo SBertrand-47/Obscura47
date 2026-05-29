@@ -39,6 +39,22 @@ def main():
                         help="Skip the relay node role")
     args = parser.parse_args()
 
+    # Role gating. Default is all three roles (single-box deploys), but the
+    # relay-node and exit roles can be turned off from the .env alone - no CLI
+    # flags needed - so a registry+exit box that has a *dedicated* relay node
+    # elsewhere stops advertising its own IP as a relay hop. That matters:
+    # if the exit's IP is also handed out as a middle node, circuit builders
+    # can consume it as a relay instead of as the exit, starving exit
+    # selection and breaking clearnet/.obscura egress.
+    def _env_truthy(name: str, default: bool) -> bool:
+        v = os.getenv(name)
+        if v is None or v.strip() == "":
+            return default
+        return v.strip().lower() in ("1", "true", "yes", "on")
+
+    run_exit = not args.no_exit and _env_truthy("OBSCURA_RUN_EXIT", True)
+    run_node = not args.no_node and _env_truthy("OBSCURA_RUN_NODE", True)
+
     # Apply port overrides to env before importing modules
     if args.registry_port is not None:
         os.environ["OBSCURA_REGISTRY_PORT"] = str(args.registry_port)
@@ -60,12 +76,16 @@ def main():
     print("  Obscura47 VPS Server")
     print("=" * 60)
     print(f"  Registry:   {args.registry_host}:{registry_port}")
-    if not args.no_exit:
+    if run_exit:
         print(f"  Exit node:  0.0.0.0:{exit_port} (TCP)")
         print(f"  Exit WS:    0.0.0.0:{EXIT_WS_PORT}")
-    if not args.no_node:
+    else:
+        print("  Exit node:  disabled (OBSCURA_RUN_EXIT=false)")
+    if run_node:
         print(f"  Relay node: 0.0.0.0:{node_port} (TCP)")
         print(f"  Node WS:    0.0.0.0:{NODE_WS_PORT}")
+    else:
+        print("  Relay node: disabled (OBSCURA_RUN_NODE=false; use a dedicated node host)")
     print()
     print("  Admin CLI:  python admin_cli.py status")
     print("=" * 60)
@@ -84,8 +104,8 @@ def main():
     # Start exit node in background thread (before registry, since registry
     # blocks on uvicorn.run)
     exit_node_instance = None
-    if not args.no_exit:
-        def run_exit():
+    if run_exit:
+        def _run_exit():
             nonlocal exit_node_instance
             try:
                 from src.core.exit_node import ExitNode
@@ -94,7 +114,7 @@ def main():
             except Exception as e:
                 print(f"[server] Exit node error: {e}", flush=True)
 
-        exit_thread = threading.Thread(target=run_exit, daemon=True)
+        exit_thread = threading.Thread(target=_run_exit, daemon=True)
         exit_thread.start()
         # Give exit node a moment to bind its ports
         time.sleep(1)
@@ -103,8 +123,8 @@ def main():
     # ECC keypair (OBSCURA_NODE_KEY_PATH) so the node identity is not
     # tied to the exit identity.
     node_instance = None
-    if not args.no_node:
-        def run_node():
+    if run_node:
+        def _run_node():
             nonlocal node_instance
             try:
                 from src.core.node import ObscuraNode
@@ -113,7 +133,7 @@ def main():
             except Exception as e:
                 print(f"[server] Relay node error: {e}", flush=True)
 
-        node_thread = threading.Thread(target=run_node, daemon=True)
+        node_thread = threading.Thread(target=_run_node, daemon=True)
         node_thread.start()
         time.sleep(1)
 
