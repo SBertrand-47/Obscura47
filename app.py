@@ -362,6 +362,15 @@ class ObscuraApp(tk.Tk):
             tk.Label(col, text=label, font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD).pack()
             self._peer_labels[key] = num
 
+        # This node's position in the network: primary public node, or
+        # internal sibling routing through another local node as gateway.
+        # Updated by ``_poll`` once registration classifies us.
+        self._role_label = tk.Label(
+            peers_frame, text="Role: detecting…",
+            font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD,
+        )
+        self._role_label.pack(anchor="w", padx=14, pady=(4, 4))
+
         # ── Component status cards ────────────────────────────────
         cards_frame = tk.Frame(parent, bg=BG)
         cards_frame.pack(fill="x", padx=24, pady=(14, 0))
@@ -1149,6 +1158,28 @@ class ObscuraApp(tk.Tk):
                 lbl.config(text="\u25cf Running", fg=GREEN)
             else:
                 lbl.config(text="\u25cf Stopped", fg=TEXT_DIM)
+
+        # Role indicator: primary public node vs internal sibling. Reads the
+        # classification the registry returned at registration time; while
+        # we're not connected, fall back to a neutral placeholder.
+        try:
+            from src.core.internet_discovery import get_role_kind, get_primary_peer
+            kind = get_role_kind("node")
+            primary = get_primary_peer()
+        except Exception:
+            kind, primary = None, None
+        if not self._running.get("node", False):
+            self._role_label.config(text="Role: detecting…", fg=TEXT_DIM)
+        elif kind == "primary":
+            self._role_label.config(text="Role: Primary public node", fg=GREEN)
+        elif kind == "sibling":
+            if primary and primary.get("host"):
+                gw = f"{primary['host']}:{primary.get('port', '?')}"
+                self._role_label.config(text=f"Role: Internal sibling,gateway {gw}", fg=ACCENT)
+            else:
+                self._role_label.config(text="Role: Internal sibling,waiting for primary", fg=ACCENT)
+        else:
+            self._role_label.config(text="Role: detecting…", fg=TEXT_DIM)
 
         # Network banner
         both_running = self._running.get("proxy", False) and self._running.get("node", False)

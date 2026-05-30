@@ -69,6 +69,28 @@ class Obscura47Tray:
         self._peer_counts = counts
         return counts
 
+    def _format_role_status(self) -> str | None:
+        """Return a one-line role indicator for the tray menu, or None.
+
+        ``None`` while the node isn't running (no registration to classify).
+        """
+        if "node" not in self._running_roles:
+            return None
+        try:
+            from src.core.internet_discovery import get_role_kind, get_primary_peer
+            kind = get_role_kind("node")
+            primary = get_primary_peer()
+        except Exception:
+            return None
+        if kind == "primary":
+            return "Role: Primary public node"
+        if kind == "sibling":
+            if primary and primary.get("host"):
+                gw = f"{primary['host']}:{primary.get('port', '?')}"
+                return f"Role: Internal sibling (gateway {gw})"
+            return "Role: Internal sibling (waiting for primary)"
+        return None
+
     def _build_menu(self) -> pystray.Menu:
         """Build the system tray context menu."""
         items = []
@@ -89,6 +111,13 @@ class Obscura47Tray:
             f"{self._peer_counts['exits']} exits"
         )
         items.append(pystray.MenuItem(peer_info, action=None, enabled=False))
+
+        # Primary public node vs internal sibling. Helps users running two
+        # nodes behind one NAT see, at a glance, which machine acts as the
+        # gateway and which one is routing through it.
+        role_text = self._format_role_status()
+        if role_text:
+            items.append(pystray.MenuItem(role_text, action=None, enabled=False))
 
         # Proxy address hint
         if "proxy" in self._running_roles:

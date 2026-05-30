@@ -48,6 +48,76 @@ _atexit_registered = False
 # even when host:port matching is ambiguous.
 _self_pubs_cache: set[str] | None = None
 
+# Per-role registration classification. ``_role_kind[role]`` is ``"primary"``
+# when this node owns the public-IP slot for its NAT, ``"sibling"`` when
+# another node behind the same NAT got there first and we registered under
+# our LAN address instead. ``_primary_peer`` is the gateway peer (the
+# primary's host/port/pub) that siblings route through; ``None`` when we
+# are the primary or no primary is registered yet.
+_role_kind: dict[str, str] = {}
+_primary_peer: dict | None = None
+# Cached effective advertised_host per role. Once 409→LAN fallback succeeds
+# we keep registering under the LAN address so subsequent heartbeats don't
+# repeatedly trip the public-slot conflict.
+_effective_advertised_host: dict[str, str] = {}
+_registration_state_lock = threading.Lock()
+
+
+def _pick_local_lan_ip() -> str | None:
+    """Return a single private IPv4 suitable for use as advertised_host.
+
+    Uses the same UDP-connect trick as ``_local_interface_ips`` but picks
+    the address the OS would actually use to reach the public internet -
+    i.e. the LAN IP bound to the default route interface. Returns ``None``
+    if no private IPv4 is detected (host is on a public IP directly, or
+    everything is loopback).
+    """
+    try:
+        import ipaddress
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("1.1.1.1", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        if ip and ipaddress.ip_address(ip).is_private:
+            return ip
+    except Exception:
+        pass
+    # Fall back to scanning enumerated interface IPs for the first private v4.
+    for ip in _local_interface_ips():
+        try:
+            import ipaddress
+            parsed = ipaddress.ip_address(_strip_v6_zone(ip))
+            if parsed.version == 4 and parsed.is_private and not parsed.is_loopback:
+                return str(parsed)
+        except Exception:
+            continue
+    return None
+
+
+def get_role_kind(role: str = "node") -> str | None:
+    """Return ``"primary"`` / ``"sibling"`` for *role*, or ``None`` if unknown.
+
+    Unknown means: we haven't registered yet (or the registry response did
+    not classify us). Callers that need to gate behavior on role kind
+    should treat ``None`` the same as ``"primary"`` until a classified
+    response arrives - matches the current "no special handling" default.
+    """
+    with _registration_state_lock:
+        return _role_kind.get(role)
+
+
+def get_primary_peer() -> dict | None:
+    """Return the primary peer (gateway) this sibling registered behind.
+
+    ``None`` when we are the primary, or when no primary is yet registered
+    for this NAT. The dict shape matches a /peers entry: ``host``, ``port``,
+    ``pub``, optionally ``ws_port`` / ``ws_tls``.
+    """
+    with _registration_state_lock:
+        return dict(_primary_peer) if _primary_peer else None
+
 
 def _normalize_pem(pem: str | None) -> str:
     """Strip whitespace differences so two equivalent PEMs compare equal."""
@@ -450,13 +520,36 @@ def registry_ssl_ctx():
     return ctx
 
 
-def register_with_registry(role: str, port: int, pub: str | None = None,
-                           priv_key=None, ws_port: int | None = None,
-                           ws_tls: bool | None = None,
-                           advertised_host: str | None = None):
+def _capture_registration_classification(role: str, result: dict | None) -> None:
+    """Record role_kind and primary_peer from a successful registration response.
+
+    Siblings receive ``primary_peer`` so callers (the router) can pin it as
+    the gateway first hop. Primaries clear any stale primary_peer cached
+    from a prior sibling session.
     """
-    Register this node with the bootstrap registry.
-    If pub + priv_key are provided, performs ECDSA challenge-response auth.
+    if not isinstance(result, dict) or not result.get("ok"):
+        return
+    kind = result.get("role_kind")
+    primary = result.get("primary_peer")
+    with _registration_state_lock:
+        if kind:
+            _role_kind[role] = kind
+        global _primary_peer
+        if kind == "sibling" and primary:
+            _primary_peer = primary
+        elif kind == "primary":
+            _primary_peer = None
+
+
+def _attempt_registration(role: str, port: int, pub: str | None,
+                          priv_key, ws_port: int | None, ws_tls: bool | None,
+                          advertised_host: str | None) -> dict | None:
+    """One round-trip to /register (+ /register/verify when challenged).
+
+    Returns the parsed response dict on success, ``None`` on transport
+    failure. Raises ``urllib.error.HTTPError`` for non-2xx HTTP responses
+    so the caller can distinguish a 409 (slot-conflict) from other errors
+    and decide whether to fall back to a LAN advertised_host.
     """
     global _my_public_ip
     body: dict = {"role": role, "port": port}
@@ -477,49 +570,93 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         method="POST",
     )
     ctx = registry_ssl_ctx()
+    with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+        result = json.loads(resp.read())
+
+    if result.get("ok"):
+        _my_public_ip = result.get("your_ip") or _my_public_ip
+        registered_host = result.get("registered_host") or body.get("advertised_host") or _my_public_ip
+        log.info(f"Registered as {role} with registry (your_ip={_my_public_ip}, host={registered_host}, kind={result.get('role_kind')})")
+        return result
+
+    # Challenge-response flow
+    challenge = result.get("challenge")
+    peer_id = result.get("peer_id")
+    if challenge and peer_id and priv_key and pub:
+        from src.core.encryptions import ecdsa_sign
+        signature = ecdsa_sign(priv_key, challenge.encode())
+
+        verify_body = json.dumps({
+            "peer_id": peer_id,
+            "signature": signature,
+        }).encode()
+        verify_req = urllib.request.Request(
+            f"{REGISTRY_URL}/register/verify",
+            data=verify_body,
+            headers=_registry_headers({"Content-Type": "application/json"}),
+            method="POST",
+        )
+        with urllib.request.urlopen(verify_req, timeout=5, context=ctx) as verify_resp:
+            verify_result = json.loads(verify_resp.read())
+
+        if verify_result.get("ok"):
+            _my_public_ip = verify_result.get("your_ip") or _my_public_ip
+            registered_host = verify_result.get("registered_host") or body.get("advertised_host") or _my_public_ip
+            log.info(f"Verified as {role} with registry (your_ip={_my_public_ip}, host={registered_host}, kind={verify_result.get('role_kind')})")
+            return verify_result
+        log.error(f"Verification failed: {verify_result}")
+        return None
+    log.warning(f"Challenge received but no private key to sign with")
+    return None
+
+
+def register_with_registry(role: str, port: int, pub: str | None = None,
+                           priv_key=None, ws_port: int | None = None,
+                           ws_tls: bool | None = None,
+                           advertised_host: str | None = None):
+    """
+    Register this node with the bootstrap registry.
+    If pub + priv_key are provided, performs ECDSA challenge-response auth.
+
+    When the public (source-IP) slot is already held by another key behind
+    the same NAT (HTTP 409), we transparently retry with our LAN address as
+    ``advertised_host`` and register as an internal sibling instead. The
+    chosen LAN address is cached per role so subsequent heartbeats skip
+    the public attempt that we already know will conflict.
+    """
+    # Honor a sticky LAN address chosen by a prior 409 fallback.
+    if advertised_host is None:
+        with _registration_state_lock:
+            advertised_host = _effective_advertised_host.get(role)
+
     try:
-        with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
-            result = json.loads(resp.read())
-
-        if result.get("ok"):
-            # Registered (heartbeat or no-auth)
-            _my_public_ip = result.get("your_ip") or _my_public_ip
-            registered_host = result.get("registered_host") or body.get("advertised_host") or _my_public_ip
-            log.info(f"Registered as {role} with registry (your_ip={_my_public_ip}, host={registered_host})")
-            return result
-
-        # Challenge-response flow
-        challenge = result.get("challenge")
-        peer_id = result.get("peer_id")
-        if challenge and peer_id and priv_key and pub:
-            from src.core.encryptions import ecdsa_sign
-            signature = ecdsa_sign(priv_key, challenge.encode())
-
-            verify_body = json.dumps({
-                "peer_id": peer_id,
-                "signature": signature,
-            }).encode()
-            verify_req = urllib.request.Request(
-                f"{REGISTRY_URL}/register/verify",
-                data=verify_body,
-                headers=_registry_headers({"Content-Type": "application/json"}),
-                method="POST",
-            )
-            with urllib.request.urlopen(verify_req, timeout=5, context=ctx) as verify_resp:
-                verify_result = json.loads(verify_resp.read())
-
-            if verify_result.get("ok"):
-                _my_public_ip = verify_result.get("your_ip") or _my_public_ip
-                registered_host = verify_result.get("registered_host") or body.get("advertised_host") or _my_public_ip
-                log.info(f"Verified as {role} with registry (your_ip={_my_public_ip}, host={registered_host})")
-                return verify_result
-            else:
-                log.error(f"Verification failed: {verify_result}")
-                return None
-        else:
-            log.warning(f"Challenge received but no private key to sign with")
+        result = _attempt_registration(role, port, pub, priv_key,
+                                       ws_port, ws_tls, advertised_host)
+        _capture_registration_classification(role, result)
+        return result
+    except urllib.error.HTTPError as e:
+        if e.code != 409 or advertised_host is not None:
+            log.error(f"Failed to register with registry: {e}")
             return None
-
+        # Public slot is owned by another key behind our NAT. Fall back to a
+        # sibling registration scoped to the LAN.
+        lan_ip = _pick_local_lan_ip()
+        if not lan_ip:
+            log.error(f"Registry slot conflict and no LAN address detected; "
+                      f"cannot fall back to sibling registration ({e})")
+            return None
+        log.info(f"Public-slot conflict on register; retrying as sibling under LAN {lan_ip}")
+        try:
+            result = _attempt_registration(role, port, pub, priv_key,
+                                           ws_port, ws_tls, lan_ip)
+        except Exception as e2:
+            log.error(f"Sibling fallback registration failed: {e2}")
+            return None
+        if result and result.get("ok"):
+            with _registration_state_lock:
+                _effective_advertised_host[role] = lan_ip
+        _capture_registration_classification(role, result)
+        return result
     except Exception as e:
         log.error(f"Failed to register with registry: {e}")
         return None

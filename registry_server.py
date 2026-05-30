@@ -464,6 +464,61 @@ async def get_peer_by_id(peer_id: str) -> dict | None:
     }
 
 
+async def _registration_response(source_ip: str | None, advertised_host: str,
+                                  peer_id: str) -> dict:
+    """Build a /register response with primary/sibling classification.
+
+    A registration is classified ``sibling`` when its advertised host is a
+    private (LAN) address - it can only be reached from inside the same NAT
+    and so depends on a public-IP-bound peer as its gateway to the broader
+    network. ``primary_peer`` carries that gateway when one is currently
+    registered, so the sibling can pin it as a first hop without a separate
+    lookup.
+    """
+    role_kind = "sibling" if _is_private_host(advertised_host) else "primary"
+    body: dict = {
+        "ok": True,
+        "your_ip": source_ip,
+        "registered_host": advertised_host,
+        "peer_id": peer_id,
+        "role_kind": role_kind,
+    }
+    if role_kind == "sibling":
+        primary = await get_primary_node_for_nat(source_ip)
+        if primary:
+            body["primary_peer"] = primary
+    return body
+
+
+async def get_primary_node_for_nat(source_ip: str | None) -> dict | None:
+    """Return the public-IP-bound node registered from *source_ip*, if any.
+
+    The "primary" for a NAT is the relay whose advertised host equals the
+    public IP the registry observed for the requester - i.e. the first
+    claimant of the (public_ip, port) slot. Other peers from the same
+    source_ip that advertise a private (LAN) host are siblings of this
+    primary and should route through it as their gateway.
+    """
+    if not source_ip:
+        return None
+    cutoff = time.time() - PEER_TTL
+    cursor = await DB.execute(
+        "SELECT host, port, pub_pem, ws_port, ws_tls FROM peers "
+        "WHERE source_ip = ? AND host = ? AND role = 'node' "
+        "AND last_heartbeat > ? AND approved = 1 LIMIT 1",
+        (source_ip, source_ip, cutoff),
+    )
+    row = await cursor.fetchone()
+    if not row:
+        return None
+    host, port, pub, ws_port, ws_tls = row
+    return {
+        "host": host, "port": port, "pub": pub,
+        "ws_port": ws_port,
+        "ws_tls": bool(ws_tls) if ws_tls is not None else None,
+    }
+
+
 async def get_stats() -> tuple[dict[str, int], int]:
     cursor = await DB.execute("SELECT role, COUNT(*) FROM peers WHERE last_heartbeat > ? GROUP BY role", (time.time() - PEER_TTL,))
     rows = await cursor.fetchall()
@@ -833,11 +888,14 @@ async def register_peer(body: PeerRegistration, request: Request):
             # Known peer heartbeat - update timestamp without re-auth.
             # Re-probe ws_port (throttled by WS_PROBE_INTERVAL) so a peer
             # whose firewall opens/closes mid-session recovers/degrades.
-            if body.ws_port:
+            # Skip the probe for private/LAN advertised hosts: the registry's
+            # VPS cannot reach them, so the probe would always fail and mask
+            # the sibling's ws_port for its LAN peers (who CAN reach it).
+            if body.ws_port and not _is_private_host(advertised_host):
                 await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
             await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
                               body.ws_port, body.ws_tls, source_ip=ip)
-            return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
+            return await _registration_response(ip, advertised_host, peer_id)
 
         # New peer or pubkey change - issue challenge
         nonce = secrets.token_hex(32)
@@ -870,13 +928,13 @@ async def register_peer(body: PeerRegistration, request: Request):
         )
 
     is_new = existing is None
-    if body.ws_port:
+    if body.ws_port and not _is_private_host(advertised_host):
         await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
     await upsert_peer(peer_id, advertised_host, body.port, body.role,
                       ws_port=body.ws_port, ws_tls=body.ws_tls, source_ip=ip)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
-    return {"ok": True, "your_ip": ip, "registered_host": advertised_host, "peer_id": peer_id}
+    return await _registration_response(ip, advertised_host, peer_id)
 
 
 @app.post("/register/verify")
@@ -908,12 +966,12 @@ async def verify_registration(body: AuthVerification, request: Request):
     data = challenge["peer_data"]
     del _pending_challenges[body.peer_id]
 
-    if data.get("ws_port"):
+    if data.get("ws_port") and not _is_private_host(data["host"]):
         await _verify_ws_reachable(body.peer_id, data["host"], int(data["ws_port"]))
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
                        data["pub"], data.get("ws_port"), data.get("ws_tls"), source_ip=ip)
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
-    return {"ok": True, "your_ip": ip, "registered_host": data["host"], "peer_id": body.peer_id}
+    return await _registration_response(ip, data["host"], body.peer_id)
 
 
 # ── Diagnostic event collection ──────────────────────────────────

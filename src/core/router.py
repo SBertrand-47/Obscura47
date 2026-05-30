@@ -419,11 +419,55 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
     return middles + [terminal]
 
 
+def _is_lan_host(host: str | None) -> bool:
+    """True if ``host`` is an RFC1918/loopback/link-local address literal."""
+    if not host:
+        return False
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(str(host).strip())
+    except ValueError:
+        return False
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
+
+
+def _pick_sibling_first_hop(pool: list[dict]) -> dict | None:
+    """Return the gateway-first-hop a sibling node should use, or ``None``.
+
+    Order (matches the operator-chosen fallback policy): primary → other
+    LAN siblings → ``None`` (caller falls through to guards/random). When
+    we are the primary (or unclassified), returns ``None`` immediately so
+    the existing selection path runs unchanged.
+    """
+    from src.core.internet_discovery import get_role_kind, get_primary_peer
+    if get_role_kind("node") != "sibling":
+        return None
+    primary = get_primary_peer()
+    if primary:
+        primary_key = (primary.get("host"), primary.get("port"))
+        for p in pool:
+            if (p.get("host"), p.get("port")) == primary_key:
+                return p
+    # Primary unhealthy or absent from current pool: prefer any other LAN
+    # sibling before falling back to a public peer. The registry's NAT
+    # scoping means LAN peers only appear in *our* /peers view, so any
+    # private-host entry here is a same-NAT mate.
+    for p in pool:
+        if _is_lan_host(p.get("host")):
+            return p
+    return None
+
+
 def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     """
     Build a route with length in the range [4,7] when available.
     If a process-wide GuardSet is installed (proxy role), the first hop is
     pinned to a live guard and remaining hops are sampled from the rest.
+
+    Internal sibling nodes (a second node behind a NAT whose public-IP slot
+    is already claimed by another local node) prefer their primary as the
+    first hop, then any other LAN sibling, before falling back to public
+    peers or the configured guard set.
     """
     if not peers:
         return []
@@ -440,6 +484,19 @@ def build_route47(peers, min_hops: int = 4, max_hops: int = 7):
     hop_target = min(hop_target, len(candidate_pool))
     if hop_target <= 0:
         return []
+
+    # Sibling gateway preference: if we registered as a sibling, our primary
+    # (or another same-NAT sibling) acts as the entry point to the wider
+    # network. Falls through to guards/random when no LAN candidate is
+    # healthy - matching the operator-requested fallback policy.
+    sibling_first = _pick_sibling_first_hop(candidate_pool)
+    if sibling_first is not None:
+        first_key = (sibling_first.get("host"), sibling_first.get("port"))
+        remaining_pool = [p for p in candidate_pool if (p.get("host"), p.get("port")) != first_key]
+        tail_count = max(0, hop_target - 1)
+        tail_count = min(tail_count, len(remaining_pool))
+        tail = random.sample(remaining_pool, tail_count) if tail_count else []
+        return [sibling_first] + tail
 
     # Guard-pinned first hop, if configured
     from src.core.guards import get_guards
