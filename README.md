@@ -40,14 +40,57 @@ mass-market anonymity service.
 
 ## Quick Start
 
+Get the code, then run the one launcher for your OS. It creates an isolated
+Python environment on first run, installs everything, and opens the desktop
+app,then you just click **Connect**.
+
 ```bash
 git clone https://github.com/SBertrand-47/Obscura47.git
 cd Obscura47
-pip install -r requirements.txt
-python join_network.py
 ```
 
-That opens the interactive launcher. The easiest direct commands are:
+**macOS / Linux**
+
+```bash
+./run.sh
+```
+
+**Windows**,double-click `run.bat`, or from a terminal:
+
+```bat
+run.bat
+```
+
+That's it. The launcher handles the parts that differ between platforms
+(creating the virtualenv, finding the right Python) for you, so there's
+nothing to activate and no `.env` to edit for the defaults. The first run
+downloads dependencies; later runs start immediately.
+
+> **Prerequisite:** Python 3.10+ from [python.org](https://www.python.org/downloads/)
+> (on Windows tick *"Add python.exe to PATH"*). On Linux the desktop GUI also
+> needs Tk: `sudo apt install -y python3-tk`. The launcher tells you if it's
+> missing.
+
+### Manual setup (any platform)
+
+Prefer to drive it yourself? Create a virtualenv once and use its Python
+directly,note the create/activate commands differ per platform:
+
+| | Create venv | Activate (optional) |
+|---|---|---|
+| macOS / Linux | `python3 -m venv venv` | `source venv/bin/activate` |
+| Windows (PowerShell) | `py -m venv venv` | `venv\Scripts\Activate.ps1` |
+| Windows (cmd) | `py -m venv venv` | `venv\Scripts\activate.bat` |
+
+```bash
+# after activating (or just call venv/bin/python,venv\Scripts\python.exe on Windows):
+pip install -r requirements.txt
+python app.py              # desktop app   (or: tray_app.py / join_network.py)
+```
+
+For the shared public network the default `OBSCURA_REGISTRY_URL` already points
+at `https://db.monmedjs.com`. The CLI launcher is `python join_network.py`;
+common direct commands:
 
 ```bash
 python join_network.py node
@@ -56,15 +99,17 @@ python join_network.py host ./site --name mysite
 python join_network.py open alpha.obscura
 ```
 
-For the shared public network, point `OBSCURA_REGISTRY_URL` at
-`https://db.monmedjs.com`.
-
 ## Main Ways To Use It
+
+> In the commands below, `python` means the project venv's Python. If you used
+> `./run.sh` / `run.bat` it's already set up,call `venv/bin/python` (or
+> `venv\Scripts\python.exe` on Windows), or activate the venv first.
 
 ### Desktop App
 
 ```bash
-python app.py
+./run.sh            # macOS/Linux  (or run.bat on Windows),recommended
+python app.py       # if your venv is already active
 ```
 
 The desktop app is the main user-facing surface. From `Quick Actions` you can:
