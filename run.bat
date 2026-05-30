@@ -18,9 +18,12 @@ if not defined PY (
     pause & exit /b 1
 )
 
-REM 2. create the venv once (this is the platform-specific step; afterwards we
-REM    only call venv\Scripts\python.exe, never "activate")
-if not exist "venv\Scripts\python.exe" (
+REM 2. reuse an existing venv if present, else create one. This is the
+REM    platform-specific step; afterwards we only call venv\Scripts\python.exe,
+REM    never "activate". Existing setups are never recreated or wiped.
+if exist "venv\Scripts\python.exe" (
+    echo [*] Reusing existing virtual environment.
+) else (
     echo [*] Creating virtual environment ^(first run^)...
     %PY% -m venv venv || ( echo [x] venv creation failed & pause & exit /b 1 )
 )

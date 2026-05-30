@@ -49,13 +49,19 @@ git clone https://github.com/SBertrand-47/Obscura47.git
 cd Obscura47
 ```
 
-**macOS / Linux**
+**macOS**,double-click **`run.command`** in Finder, or from a terminal:
 
 ```bash
 ./run.sh
 ```
 
-**Windows**,double-click `run.bat`, or from a terminal:
+**Linux**
+
+```bash
+./run.sh
+```
+
+**Windows**,double-click **`run.bat`**, or from a terminal:
 
 ```bat
 run.bat
@@ -64,7 +70,8 @@ run.bat
 That's it. The launcher handles the parts that differ between platforms
 (creating the virtualenv, finding the right Python) for you, so there's
 nothing to activate and no `.env` to edit for the defaults. The first run
-downloads dependencies; later runs start immediately.
+downloads dependencies; later runs start immediately. **If you already set up
+a virtualenv, it's reused,never recreated or wiped.**
 
 > **Prerequisite:** Python 3.10+ from [python.org](https://www.python.org/downloads/)
 > (on Windows tick *"Add python.exe to PATH"*). On Linux the desktop GUI also
@@ -108,7 +115,7 @@ python join_network.py open alpha.obscura
 ### Desktop App
 
 ```bash
-./run.sh            # macOS/Linux  (or run.bat on Windows),recommended
+./run.sh            # Linux / macOS terminal  (macOS Finder: run.command; Windows: run.bat),recommended
 python app.py       # if your venv is already active
 ```
 

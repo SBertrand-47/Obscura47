@@ -14,9 +14,12 @@ PY=""
 for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
 [ -n "$PY" ] || { echo "[x] Python 3.10+ not found. Install it from https://www.python.org/downloads/"; exit 1; }
 
-# 2. create the venv once (the create command is the platform-specific part;
-#    after this we only ever call venv/bin/python, never "source activate")
-if [ ! -x venv/bin/python ]; then
+# 2. reuse an existing venv if present, else create one. The create command is
+#    the platform-specific part; afterwards we only ever call venv/bin/python,
+#    never "source activate". Existing setups are never recreated or wiped.
+if [ -x venv/bin/python ]; then
+    echo "[*] Reusing existing virtual environment."
+else
     echo "[*] Creating virtual environment (first run)..."
     "$PY" -m venv venv 2>/dev/null || {
         echo "[x] Could not create the virtualenv. On Debian/Ubuntu install it first:"
