@@ -42,14 +42,14 @@ mass-market anonymity service.
 
 Get the code, then run the one launcher for your OS. It creates an isolated
 Python environment on first run, installs everything, and opens the desktop
-app,then you just click **Connect**.
+app, then you just click **Connect**.
 
 ```bash
 git clone https://github.com/SBertrand-47/Obscura47.git
 cd Obscura47
 ```
 
-**macOS**,double-click **`run.command`** in Finder, or from a terminal:
+**macOS**: double-click **`run.command`** in Finder, or from a terminal:
 
 ```bash
 ./run.sh
@@ -61,7 +61,7 @@ cd Obscura47
 ./run.sh
 ```
 
-**Windows**,double-click **`run.bat`**, or from a terminal:
+**Windows**: double-click **`run.bat`**, or from a terminal:
 
 ```bat
 run.bat
@@ -71,7 +71,7 @@ That's it. The launcher handles the parts that differ between platforms
 (creating the virtualenv, finding the right Python) for you, so there's
 nothing to activate and no `.env` to edit for the defaults. The first run
 downloads dependencies; later runs start immediately. **If you already set up
-a virtualenv, it's reused,never recreated or wiped.**
+a virtualenv, it's reused, never recreated or wiped.**
 
 > **Prerequisite:** Python 3.10+ from [python.org](https://www.python.org/downloads/)
 > (on Windows tick *"Add python.exe to PATH"*). On Linux the desktop GUI also
@@ -81,7 +81,7 @@ a virtualenv, it's reused,never recreated or wiped.**
 ### Manual setup (any platform)
 
 Prefer to drive it yourself? Create a virtualenv once and use its Python
-directly,note the create/activate commands differ per platform:
+directly. Note the create/activate commands differ per platform:
 
 | | Create venv | Activate (optional) |
 |---|---|---|
@@ -90,7 +90,7 @@ directly,note the create/activate commands differ per platform:
 | Windows (cmd) | `py -m venv venv` | `venv\Scripts\activate.bat` |
 
 ```bash
-# after activating (or just call venv/bin/python,venv\Scripts\python.exe on Windows):
+# after activating (or just call venv/bin/python, venv\Scripts\python.exe on Windows):
 pip install -r requirements.txt
 python app.py              # desktop app   (or: tray_app.py / join_network.py)
 ```
@@ -109,13 +109,13 @@ python join_network.py open alpha.obscura
 ## Main Ways To Use It
 
 > In the commands below, `python` means the project venv's Python. If you used
-> `./run.sh` / `run.bat` it's already set up,call `venv/bin/python` (or
+> `./run.sh` / `run.bat` it's already set up, call `venv/bin/python` (or
 > `venv\Scripts\python.exe` on Windows), or activate the venv first.
 
 ### Desktop App
 
 ```bash
-./run.sh            # Linux / macOS terminal  (macOS Finder: run.command; Windows: run.bat),recommended
+./run.sh            # Linux / macOS terminal  (macOS Finder: run.command; Windows: run.bat), recommended
 python app.py       # if your venv is already active
 ```
 
