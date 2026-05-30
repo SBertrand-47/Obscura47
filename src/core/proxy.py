@@ -167,11 +167,14 @@ def choose_best_exit():
     # Purge stale peers before selecting an exit
     from src.utils.config import PEER_EXPIRY_SECONDS
     cutoff = now - PEER_EXPIRY_SECONDS
-    exit_peers[:] = [p for p in exit_peers if p.get("ts", 0) >= cutoff]
+    all_exits = list(exit_peers)
+    stale_count = sum(1 for p in all_exits if p.get("ts", 0) < cutoff)
+    exit_peers[:] = [p for p in all_exits if p.get("ts", 0) >= cutoff]
     # Drop peers whose WS endpoint is in peer_health cooldown - probes or
     # circuit builders elsewhere already saw them as unreachable, so
     # picking them here just burns another connect timeout.
     healthy_peers = peer_health.filter_healthy(exit_peers)
+    cooled_count = len(exit_peers) - len(healthy_peers)
     if not healthy_peers:
         # Every exit is in cooldown. Fall back to the unfiltered pool so a
         # full-pool outage still gets one re-try; the per-exit exit_health
@@ -179,17 +182,24 @@ def choose_best_exit():
         healthy_peers = list(exit_peers)
     candidates = [(p['host'], p['port']) for p in healthy_peers]
     if not candidates:
+        log.warning(
+            "choose_best_exit: no candidates (total=%d, stale=%d, peer_health_cooled=%d)",
+            len(all_exits), stale_count, cooled_count,
+        )
         return None
+    rejections: list[tuple[tuple, str]] = []
     def score(key):
         stats = exit_health.get(key)
         if not stats:
             return (0.0, 0.0)  # unseen - prefer over known-bad exits
         if stats.get('backoff_until', 0.0) > now:
-            return None  # in backoff, exclude
+            rejections.append((key, f"exit_health backoff for {int(stats['backoff_until'] - now)}s (fails={stats.get('fail', 0)})"))
+            return None
         # Exclude exits that have never succeeded and already failed
         # multiple times - they are likely unreachable (wrong address
         # family, firewall, etc.)
         if stats.get('ok', 0) == 0 and stats.get('fail', 0) >= 2:
+            rejections.append((key, f"never reachable (0 ok / {stats.get('fail', 0)} fail)"))
             return None
         total = stats['ok'] + stats['fail']
         success_ratio = (stats['ok'] / total) if total else 0.0
@@ -197,8 +207,14 @@ def choose_best_exit():
     # Drop exits that are currently in backoff
     available = [k for k in candidates if score(k) is not None]
     if not available:
+        breakdown = "; ".join(f"{h}:{p} {r}" for (h, p), r in rejections) or "no per-exit reason recorded"
+        log.warning(
+            "choose_best_exit: all %d candidates rejected (total=%d, stale=%d, peer_health_cooled=%d) | %s",
+            len(candidates), len(all_exits), stale_count, cooled_count, breakdown,
+        )
         diag.emit("exit_pick_failed", total=len(exit_peers), healthy=len(healthy_peers),
-                  reason="all candidates in backoff")
+                  reason="all candidates in backoff",
+                  rejections=[{"exit": f"{h}:{p}", "why": r} for (h, p), r in rejections])
         return None
     best = min(available, key=lambda k: score(k))
     stats = exit_health.get(best) or {}
