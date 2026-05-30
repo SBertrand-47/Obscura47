@@ -280,7 +280,7 @@ class TestDeregister:
         priv_a, _, peer_a = self._register(client, port=5001)
         _, _, peer_b = self._register(client, port=5002)
         ts = _time.time()
-        # priv_a signs B's peer_id,but registry verifies against B's pubkey.
+        # priv_a signs B's peer_id - but registry verifies against B's pubkey.
         sig = ecdsa_sign(priv_a, f"deregister:{peer_b}:{ts}".encode())
         r = client.post("/deregister", json={
             "peer_id": peer_b, "timestamp": ts, "signature": sig,
@@ -348,7 +348,7 @@ class TestAdminAPI:
         assert {p["role"] for p in data["peers"]} == {"node", "exit"}
         exit_peer = next(p for p in data["peers"] if p["role"] == "exit")
         assert exit_peer["approved"] is False
-        # Admin view shows raw DB values,ws_port not masked by probe state.
+        # Admin view shows raw DB values - ws_port not masked by probe state.
         assert exit_peer["ws_port"] == 6001
 
     def test_dashboard_data_highlights_pending_exits(self, client):

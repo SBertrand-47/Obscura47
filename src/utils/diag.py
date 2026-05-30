@@ -3,14 +3,14 @@
 Off by default. Two opt-in switches, intended for development on your own
 network:
 
-* ``OBSCURA_DIAG=1``,append each event as JSONL to
+* ``OBSCURA_DIAG=1`` - append each event as JSONL to
   ``~/.obscura47/logs/{role}.jsonl`` (rolled at ~10MB, one-deep).
-* ``OBSCURA_DIAG_REGISTRY=1``,also POST each event to the registry's
+* ``OBSCURA_DIAG_REGISTRY=1`` - also POST each event to the registry's
   ``/diag`` endpoint so events from every node land in one timeline.
   Requires ``OBSCURA_DIAG_TOKEN`` to be the same value on every emitting
   node and on the registry.
 
-This is a privacy regression,events name who picked which peer, which
+This is a privacy regression - events name who picked which peer, which
 exit a request hit, which intro a host published. Production deployments
 must leave it off. Use only when you own the network and you're trying
 to diagnose flaky behaviour across multiple machines.
@@ -147,7 +147,7 @@ def _send_loop():
             with urllib.request.urlopen(req, timeout=SEND_HTTP_TIMEOUT) as resp:
                 resp.read()  # drain
         except Exception:
-            # Drop the batch on failure rather than retry-looping,the
+            # Drop the batch on failure rather than retry-looping - the
             # local JSONL still has these events for offline analysis.
             pass
 
@@ -194,7 +194,7 @@ def emit(event: str, **fields: Any) -> None:
         try:
             _send_queue.put_nowait(record)
         except queue.Full:
-            # Drop oldest, push newest,newer events are more diagnostic.
+            # Drop oldest, push newest - newer events are more diagnostic.
             try:
                 _send_queue.get_nowait()
                 _send_queue.put_nowait(record)

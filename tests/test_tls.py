@@ -121,7 +121,7 @@ class TestWSSTransport:
 
 def _register_node_authed(c, port: int, *, ws_port: int | None = None,
                           ws_tls: bool | None = None):
-    """Tiny local helper,same flow as register_authed() in test_registry_api."""
+    """Tiny local helper - same flow as register_authed() in test_registry_api."""
     priv, pub = ecc_generate_keypair()
     body = {"role": "node", "port": port, "pub": pub}
     if ws_port is not None:

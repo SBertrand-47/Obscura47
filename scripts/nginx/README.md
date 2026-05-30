@@ -3,7 +3,7 @@
 `db.monmedjs.com.conf` is the TLS-terminating reverse proxy that fronts the
 registry on `127.0.0.1:8470`. The live copy lives at
 `/etc/nginx/sites-available/db.monmedjs.com` (symlinked into `sites-enabled/`).
-This file is the version-controlled source of truth,keep them in sync.
+This file is the version-controlled source of truth - keep them in sync.
 
 ## Why it matters
 The vhost proxies an **explicit list** of paths to the registry and serves the
@@ -13,7 +13,7 @@ dashboard HTML. That silently breaks registry calls. Every client-facing
 registry route MUST have a matching `location` block here:
 
 `/register` (covers `/register/verify`), `/deregister`, `/diag`, `/whoami`,
-`/peers`, `/health`, `/hs/`,plus `/admin/` and `/network/` for the dashboard.
+`/peers`, `/health`, `/hs/` - plus `/admin/` and `/network/` for the dashboard.
 
 **When you add a new client-facing registry endpoint, add its `location` here too.**
 

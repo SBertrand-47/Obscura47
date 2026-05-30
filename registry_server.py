@@ -147,7 +147,7 @@ WS_PROBE_TIMEOUT = 3.0
 
 
 async def _probe_ws_endpoint(host: str, port: int, timeout: float = WS_PROBE_TIMEOUT) -> bool:
-    """Best-effort async TCP probe,does anything accept on host:port?"""
+    """Best-effort async TCP probe - does anything accept on host:port?"""
     try:
         _reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=timeout
@@ -187,7 +187,7 @@ def _ws_recently_unreachable(peer_id: str) -> bool:
         return False
     ts, ok = entry
     if (time.time() - ts) >= WS_PROBE_INTERVAL * 2:
-        # Stale verdict,let the next consumer try and let peer_health on
+        # Stale verdict - let the next consumer try and let peer_health on
         # their side mark it bad if it really is.
         return False
     return not ok
@@ -1007,7 +1007,7 @@ async def submit_diag(request: Request):
 
     Disabled unless ``OBSCURA_DIAG_TOKEN`` is set on the registry. Nodes
     authenticate by sending the same value in ``X-Diag-Token``. This is a
-    development aid,turning it on tells the registry which peer did what
+    development aid - turning it on tells the registry which peer did what
     when, which is a privacy regression versus the normal opaque-routing
     design. Only run with diag enabled on networks you own.
     """

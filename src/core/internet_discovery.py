@@ -707,7 +707,7 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
                                         ws_port=effective_ws_port,
                                         ws_tls=effective_ws_tls,
                                         advertised_host=advertised_host)
-        # Capture the peer_id assigned by the registry,the deregister flow
+        # Capture the peer_id assigned by the registry - the deregister flow
         # needs it, and the registry constructs it from advertised_host+port
         # which we don't always know in advance (it may rewrite our host).
         if isinstance(result, dict) and result.get("peer_id"):
@@ -818,7 +818,7 @@ def _deregister_all_on_exit():
     """atexit hook: signed deregister for every still-running role.
 
     Catches the case where the process exits via ``sys.exit`` or a returning
-    main thread,signal handlers run in those paths too but only if the
+    main thread - signal handlers run in those paths too but only if the
     entry point installed any. atexit is the belt-and-suspenders backstop.
     """
     with _heartbeat_lock:

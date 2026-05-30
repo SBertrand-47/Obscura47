@@ -4,7 +4,7 @@
 Reads JSONL events from either the centralised registry file (default,
 ``~/.obscura47/diag.jsonl``) or a local per-role file (``--local node``)
 and pretty-prints them. Useful when chasing intermittent failures across
-multiple nodes,turn on OBSCURA_DIAG / OBSCURA_DIAG_REGISTRY on each
+multiple nodes - turn on OBSCURA_DIAG / OBSCURA_DIAG_REGISTRY on each
 node and tail the merged stream here.
 
 Usage:
