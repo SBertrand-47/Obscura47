@@ -1,0 +1,31 @@
+# TEMPLATE - not a usable unit as-is. vps-node-setup.sh renders the placeholders
+# (APP_DIR / RUN_USER / RUN_GROUP / DATA_DIR) for the checkout it runs from and
+# installs the result to /etc/systemd/system/obscura47-node.service.
+[Unit]
+Description=Obscura47 Relay Node (dedicated)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/venv/bin/python __APP_DIR__/join_network.py node
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening. Code under WorkingDirectory stays read-only; all writable
+# state (node key, logs) lives under __DATA_DIR__.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__DATA_DIR__
+PrivateTmp=yes
+
+EnvironmentFile=__APP_DIR__/.env
+
+[Install]
+WantedBy=multi-user.target
