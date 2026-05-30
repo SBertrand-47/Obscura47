@@ -1175,9 +1175,9 @@ class ObscuraApp(tk.Tk):
         elif kind == "sibling":
             if primary and primary.get("host"):
                 gw = f"{primary['host']}:{primary.get('port', '?')}"
-                self._role_label.config(text=f"Role: Internal sibling,gateway {gw}", fg=ACCENT)
+                self._role_label.config(text=f"Role: Internal sibling, gateway {gw}", fg=ACCENT)
             else:
-                self._role_label.config(text="Role: Internal sibling,waiting for primary", fg=ACCENT)
+                self._role_label.config(text="Role: Internal sibling, waiting for primary", fg=ACCENT)
         else:
             self._role_label.config(text="Role: detecting…", fg=TEXT_DIM)
 
