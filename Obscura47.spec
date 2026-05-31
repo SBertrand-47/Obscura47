@@ -3,6 +3,11 @@
 Obscura47 - PyInstaller Spec File (GUI)
 Builds the windowed desktop app.
 
+The GUI uses PySide6 (Qt 6). PyInstaller's built-in PySide6 hook auto-collects
+the needed Qt libraries and plugins from the app.py entry point, so no extra
+hidden imports are required for it; we only exclude the heavy Qt modules the
+app never touches (plus tkinter, which the old GUI used) to keep builds small.
+
 Usage:  pyinstaller obscura47.spec
 """
 
@@ -60,7 +65,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'tkinter',          # old GUI toolkit, no longer used
+        'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
+        'PySide6.Qt3DCore', 'PySide6.QtMultimedia', 'PySide6.QtQuick',
+        'PySide6.QtQml', 'PySide6.QtCharts', 'PySide6.QtDataVisualization',
+    ],
     noarchive=False,
     optimize=0,
 )

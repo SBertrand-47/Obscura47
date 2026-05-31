@@ -7,6 +7,9 @@ Pillow>=9.0.0
 pycryptodome==3.21.0
 pyinstaller>=6.0
 pydantic>=2.0
+# Desktop GUI (Qt 6). Essentials only - the app uses core widgets, so we skip
+# the heavyweight PySide6-Addons (WebEngine, 3D, etc.) for a much smaller install.
+PySide6-Essentials>=6.7
 pystray>=0.15
 requests==2.32.3
 urllib3==2.3.0

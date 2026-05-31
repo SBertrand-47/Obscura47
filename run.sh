@@ -38,12 +38,13 @@ if [ "$(cat venv/.req-hash 2>/dev/null || true)" != "$req_hash" ]; then
     echo "$req_hash" > venv/.req-hash
 fi
 
-# 4. tkinter is the one GUI piece pip can't provide on some platforms
-if ! "$VPY" -c "import tkinter" >/dev/null 2>&1; then
-    echo "[!] Python 'tkinter' is missing (needed for the desktop GUI)."
+# 4. the GUI is built with PySide6 (Qt 6); pip installs it in step 3, but on
+#    minimal Linux it needs a few system libraries to load the Qt plugins.
+if ! "$VPY" -c "import PySide6.QtWidgets" >/dev/null 2>&1; then
+    echo "[!] PySide6 (the desktop GUI toolkit) could not be loaded."
     case "$(uname -s)" in
-        Linux)  echo "    Install it:  sudo apt install -y python3-tk   (Debian/Ubuntu)";;
-        Darwin) echo "    Reinstall Python from python.org, or:  brew install python-tk";;
+        Linux)  echo "    Install Qt's runtime libs:  sudo apt install -y libgl1 libegl1 libxkbcommon0 libdbus-1-3   (Debian/Ubuntu)";;
+        Darwin) echo "    Try reinstalling it:  venv/bin/python -m pip install --force-reinstall PySide6-Essentials";;
     esac
     exit 1
 fi

@@ -3,6 +3,10 @@ Obscura47 - Desktop Client
 Launch this file to run the Obscura Network GUI.
 Users join as relay nodes and use the local proxy to browse anonymously.
 Exit node status requires admin approval.
+
+The interface is built with PySide6 (Qt 6): a left navigation rail switches
+between Dashboard, Sites, Activity and Settings pages. All network/backend
+logic is unchanged from the original client - only the UI layer is Qt.
 """
 
 import sys
@@ -12,10 +16,29 @@ import platform
 import argparse
 import threading
 import time
-import tkinter as tk
-from tkinter import filedialog
-from tkinter import font as tkfont
-from tkinter import messagebox, simpledialog, ttk
+
+from PySide6.QtCore import Qt, QTimer, QObject, Signal
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QLabel,
+    QPushButton,
+    QFrame,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QStackedWidget,
+    QButtonGroup,
+    QCheckBox,
+    QTextEdit,
+    QScrollArea,
+    QDialog,
+    QLineEdit,
+    QFileDialog,
+    QMessageBox,
+    QInputDialog,
+)
 
 # ── Autostart / settings helpers ──────────────────────────────────────────────
 
@@ -175,6 +198,7 @@ except Exception:
 BG           = "#0d1117"
 BG_CARD      = "#161b22"
 BG_CARD_HI   = "#1c2333"
+BG_RAIL      = "#0a0e14"
 ACCENT       = "#58a6ff"
 ACCENT_DIM   = "#1f6feb"
 GREEN        = "#3fb950"
@@ -183,6 +207,8 @@ YELLOW       = "#d29922"
 TEXT         = "#c9d1d9"
 TEXT_DIM     = "#8b949e"
 BORDER       = "#30363d"
+
+DOT = "●"
 
 
 from src.utils.app_helpers import (  # noqa: E402
@@ -193,50 +219,128 @@ from src.utils.app_helpers import (  # noqa: E402
 )
 
 
-class ObscuraApp(tk.Tk):
+# ── Global stylesheet ─────────────────────────────────────────────
+# One central QSS sheet keeps the look consistent and the widget code
+# free of inline styling. Object names / dynamic properties drive the
+# per-widget variations (cards, accent buttons, nav rail, etc.).
+STYLESHEET = f"""
+* {{
+    font-family: "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: {TEXT};
+}}
+QMainWindow, #Root {{ background: {BG}; }}
+
+/* ── Left navigation rail ── */
+#NavRail {{ background: {BG_RAIL}; border-right: 1px solid {BORDER}; }}
+#Wordmark {{ font-size: 20px; font-weight: 700; color: {ACCENT}; }}
+#WordmarkSub {{ font-size: 10px; color: {TEXT_DIM}; }}
+QPushButton#NavButton {{
+    text-align: left;
+    padding: 11px 16px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: {TEXT_DIM};
+    font-size: 13px;
+}}
+QPushButton#NavButton:hover {{ background: {BG_CARD}; color: {TEXT}; }}
+QPushButton#NavButton:checked {{ background: {BG_CARD_HI}; color: {ACCENT}; font-weight: 600; }}
+
+/* ── Top bar ── */
+#TopBar {{ background: {BG}; border-bottom: 1px solid {BORDER}; }}
+#PageTitle {{ font-size: 22px; font-weight: 700; color: {TEXT}; }}
+#StatusPill {{
+    background: {BG_CARD}; border: 1px solid {BORDER};
+    border-radius: 14px; padding: 6px 14px; font-weight: 600;
+}}
+
+/* ── Cards ── */
+QFrame#Card {{
+    background: {BG_CARD};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+#CardTitle {{ font-size: 13px; font-weight: 600; color: {TEXT}; }}
+#CardSub   {{ font-size: 11px; color: {TEXT_DIM}; }}
+#Metric    {{ font-size: 30px; font-weight: 700; }}
+#MetricLabel {{ font-size: 11px; color: {TEXT_DIM}; }}
+
+/* ── Buttons ── */
+QPushButton#Primary {{
+    background: {ACCENT_DIM}; color: white; font-weight: 600; font-size: 14px;
+    border: none; border-radius: 10px; padding: 12px 28px;
+}}
+QPushButton#Primary:hover {{ background: {ACCENT}; }}
+QPushButton#Danger {{
+    background: #6e2b2b; color: white; font-weight: 600; font-size: 14px;
+    border: none; border-radius: 10px; padding: 12px 28px;
+}}
+QPushButton#Danger:hover {{ background: {RED}; }}
+QPushButton#Action {{
+    background: {BG_CARD_HI}; color: {TEXT}; font-size: 12px; font-weight: 500;
+    border: 1px solid {BORDER}; border-radius: 9px; padding: 14px 12px; text-align: left;
+}}
+QPushButton#Action:hover {{ background: {ACCENT_DIM}; color: white; border-color: {ACCENT_DIM}; }}
+QPushButton#Subtle {{
+    background: transparent; color: {TEXT_DIM}; font-size: 12px;
+    border: 1px solid {BORDER}; border-radius: 9px; padding: 9px 16px;
+}}
+QPushButton#Subtle:hover {{ background: {BG_CARD}; color: {TEXT}; }}
+
+/* ── Misc ── */
+QCheckBox {{ font-size: 12px; color: {TEXT}; spacing: 8px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px;
+    border: 1px solid {BORDER}; background: {BG}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT_DIM}; border-color: {ACCENT_DIM}; }}
+QTextEdit#Log {{
+    background: {BG_CARD}; border: 1px solid {BORDER}; border-radius: 12px;
+    color: {TEXT_DIM}; font-family: "SF Mono", "Consolas", "Menlo", monospace;
+    font-size: 12px; padding: 10px;
+}}
+QLineEdit {{
+    background: {BG}; border: 1px solid {BORDER}; border-radius: 8px;
+    padding: 8px 10px; color: {TEXT}; font-size: 13px;
+}}
+QLineEdit:focus {{ border-color: {ACCENT}; }}
+QScrollArea {{ border: none; background: transparent; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 5px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {TEXT_DIM}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+QDialog {{ background: {BG}; }}
+"""
+
+
+def _card(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
+    """Create a rounded card frame and return (frame, content_layout)."""
+    frame = QFrame()
+    frame.setObjectName("Card")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(18, 16, 18, 16)
+    lay.setSpacing(8)
+    if title:
+        t = QLabel(title)
+        t.setObjectName("CardTitle")
+        lay.addWidget(t)
+    return frame, lay
+
+
+class _Worker(QObject):
+    """Signal hub so background threads can update the UI thread safely."""
+    log = Signal(str)
+    diagnostic = Signal(str, bool)
+    discovery = Signal(str, bool)
+
+
+class ObscuraApp(QMainWindow):
     """Main application window."""
 
     def __init__(self, background: bool = False):
         super().__init__()
 
-        self.title("Obscura47")
-        self.configure(bg=BG)
-        self.resizable(False, True)
-        default_width = 860 if platform.system() == "Darwin" else 760
-        self.geometry(f"{default_width}x760")
-        self.minsize(default_width, 400)
-
-        # ── ttk styles (fix white-on-white buttons on macOS Aqua) ──
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("Connect.TButton",
-                        font=("Segoe UI", 10, "bold"),
-                        foreground="#ffffff", background=ACCENT_DIM,
-                        borderwidth=0, padding=(24, 10))
-        style.map("Connect.TButton",
-                  background=[("active", ACCENT)],
-                  foreground=[("active", "#ffffff")])
-        style.configure("Disconnect.TButton",
-                        font=("Segoe UI", 10, "bold"),
-                        foreground="#ffffff", background="#6e2b2b",
-                        borderwidth=0, padding=(24, 10))
-        style.map("Disconnect.TButton",
-                  background=[("active", RED)],
-                  foreground=[("active", "#ffffff")])
-        style.configure("Subtle.TButton",
-                        font=("Segoe UI", 9),
-                        foreground=TEXT_DIM, background=BG,
-                        borderwidth=0)
-        style.map("Subtle.TButton",
-                  background=[("active", BG_CARD)],
-                  foreground=[("active", TEXT)])
-        style.configure("Action.TButton",
-                        font=("Segoe UI", 9),
-                        foreground=TEXT, background=BG_CARD_HI,
-                        borderwidth=0, padding=(12, 8))
-        style.map("Action.TButton",
-                  background=[("active", ACCENT_DIM)],
-                  foreground=[("active", "#ffffff")])
+        self.setWindowTitle("Obscura47")
+        self.resize(980, 680)
+        self.setMinimumSize(820, 560)
 
         # ── Persisted settings ─────────────────────────────────────
         self._settings = _load_settings()
@@ -244,272 +348,349 @@ class ObscuraApp(tk.Tk):
         # ── State ─────────────────────────────────────────────────
         self._threads: dict[str, threading.Thread] = {}
         self._running: dict[str, bool] = {"proxy": False, "node": False}
-        self._status_labels: dict[str, tk.Label] = {}
+        self._status_labels: dict[str, QLabel] = {}
+        self._peer_labels: dict[str, QLabel] = {}
         self._log_lines: list[str] = []
         self._connected = False
+        self._banner_green = False
 
-        # ── Fonts ─────────────────────────────────────────────────
-        self._title_font = tkfont.Font(family="Segoe UI", size=22, weight="bold")
-        self._sub_font   = tkfont.Font(family="Segoe UI", size=10)
-        self._label_font = tkfont.Font(family="Segoe UI", size=11)
-        self._btn_font   = tkfont.Font(family="Segoe UI", size=10, weight="bold")
-        self._log_font   = tkfont.Font(family="Consolas", size=9)
-        self._status_font = tkfont.Font(family="Segoe UI", size=13, weight="bold")
-        self._small_font  = tkfont.Font(family="Segoe UI", size=9)
+        # ── Cross-thread signalling ────────────────────────────────
+        self._signals = _Worker()
+        self._signals.log.connect(self._append_log)
+        self._signals.diagnostic.connect(self._show_diagnostic_result)
+        self._signals.discovery.connect(self._show_discovery_result)
 
         self._build_ui()
 
-        # Poll component status every second
-        self._poll()
+        # Poll component status every second (Qt timer, UI thread)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(1000)
 
-        # Graceful shutdown
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._log("Welcome to Obscura47. Connect, then use the Sites tab to visit or publish sites.")
 
         # ── Background / autostart startup behaviour ───────────────
         if background or self._settings.get("start_minimized", False):
-            # Minimise to taskbar immediately, then auto-connect
-            self.after(100, self.iconify)
-            self.after(200, self._connect)
+            QTimer.singleShot(100, self.showMinimized)
+            QTimer.singleShot(200, self._connect)
 
     # ── UI construction ───────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Scrollable container ─────────────────────────────────
-        self._canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
-        self._scrollbar = tk.Scrollbar(self, orient="vertical",
-                                        command=self._canvas.yview)
-        self._inner = tk.Frame(self._canvas, bg=BG)
+        root = QWidget()
+        root.setObjectName("Root")
+        self.setCentralWidget(root)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        self._inner.bind(
-            "<Configure>",
-            lambda e: self._canvas.configure(scrollregion=self._canvas.bbox("all")),
-        )
-        self._canvas_window = self._canvas.create_window(
-            (0, 0), window=self._inner, anchor="nw",
-        )
-        self._canvas.configure(yscrollcommand=self._scrollbar.set)
+        outer.addWidget(self._build_nav_rail())
 
-        self._scrollbar.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
+        # ── Right side: top bar + stacked pages ──
+        right = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(0)
+        right_lay.addWidget(self._build_top_bar())
 
-        self._canvas.bind("<Configure>", self._on_canvas_resize)
-        self._inner.bind_all("<MouseWheel>", self._on_mousewheel)
-        self._inner.bind_all("<Button-4>", self._on_mousewheel)
-        self._inner.bind_all("<Button-5>", self._on_mousewheel)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_dashboard_page())  # 0
+        self._stack.addWidget(self._build_sites_page())      # 1
+        self._stack.addWidget(self._build_activity_page())   # 2
+        self._stack.addWidget(self._build_settings_page())   # 3
+        right_lay.addWidget(self._stack, 1)
 
-        # All child widgets pack into self._inner instead of self
-        parent = self._inner
+        outer.addWidget(right, 1)
 
-        # Header
-        header = tk.Frame(parent, bg=BG)
-        header.pack(fill="x", pady=(24, 0))
+    def _build_nav_rail(self) -> QWidget:
+        rail = QWidget()
+        rail.setObjectName("NavRail")
+        rail.setFixedWidth(200)
+        lay = QVBoxLayout(rail)
+        lay.setContentsMargins(16, 24, 16, 16)
+        lay.setSpacing(6)
 
-        tk.Label(
-            header, text="OBSCURA47", font=self._title_font,
-            fg=ACCENT, bg=BG,
-        ).pack()
-        tk.Label(
-            header, text="Anonymous Overlay Network", font=self._sub_font,
-            fg=TEXT_DIM, bg=BG,
-        ).pack()
+        wordmark = QLabel("OBSCURA47")
+        wordmark.setObjectName("Wordmark")
+        sub = QLabel("Anonymous Overlay")
+        sub.setObjectName("WordmarkSub")
+        lay.addWidget(wordmark)
+        lay.addWidget(sub)
+        lay.addSpacing(28)
 
-        # ── Network status banner ─────────────────────────────────
-        self._banner_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                                       highlightthickness=1)
-        self._banner_frame.pack(fill="x", padx=24, pady=(18, 0), ipady=10)
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        pages = [
+            ("\U0001F4CA  Dashboard", 0),
+            ("\U0001F310  Sites", 1),
+            ("\U0001F4DC  Activity", 2),
+            ("⚙️  Settings", 3),
+        ]
+        for label, idx in pages:
+            btn = QPushButton(label)
+            btn.setObjectName("NavButton")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _checked, i=idx: self._stack.setCurrentIndex(i))
+            self._nav_group.addButton(btn, idx)
+            lay.addWidget(btn)
+        self._nav_group.button(0).setChecked(True)
 
-        self._status_dot = tk.Label(self._banner_frame, text="\u25cf", font=self._status_font,
-                                     fg=RED, bg=BG_CARD)
-        self._status_dot.pack(side="left", padx=(16, 8))
+        lay.addStretch(1)
 
-        self._status_text = tk.Label(
-            self._banner_frame, text="Disconnected", font=self._status_font,
-            fg=RED, bg=BG_CARD,
-        )
-        self._status_text.pack(side="left")
+        ver = QLabel("v2 · Qt edition")
+        ver.setObjectName("CardSub")
+        lay.addWidget(ver)
+        return rail
 
-        self._status_detail = tk.Label(
-            self._banner_frame, text="Connect, then open or publish from Quick Actions",
-            font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD,
-        )
-        self._status_detail.pack(side="right", padx=(0, 16))
+    def _build_top_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setObjectName("TopBar")
+        bar.setFixedHeight(72)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(28, 0, 28, 0)
 
-        # ── Network peers panel ───────────────────────────────────
-        peers_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                               highlightthickness=1)
-        peers_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=8)
+        self._page_title = QLabel("Dashboard")
+        self._page_title.setObjectName("PageTitle")
+        # Keep the title in sync with the active page.
+        self._stack_titles = ["Dashboard", "Sites", "Activity", "Settings"]
+        lay.addWidget(self._page_title)
+        lay.addStretch(1)
 
-        tk.Label(peers_frame, text="Network Peers", font=self._label_font,
-                 fg=TEXT, bg=BG_CARD).pack(anchor="w", padx=14, pady=(4, 2))
+        self._status_pill = QLabel(f"{DOT}  Disconnected")
+        self._status_pill.setObjectName("StatusPill")
+        self._set_pill_color(RED)
+        lay.addWidget(self._status_pill)
+        lay.addSpacing(12)
 
-        counters = tk.Frame(peers_frame, bg=BG_CARD)
-        counters.pack(fill="x", padx=14, pady=(0, 4))
+        self._connect_btn = QPushButton("▶  Connect")
+        self._connect_btn.setObjectName("Primary")
+        self._connect_btn.setCursor(Qt.PointingHandCursor)
+        self._connect_btn.clicked.connect(self._toggle_connection)
+        lay.addWidget(self._connect_btn)
+        return bar
 
-        self._peer_labels = {}
-        # "Healthy" is the count that actually matters for routing: relays this
-        # client can currently reach (peer_health hasn't seen them fail). Shown
-        # in green between the raw totals so a user can tell at a glance whether
-        # the network can carry their traffic, not just how many peers exist.
+    def _scroll_page(self) -> tuple[QScrollArea, QVBoxLayout]:
+        """A scrollable page body. Returns (scroll_area, content_layout)."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(16)
+        scroll.setWidget(body)
+        return scroll, lay
+
+    # ── Dashboard page ────────────────────────────────────────────
+
+    def _build_dashboard_page(self) -> QWidget:
+        scroll, lay = self._scroll_page()
+
+        # Status banner
+        banner, b_lay = _card()
+        b_lay.setSpacing(4)
+        row = QHBoxLayout()
+        self._banner_dot = QLabel(DOT)
+        self._banner_dot.setStyleSheet(f"color: {RED}; font-size: 16px;")
+        self._banner_text = QLabel("Disconnected")
+        self._banner_text.setStyleSheet(f"color: {RED}; font-size: 16px; font-weight: 700;")
+        row.addWidget(self._banner_dot)
+        row.addWidget(self._banner_text)
+        row.addStretch(1)
+        self._banner_detail = QLabel("Connect, then open or publish from the Sites tab")
+        self._banner_detail.setObjectName("CardSub")
+        row.addWidget(self._banner_detail)
+        b_lay.addLayout(row)
+        lay.addWidget(banner)
+
+        # Peer metric cards
+        metrics = QHBoxLayout()
+        metrics.setSpacing(16)
         for key, label, color in [
             ("relays", "Relay Nodes", ACCENT),
             ("healthy", "Healthy", GREEN),
             ("exits", "Exit Nodes", ACCENT),
         ]:
-            col = tk.Frame(counters, bg=BG_CARD)
-            col.pack(side="left", expand=True, fill="x")
-            num = tk.Label(col, text="0", font=self._title_font, fg=color, bg=BG_CARD)
-            num.pack()
-            tk.Label(col, text=label, font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD).pack()
+            card, c_lay = _card()
+            c_lay.setSpacing(2)
+            c_lay.setAlignment(Qt.AlignCenter)
+            num = QLabel("0")
+            num.setObjectName("Metric")
+            num.setStyleSheet(f"color: {color};")
+            num.setAlignment(Qt.AlignCenter)
+            cap = QLabel(label)
+            cap.setObjectName("MetricLabel")
+            cap.setAlignment(Qt.AlignCenter)
+            c_lay.addWidget(num)
+            c_lay.addWidget(cap)
             self._peer_labels[key] = num
+            metrics.addWidget(card)
+        lay.addLayout(metrics)
 
-        # This node's position in the network: primary public node, or
-        # internal sibling routing through another local node as gateway.
-        # Updated by ``_poll`` once registration classifies us.
-        self._role_label = tk.Label(
-            peers_frame, text="Role: detecting…",
-            font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD,
-        )
-        self._role_label.pack(anchor="w", padx=14, pady=(4, 4))
+        # Role indicator
+        role_card, r_lay = _card("Node Role")
+        self._role_label = QLabel("Detecting…")
+        self._role_label.setObjectName("CardSub")
+        r_lay.addWidget(self._role_label)
+        lay.addWidget(role_card)
 
-        # ── Component status cards ────────────────────────────────
-        cards_frame = tk.Frame(parent, bg=BG)
-        cards_frame.pack(fill="x", padx=24, pady=(14, 0))
-
+        # Component status cards
+        comp_card, comp_lay = _card("Components")
         descriptions = {
             "proxy": ("Local Proxy", "Browse anonymously via 127.0.0.1:9047"),
             "node":  ("Relay Node", "Forward encrypted traffic for the network"),
         }
-
         for role, (label, desc) in descriptions.items():
-            self._build_status_card(cards_frame, role, label, desc)
+            comp_lay.addWidget(self._build_status_row(role, label, desc))
+        lay.addWidget(comp_card)
 
-        # ── Getting started hint ──────────────────────────────────
-        hint_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                              highlightthickness=1)
-        hint_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
+        # Exit node request
+        self._exit_request_btn = QPushButton("Request Exit Node Status")
+        self._exit_request_btn.setObjectName("Subtle")
+        self._exit_request_btn.setCursor(Qt.PointingHandCursor)
+        self._exit_request_btn.clicked.connect(self._request_exit_status)
+        exit_row = QHBoxLayout()
+        exit_row.addWidget(self._exit_request_btn)
+        exit_row.addStretch(1)
+        lay.addLayout(exit_row)
 
-        tk.Label(
-            hint_frame, text="Getting Started", font=self._label_font,
-            fg=TEXT, bg=BG_CARD,
-        ).pack(anchor="w", padx=14, pady=(4, 0))
-        tk.Label(
-            hint_frame,
-            text="Use Quick Actions below to open, browse, or publish .obscura sites.",
-            font=self._small_font, fg=TEXT_DIM, bg=BG_CARD,
-        ).pack(anchor="w", padx=14, pady=(0, 4))
+        lay.addStretch(1)
+        return scroll
 
-        # ── Connect button ────────────────────────────────────────
-        self._connect_btn = ttk.Button(
-            parent, text="\u25b6  Connect", style="Connect.TButton",
-            cursor="hand2", command=self._toggle_connection,
+    def _build_status_row(self, role: str, label: str, desc: str) -> QWidget:
+        w = QFrame()
+        w.setStyleSheet(f"background: {BG_CARD_HI}; border-radius: 9px;")
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(14, 10, 14, 10)
+        left = QVBoxLayout()
+        left.setSpacing(1)
+        name = QLabel(label)
+        name.setStyleSheet("font-size: 13px; font-weight: 600;")
+        sub = QLabel(desc)
+        sub.setObjectName("CardSub")
+        left.addWidget(name)
+        left.addWidget(sub)
+        lay.addLayout(left)
+        lay.addStretch(1)
+        status = QLabel(f"{DOT} Stopped")
+        status.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px;")
+        lay.addWidget(status)
+        self._status_labels[role] = status
+        return w
+
+    # ── Sites page ────────────────────────────────────────────────
+
+    def _build_sites_page(self) -> QWidget:
+        scroll, lay = self._scroll_page()
+
+        intro, i_lay = _card("Getting Started")
+        hint = QLabel(
+            "Use the actions below to open, browse, or publish .obscura sites. "
+            "To browse, your web browser must route .obscura traffic through the "
+            "local Obscura proxy at 127.0.0.1:9047 (see Open .obscura Address)."
         )
-        self._connect_btn.pack(pady=(14, 0))
+        hint.setObjectName("CardSub")
+        hint.setWordWrap(True)
+        i_lay.addWidget(hint)
+        lay.addWidget(intro)
 
-        # ── Request Exit Node status ──────────────────────────────
-        self._exit_request_btn = ttk.Button(
-            parent, text="Request Exit Node Status", style="Subtle.TButton",
-            cursor="hand2", command=self._request_exit_status,
-        )
-        self._exit_request_btn.pack(pady=(6, 0))
-
-        # ── Quick actions ─────────────────────────────────────────
-        utility_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                                 highlightthickness=1)
-        utility_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=8)
-
-        tk.Label(utility_frame, text="Quick Actions", font=self._label_font,
-                 fg=TEXT, bg=BG_CARD).pack(anchor="w", padx=14, pady=(4, 6))
-
-        utility_buttons = tk.Frame(utility_frame, bg=BG_CARD)
-        utility_buttons.pack(fill="x", padx=14, pady=(0, 4))
-
+        actions_card, a_lay = _card("Quick Actions")
+        grid = QGridLayout()
+        grid.setSpacing(10)
         actions = [
-            ("Quick Start", self._show_quick_start),
-            ("Open .obscura Address", self._open_visitor),
-            ("Browse Directory", self._browse_directory),
-            ("My Hosted Sites", self._show_hosted_sites),
-            ("Add Site", self._add_hosted_site),
-            ("Publish Site", self._publish_hosted_site),
-            ("Remove Site", self._remove_hosted_site_daemon),
-            ("Diagnose Connection", self._diagnose_connection),
+            ("ℹ️  Quick Start", self._show_quick_start),
+            ("\U0001F517  Open .obscura Address", self._open_visitor),
+            ("\U0001F310  Discover Sites", self._discover_sites),
+            ("\U0001F4C2  Browse Directory", self._browse_directory),
+            ("\U0001F4CB  My Hosted Sites", self._show_hosted_sites),
+            ("➕  Add Site", self._add_hosted_site),
+            ("\U0001F4E4  Publish Site", self._publish_hosted_site),
+            ("\U0001F5D1️  Remove Site", self._remove_hosted_site_daemon),
+            ("\U0001FA7A  Diagnose Connection", self._diagnose_connection),
         ]
-        for col in range(3):
-            utility_buttons.grid_columnconfigure(col, weight=1, uniform="quick-actions")
+        for col in range(2):
+            grid.setColumnStretch(col, 1)
         for idx, (label, command) in enumerate(actions):
-            row, col = divmod(idx, 3)
-            ttk.Button(
-                utility_buttons, text=label, style="Action.TButton",
-                cursor="hand2", command=command,
-            ).grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+            btn = QPushButton(label)
+            btn.setObjectName("Action")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, c=command: c())
+            r, c = divmod(idx, 2)
+            grid.addWidget(btn, r, c)
+        a_lay.addLayout(grid)
+        lay.addWidget(actions_card)
 
-        # ── Settings panel ────────────────────────────────────────
-        settings_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                                  highlightthickness=1)
-        settings_frame.pack(fill="x", padx=24, pady=(10, 0), ipady=6)
+        lay.addStretch(1)
+        return scroll
 
-        tk.Label(settings_frame, text="Startup", font=self._label_font,
-                 fg=TEXT, bg=BG_CARD).pack(anchor="w", padx=14, pady=(4, 2))
+    # ── Activity page ─────────────────────────────────────────────
 
-        chk_row = tk.Frame(settings_frame, bg=BG_CARD)
-        chk_row.pack(anchor="w", padx=14, pady=(0, 4))
+    def _build_activity_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(28, 24, 28, 24)
+        lay.setSpacing(12)
 
-        self._autostart_var = tk.BooleanVar(
-            value=self._settings.get("autostart", False))
-        self._minimized_var = tk.BooleanVar(
-            value=self._settings.get("start_minimized", False))
+        label = QLabel("Activity Log")
+        label.setObjectName("CardTitle")
+        lay.addWidget(label)
 
-        tk.Checkbutton(
-            chk_row, text="Start on login", variable=self._autostart_var,
-            bg=BG_CARD, fg=TEXT_DIM, activebackground=BG_CARD,
-            activeforeground=TEXT, selectcolor=BG, font=self._small_font,
-            command=self._on_autostart_toggle,
-        ).pack(side="left", padx=(0, 20))
+        self._log_text = QTextEdit()
+        self._log_text.setObjectName("Log")
+        self._log_text.setReadOnly(True)
+        lay.addWidget(self._log_text, 1)
+        return page
 
-        tk.Checkbutton(
-            chk_row, text="Start minimized", variable=self._minimized_var,
-            bg=BG_CARD, fg=TEXT_DIM, activebackground=BG_CARD,
-            activeforeground=TEXT, selectcolor=BG, font=self._small_font,
-            command=self._on_minimized_toggle,
-        ).pack(side="left")
+    # ── Settings page ─────────────────────────────────────────────
 
-        # ── Log area ─────────────────────────────────────────────
-        log_label = tk.Label(parent, text="Activity Log", font=self._label_font,
-                             fg=TEXT_DIM, bg=BG, anchor="w")
-        log_label.pack(fill="x", padx=26, pady=(14, 2))
+    def _build_settings_page(self) -> QWidget:
+        scroll, lay = self._scroll_page()
 
-        log_frame = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                             highlightthickness=1)
-        log_frame.pack(fill="x", padx=24, pady=(0, 20))
+        card, c_lay = _card("Startup")
+        c_lay.setSpacing(14)
 
-        self._log_text = tk.Text(
-            log_frame, bg=BG_CARD, fg=TEXT_DIM, font=self._log_font,
-            bd=0, highlightthickness=0, wrap="word", state="disabled",
-            height=8, insertbackground=TEXT_DIM,
+        self._autostart_chk = QCheckBox("Start Obscura47 on login")
+        self._autostart_chk.setChecked(bool(self._settings.get("autostart", False)))
+        self._autostart_chk.toggled.connect(self._on_autostart_toggle)
+        c_lay.addWidget(self._autostart_chk)
+
+        self._minimized_chk = QCheckBox("Start minimized and auto-connect")
+        self._minimized_chk.setChecked(bool(self._settings.get("start_minimized", False)))
+        self._minimized_chk.toggled.connect(self._on_minimized_toggle)
+        c_lay.addWidget(self._minimized_chk)
+
+        lay.addWidget(card)
+
+        about, ab_lay = _card("About")
+        info = QLabel(
+            "Obscura47 - Anonymous Overlay Network\n"
+            "Join as a relay node and browse anonymously through the local proxy. "
+            "Exit node status requires admin approval."
         )
-        self._log_text.pack(fill="both", expand=True, padx=8, pady=8)
+        info.setObjectName("CardSub")
+        info.setWordWrap(True)
+        ab_lay.addWidget(info)
+        lay.addWidget(about)
 
-        self._log("Welcome to Obscura47. Connect, then use Quick Actions to visit or publish sites.")
+        lay.addStretch(1)
+        return scroll
 
-    def _on_canvas_resize(self, event):
-        self._canvas.itemconfig(self._canvas_window, width=event.width)
+    # ── Pill / banner helpers ─────────────────────────────────────
 
-    def _on_mousewheel(self, event):
-        if event.num == 4:
-            self._canvas.yview_scroll(-1, "units")
-        elif event.num == 5:
-            self._canvas.yview_scroll(1, "units")
-        elif platform.system() == "Darwin":
-            self._canvas.yview_scroll(-event.delta, "units")
-        else:
-            self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
+    def _set_pill_color(self, color: str):
+        self._status_pill.setStyleSheet(
+            f"#StatusPill {{ background: {BG_CARD}; border: 1px solid {BORDER};"
+            f" border-radius: 14px; padding: 6px 14px; font-weight: 600; color: {color}; }}"
+        )
 
-    def _on_autostart_toggle(self):
-        enabled = self._autostart_var.get()
+    # ── Settings toggles ──────────────────────────────────────────
+
+    def _on_autostart_toggle(self, enabled: bool):
         self._settings["autostart"] = enabled
         _save_settings(self._settings)
         try:
             if enabled:
-                setup_autostart(background=self._minimized_var.get())
+                setup_autostart(background=self._minimized_chk.isChecked())
                 self._log("Auto-start on login enabled.")
             else:
                 remove_autostart()
@@ -517,35 +698,15 @@ class ObscuraApp(tk.Tk):
         except Exception as e:
             self._log(f"Could not update auto-start: {e}")
 
-    def _on_minimized_toggle(self):
-        self._settings["start_minimized"] = self._minimized_var.get()
+    def _on_minimized_toggle(self, enabled: bool):
+        self._settings["start_minimized"] = enabled
         _save_settings(self._settings)
         # Re-register autostart so the --background flag is added/removed
-        if self._autostart_var.get():
+        if self._autostart_chk.isChecked():
             try:
-                setup_autostart(background=self._minimized_var.get())
+                setup_autostart(background=enabled)
             except Exception as e:
                 self._log(f"Could not update auto-start: {e}")
-
-    def _build_status_card(self, parent, role: str, label: str, desc: str):
-        """Build a read-only status card (no individual start/stop buttons)."""
-        card = tk.Frame(parent, bg=BG_CARD, highlightbackground=BORDER,
-                        highlightthickness=1)
-        card.pack(fill="x", pady=4, ipady=6)
-
-        left = tk.Frame(card, bg=BG_CARD)
-        left.pack(side="left", padx=(14, 0), pady=4)
-
-        tk.Label(left, text=label, font=self._label_font, fg=TEXT, bg=BG_CARD,
-                 anchor="w").pack(anchor="w")
-        tk.Label(left, text=desc, font=self._sub_font, fg=TEXT_DIM, bg=BG_CARD,
-                 anchor="w").pack(anchor="w")
-
-        # Status dot
-        status_lbl = tk.Label(card, text="\u25cf Stopped", font=self._sub_font,
-                              fg=TEXT_DIM, bg=BG_CARD)
-        status_lbl.pack(side="right", padx=(0, 14))
-        self._status_labels[role] = status_lbl
 
     # ── Connection lifecycle ──────────────────────────────────────
 
@@ -610,20 +771,21 @@ class ObscuraApp(tk.Tk):
         approve it before this node appears as an exit to proxies.
         """
         if not self._connected:
-            messagebox.showinfo(
-                "Not Connected",
+            QMessageBox.information(
+                self, "Not Connected",
                 "You must be connected to the network before requesting exit status.",
             )
             return
 
-        confirm = messagebox.askyesno(
-            "Request Exit Node Status",
+        confirm = QMessageBox.question(
+            self, "Request Exit Node Status",
             "This will submit a request to become an exit node.\n\n"
             "Exit nodes route traffic to the public internet on behalf of "
             "other users. Your request will be reviewed by a network admin.\n\n"
             "Do you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
         )
-        if not confirm:
+        if confirm != QMessageBox.Yes:
             return
 
         self._log("Submitting exit node application...")
@@ -696,88 +858,64 @@ class ObscuraApp(tk.Tk):
     # ── User utility actions ─────────────────────────────────────
 
     def _prompt_text(self, title: str, prompt: str, initial: str = "") -> str | None:
-        return simpledialog.askstring(title, prompt, initialvalue=initial, parent=self)
+        text, ok = QInputDialog.getText(self, title, prompt, QLineEdit.Normal, initial)
+        if not ok:
+            return None
+        return text
 
     def _prompt_publish_target(self, title: str, initial: str = "") -> str | None:
-        if self.__dict__.get("tk") is None:
-            return self._prompt_text(
-                title,
-                "Directory path or host:port to publish:",
-                initial=initial,
-            )
-        dialog = tk.Toplevel(self)
-        dialog.title(title)
-        dialog.configure(bg=BG)
-        dialog.resizable(False, False)
-        dialog.transient(self)
-        dialog.grab_set()
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setMinimumWidth(460)
+        lay = QVBoxLayout(dialog)
+        lay.setContentsMargins(20, 20, 20, 20)
+        lay.setSpacing(12)
 
-        tk.Label(
-            dialog,
-            text="Directory path or host:port to publish:",
-            font=self._label_font,
-            fg=TEXT,
-            bg=BG,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(16, 8))
+        lbl = QLabel("Directory path or host:port to publish:")
+        lbl.setStyleSheet("font-size: 13px;")
+        lay.addWidget(lbl)
 
-        row = tk.Frame(dialog, bg=BG)
-        row.pack(fill="x", padx=16, pady=(0, 12))
-
-        value = tk.StringVar(value=initial)
-        entry = ttk.Entry(row, textvariable=value, width=46)
-        entry.pack(side="left", fill="x", expand=True)
+        row = QHBoxLayout()
+        entry = QLineEdit(initial)
+        row.addWidget(entry, 1)
+        browse = QPushButton("Browse Folder…")
+        browse.setObjectName("Subtle")
+        browse.setCursor(Qt.PointingHandCursor)
+        row.addWidget(browse)
+        lay.addLayout(row)
 
         def _browse_folder():
-            chosen = filedialog.askdirectory(
-                parent=dialog,
-                initialdir=os.path.expanduser(initial) if initial else os.path.expanduser("~"),
-                title="Choose Site Folder",
-                mustexist=True,
-            )
+            start = os.path.expanduser(initial) if initial else os.path.expanduser("~")
+            chosen = QFileDialog.getExistingDirectory(dialog, "Choose Site Folder", start)
             if chosen:
-                value.set(chosen)
-                entry.icursor("end")
-                entry.focus_set()
+                entry.setText(chosen)
+                entry.setFocus()
 
-        ttk.Button(
-            row,
-            text="Browse Folder…",
-            style="Action.TButton",
-            command=_browse_folder,
-        ).pack(side="left", padx=(8, 0))
+        browse.clicked.connect(_browse_folder)
 
         result = {"value": None}
 
         def _submit():
-            text = value.get().strip()
+            text = entry.text().strip()
             result["value"] = text or None
-            dialog.destroy()
+            dialog.accept()
 
-        def _cancel():
-            dialog.destroy()
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.setObjectName("Subtle")
+        cancel.clicked.connect(dialog.reject)
+        ok_btn = QPushButton("OK")
+        ok_btn.setObjectName("Primary")
+        ok_btn.clicked.connect(_submit)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok_btn)
+        lay.addLayout(buttons)
 
-        buttons = tk.Frame(dialog, bg=BG)
-        buttons.pack(fill="x", padx=16, pady=(0, 16))
-
-        ttk.Button(
-            buttons,
-            text="Cancel",
-            style="Subtle.TButton",
-            command=_cancel,
-        ).pack(side="right")
-        ttk.Button(
-            buttons,
-            text="OK",
-            style="Connect.TButton",
-            command=_submit,
-        ).pack(side="right", padx=(0, 8))
-
-        dialog.bind("<Return>", lambda _event: _submit())
-        dialog.bind("<Escape>", lambda _event: _cancel())
-        entry.focus_set()
-        entry.select_range(0, "end")
-        dialog.wait_window()
+        entry.returnPressed.connect(_submit)
+        entry.setFocus()
+        entry.selectAll()
+        dialog.exec()
         return result["value"]
 
     def _get_hosted_sites(self) -> list:
@@ -801,10 +939,9 @@ class ObscuraApp(tk.Tk):
             raise RuntimeError("proxy startup or browser launch failed")
 
     def _show_quick_start(self):
-        messagebox.showinfo(
-            "Quick Start",
+        QMessageBox.information(
+            self, "Quick Start",
             build_quick_start_text(connected=self._connected),
-            parent=self,
         )
 
     def _open_visitor(self):
@@ -821,19 +958,19 @@ class ObscuraApp(tk.Tk):
             self._open_address_in_browser(address)
             self._log(f"Opened {address} in browser.")
         except Exception as exc:
-            messagebox.showerror("Open .obscura Address", str(exc), parent=self)
+            QMessageBox.critical(self, "Open .obscura Address", str(exc))
             self._log(f"Could not open address: {exc}")
             return
         # Offer a follow-up diagnostic - the browser may succeed in
         # launching but still fail to reach the site if the network
         # has no live peers or the registry lacks /hs routes.
         if self._is_obscura_address(address):
-            if messagebox.askyesno(
-                "Open .obscura Address",
+            if QMessageBox.question(
+                self, "Open .obscura Address",
                 "Browser launched. If the page does not load, run a "
                 "connection diagnostic now?",
-                parent=self,
-            ):
+                QMessageBox.Yes | QMessageBox.No,
+            ) == QMessageBox.Yes:
                 self._diagnose_connection(default_address=address)
 
     @staticmethod
@@ -856,7 +993,7 @@ class ObscuraApp(tk.Tk):
             "Optional .obscura address to test (leave blank for registry-only):",
             initial=self._strip_to_obscura(default_address),
         )
-        # askstring returns None on cancel, "" on submit-with-empty.
+        # getText returns None on cancel, "" on submit-with-empty.
         # Cancel aborts; empty submit runs a registry-only check.
         if address is None:
             return
@@ -872,15 +1009,15 @@ class ObscuraApp(tk.Tk):
             except Exception as exc:
                 text = f"Diagnostic crashed: {exc}"
                 ok = False
-            self.after(0, lambda: self._show_diagnostic_result(text, ok=ok))
+            self._signals.diagnostic.emit(text, ok)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _show_diagnostic_result(self, text: str, *, ok: bool):
+    def _show_diagnostic_result(self, text: str, ok: bool):
         if ok:
-            messagebox.showinfo("Diagnose Connection", text, parent=self)
+            QMessageBox.information(self, "Diagnose Connection", text)
         else:
-            messagebox.showwarning("Diagnose Connection", text, parent=self)
+            QMessageBox.warning(self, "Diagnose Connection", text)
         self._log("Connection diagnostic complete.")
 
     @staticmethod
@@ -893,7 +1030,7 @@ class ObscuraApp(tk.Tk):
     def _show_hosted_sites(self):
         hosted = self._get_hosted_sites()
         if not hosted:
-            messagebox.showinfo("My Hosted Sites", "No hosted sites yet.", parent=self)
+            QMessageBox.information(self, "My Hosted Sites", "No hosted sites yet.")
             return
 
         from src.utils.daemon import daemon_installed
@@ -905,7 +1042,7 @@ class ObscuraApp(tk.Tk):
             )
             for site in hosted
         )
-        messagebox.showinfo("My Hosted Sites", message, parent=self)
+        QMessageBox.information(self, "My Hosted Sites", message)
 
         selected = self._prompt_text(
             "Open Hosted Site",
@@ -919,7 +1056,7 @@ class ObscuraApp(tk.Tk):
             self._open_address_in_browser(address)
             self._log(f"Opened hosted site {address}.")
         except Exception as exc:
-            messagebox.showerror("Open Hosted Site", str(exc), parent=self)
+            QMessageBox.critical(self, "Open Hosted Site", str(exc))
             self._log(f"Could not open hosted site: {exc}")
 
     def _add_hosted_site(self):
@@ -959,17 +1096,16 @@ class ObscuraApp(tk.Tk):
             save_site_config(name, key_path=key_path, target=target)
             reference = install_daemon(name, target, key_path=key_path)
             address = self._address_from_pub(pub)
-            messagebox.showinfo(
-                "Add .obscura Site",
+            QMessageBox.information(
+                self, "Add .obscura Site",
                 f"Installed background host for {name}.\n\n"
                 f"Address: {address}\n"
                 f"Target: {target}\n"
                 f"Service: {reference}",
-                parent=self,
             )
             self._log(f"Installed background host for {address}.")
         except Exception as exc:
-            messagebox.showerror("Add .obscura Site", str(exc), parent=self)
+            QMessageBox.critical(self, "Add .obscura Site", str(exc))
             self._log(f"Could not add hosted site: {exc}")
 
     def _publish_hosted_site(self):
@@ -1040,10 +1176,10 @@ class ObscuraApp(tk.Tk):
             )
             if directory_addr:
                 message += f"\nDirectory: {directory_addr}"
-            messagebox.showinfo("Publish .obscura Site", message, parent=self)
+            QMessageBox.information(self, "Publish .obscura Site", message)
             self._log(f"Published hosted site {address}.")
         except Exception as exc:
-            messagebox.showerror("Publish .obscura Site", str(exc), parent=self)
+            QMessageBox.critical(self, "Publish .obscura Site", str(exc))
             self._log(f"Could not publish hosted site: {exc}")
 
     def _remove_hosted_site_daemon(self):
@@ -1055,15 +1191,69 @@ class ObscuraApp(tk.Tk):
 
             if not uninstall_daemon(name):
                 raise RuntimeError(f"no background service found for {name!r}")
-            messagebox.showinfo(
-                "Remove Site Daemon",
+            QMessageBox.information(
+                self, "Remove Site Daemon",
                 f"Removed background service for {name}.",
-                parent=self,
             )
             self._log(f"Removed background service for site {name}.")
         except Exception as exc:
-            messagebox.showerror("Remove Site Daemon", str(exc), parent=self)
+            QMessageBox.critical(self, "Remove Site Daemon", str(exc))
             self._log(f"Could not remove hosted site daemon: {exc}")
+
+    def _discover_sites(self):
+        """List every live .obscura site the registry knows about.
+
+        Unlike Browse Directory (which queries one opt-in directory you must
+        already know the address of), this reads the registry's global
+        /hs/list, so it works with zero prior knowledge - the answer to
+        "what's out there?". Enriches with each site's manifest when the
+        proxy is connected.
+        """
+        self._log("Discovering live .obscura sites…")
+        connected = self._connected
+
+        def _worker():
+            try:
+                from src.utils.site_directory import (
+                    fetch_live_sites, enrich_with_manifests, format_site_listing,
+                )
+                sites = fetch_live_sites()
+                if sites and connected:
+                    # Best-effort titles/descriptions; only when the proxy is
+                    # up to route the manifest fetches.
+                    try:
+                        enrich_with_manifests(sites)
+                    except Exception:
+                        pass
+                text = format_site_listing(sites)
+                ok = True
+            except Exception as exc:
+                text = (f"Could not reach the registry to list sites:\n{exc}")
+                ok = False
+            self._signals.discovery.emit(text, ok)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_discovery_result(self, text: str, ok: bool):
+        if ok:
+            QMessageBox.information(self, "Discover Sites", text)
+            self._log("Site discovery complete.")
+        else:
+            QMessageBox.warning(self, "Discover Sites", text)
+            self._log("Site discovery failed.")
+            return
+        # Offer to open one of the discovered addresses straight away.
+        selected = self._prompt_text(
+            "Open Discovered Site",
+            "Paste a .obscura address from the list to open it now (optional):",
+        )
+        if not selected:
+            return
+        try:
+            self._open_address_in_browser(selected)
+            self._log(f"Opened {selected}.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Open Discovered Site", str(exc))
 
     def _browse_directory(self):
         directory_addr = self._prompt_text(
@@ -1098,10 +1288,9 @@ class ObscuraApp(tk.Tk):
                         line += f" - {row['title']}"
                     rows.append(line)
                 message = "\n".join(rows)
-            messagebox.showinfo(
-                "Browse Directory",
+            QMessageBox.information(
+                self, "Browse Directory",
                 f"Directory: {directory_addr}\n\n{message}",
-                parent=self,
             )
             if listings:
                 selected = self._prompt_text(
@@ -1113,7 +1302,7 @@ class ObscuraApp(tk.Tk):
                     self._open_address_in_browser(selected)
                     self._log(f"Opened directory listing {selected}.")
         except Exception as exc:
-            messagebox.showerror("Browse Directory", str(exc), parent=self)
+            QMessageBox.critical(self, "Browse Directory", str(exc))
             self._log(f"Could not browse directory: {exc}")
 
     # ── Status polling ────────────────────────────────────────────
@@ -1147,17 +1336,24 @@ class ObscuraApp(tk.Tk):
         return counts
 
     def _poll(self):
+        # Keep the top-bar title in sync with the active page
+        idx = self._stack.currentIndex()
+        if 0 <= idx < len(self._stack_titles):
+            self._page_title.setText(self._stack_titles[idx])
+
         # Update peer counts
         counts = self._get_peer_counts()
         for key, lbl in self._peer_labels.items():
-            lbl.config(text=str(counts[key]))
+            lbl.setText(str(counts[key]))
 
         for role, lbl in self._status_labels.items():
             running = self._running.get(role, False)
             if running:
-                lbl.config(text="\u25cf Running", fg=GREEN)
+                lbl.setText(f"{DOT} Running")
+                lbl.setStyleSheet(f"color: {GREEN}; font-size: 12px;")
             else:
-                lbl.config(text="\u25cf Stopped", fg=TEXT_DIM)
+                lbl.setText(f"{DOT} Stopped")
+                lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px;")
 
         # Role indicator: primary public node vs internal sibling. Reads the
         # classification the registry returned at registration time; while
@@ -1169,70 +1365,95 @@ class ObscuraApp(tk.Tk):
         except Exception:
             kind, primary = None, None
         if not self._running.get("node", False):
-            self._role_label.config(text="Role: detecting…", fg=TEXT_DIM)
+            self._set_role("Detecting…", TEXT_DIM)
         elif kind == "primary":
-            self._role_label.config(text="Role: Primary public node", fg=GREEN)
+            self._set_role("Primary public node", GREEN)
         elif kind == "sibling":
             if primary and primary.get("host"):
                 gw = f"{primary['host']}:{primary.get('port', '?')}"
-                self._role_label.config(text=f"Role: Internal sibling, gateway {gw}", fg=ACCENT)
+                self._set_role(f"Internal sibling, gateway {gw}", ACCENT)
             else:
-                self._role_label.config(text="Role: Internal sibling, waiting for primary", fg=ACCENT)
+                self._set_role("Internal sibling, waiting for primary", ACCENT)
         else:
-            self._role_label.config(text="Role: detecting…", fg=TEXT_DIM)
+            self._set_role("Detecting…", TEXT_DIM)
 
-        # Network banner
+        # Network banner / status pill
         both_running = self._running.get("proxy", False) and self._running.get("node", False)
-        if both_running and not getattr(self, '_banner_green', False):
+        if both_running and not self._banner_green:
             self._banner_green = True
-            self._status_dot.config(fg=GREEN)
-            self._status_text.config(text="Connected", fg=GREEN)
-            self._status_detail.config(text="Use Quick Actions to visit or publish .obscura sites")
-            self._log("Connected. Use Quick Actions to open, browse, or publish sites.")
-        elif not both_running and getattr(self, '_banner_green', False):
+            self._set_status(GREEN, "Connected",
+                             "Use the Sites tab to visit or publish .obscura sites")
+            self._log("Connected. Use the Sites tab to open, browse, or publish sites.")
+        elif not both_running and self._banner_green:
             self._banner_green = False
-            self._status_dot.config(fg=RED)
-            self._status_text.config(text="Disconnected", fg=RED)
-            self._status_detail.config(text="Connect, then open or publish from Quick Actions")
+            self._set_status(RED, "Disconnected",
+                             "Connect, then open or publish from the Sites tab")
             self._log("Disconnected from the Obscura Network.")
 
         # Connect button
         if self._connected:
-            self._connect_btn.config(text="\u25a0  Disconnect", style="Disconnect.TButton")
+            self._connect_btn.setText("■  Disconnect")
+            self._connect_btn.setObjectName("Danger")
         else:
-            self._connect_btn.config(text="\u25b6  Connect", style="Connect.TButton")
+            self._connect_btn.setText("▶  Connect")
+            self._connect_btn.setObjectName("Primary")
+        # Re-polish so the objectName change re-applies the stylesheet
+        self._connect_btn.style().unpolish(self._connect_btn)
+        self._connect_btn.style().polish(self._connect_btn)
 
-        self.after(1000, self._poll)
+    def _set_role(self, text: str, color: str):
+        self._role_label.setText(text)
+        self._role_label.setStyleSheet(f"color: {color}; font-size: 12px;")
+
+    def _set_status(self, color: str, text: str, detail: str):
+        self._banner_dot.setStyleSheet(f"color: {color}; font-size: 16px;")
+        self._banner_text.setText(text)
+        self._banner_text.setStyleSheet(f"color: {color}; font-size: 16px; font-weight: 700;")
+        self._banner_detail.setText(detail)
+        self._status_pill.setText(f"{DOT}  {text}")
+        self._set_pill_color(color)
 
     # ── Logging ───────────────────────────────────────────────────
 
     def _log(self, msg: str):
+        """Thread-safe log entry point - marshals onto the UI thread."""
+        self._signals.log.emit(msg)
+
+    def _append_log(self, msg: str):
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         self._log_lines.append(line)
         if len(self._log_lines) > 200:
             self._log_lines = self._log_lines[-200:]
-        self._log_text.config(state="normal")
-        self._log_text.insert("end", line + "\n")
-        self._log_text.see("end")
-        self._log_text.config(state="disabled")
+        self._log_text.append(line)
+        sb = self._log_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     # ── Shutdown ──────────────────────────────────────────────────
 
-    def _on_close(self):
+    def closeEvent(self, event):
         for role in self._running:
             self._running[role] = False
         self._connected = False
-        self.destroy()
+        super().closeEvent(event)
 
 
-if __name__ == "__main__":
-    _parser = argparse.ArgumentParser(description="Obscura47")
-    _parser.add_argument(
+def main():
+    parser = argparse.ArgumentParser(description="Obscura47")
+    parser.add_argument(
         "--background", action="store_true",
         help="Start minimized and connect automatically (used by autostart)",
     )
-    _args, _ = _parser.parse_known_args()
+    args, _ = parser.parse_known_args()
 
-    app = ObscuraApp(background=_args.background)
-    app.mainloop()
+    app = QApplication(sys.argv)
+    app.setApplicationName("Obscura47")
+    app.setStyleSheet(STYLESHEET)
+
+    window = ObscuraApp(background=args.background)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

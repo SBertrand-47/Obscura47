@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Obscura47 Test</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      margin: 0;
+      padding: 30px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: auto;
+    }
+
+    h1 {
+      margin-bottom: 5px;
+    }
+
+    .subtitle {
+      color: #94a3b8;
+      margin-bottom: 25px;
+    }
+
+    .card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #cbd5e1;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #020617;
+      color: #e5e7eb;
+      margin-bottom: 15px;
+      font-size: 14px;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    button.danger {
+      background: #dc2626;
+    }
+
+    button.danger:hover {
+      background: #b91c1c;
+    }
+
+    pre {
+      background: #020617;
+      border: 1px solid #1e293b;
+      padding: 15px;
+      border-radius: 10px;
+      overflow-x: auto;
+      min-height: 160px;
+      white-space: pre-wrap;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #334155;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+
+    .ok {
+      background: #14532d;
+      color: #bbf7d0;
+    }
+
+    .bad {
+      background: #7f1d1d;
+      color: #fecaca;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>Obscura47 Test</h1>
+    <p class="subtitle">Simple HTML tester for your registry and WebSocket service.</p>
+
+    <div class="card">
+      <h2>Registry Test</h2>
+
+      <label for="registryUrl">Registry URL</label>
+      <input id="registryUrl" value="http://localhost:8470" />
+
+      <button onclick="testHealth()">Test Health</button>
+      <button onclick="testDocs()">Open Docs</button>
+      <button onclick="testPeers()">Get Peers</button>
+      <button onclick="clearOutput()">Clear</button>
+    </div>
+
+    <div class="card">
+      <h2>WebSocket Test</h2>
+
+      <label for="wsUrl">WebSocket URL</label>
+      <input id="wsUrl" value="ws://localhost:6001/ws" />
+
+      <span id="wsStatus" class="status">Disconnected</span>
+      <br />
+
+      <button onclick="connectWs()">Connect</button>
+      <button onclick="sendPing()">Send Ping</button>
+      <button class="danger" onclick="disconnectWs()">Disconnect</button>
+    </div>
+
+    <div class="card">
+      <h2>Output</h2>
+      <pre id="output"></pre>
+    </div>
+  </div>
+
+  <script>
+    let socket = null;
+
+    function log(message, data = null) {
+      const output = document.getElementById("output");
+      const time = new Date().toLocaleTimeString();
+
+      let text = `[${time}] ${message}`;
+
+      if (data !== null) {
+        if (typeof data === "object") {
+          text += "\n" + JSON.stringify(data, null, 2);
+        } else {
+          text += "\n" + data;
+        }
+      }
+
+      output.textContent += text + "\n\n";
+    }
+
+    function clearOutput() {
+      document.getElementById("output").textContent = "";
+    }
+
+    function getRegistryUrl() {
+      return document.getElementById("registryUrl").value.replace(/\/$/, "");
+    }
+
+    async function testHealth() {
+      const baseUrl = getRegistryUrl();
+
+      try {
+        log("Testing registry health...");
+
+        const response = await fetch(`${baseUrl}/health`);
+        const text = await response.text();
+
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+
+        log(`Health response: ${response.status}`, data);
+      } catch (error) {
+        log("Health test failed", error.message);
+      }
+    }
+
+    function testDocs() {
+      const baseUrl = getRegistryUrl();
+      window.open(`${baseUrl}/docs`, "_blank");
+      log("Opening FastAPI docs", `${baseUrl}/docs`);
+    }
+
+    async function testPeers() {
+      const baseUrl = getRegistryUrl();
+
+      try {
+        log("Fetching peers...");
+
+        const response = await fetch(`${baseUrl}/peers`);
+        const text = await response.text();
+
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = text;
+        }
+
+        log(`Peers response: ${response.status}`, data);
+      } catch (error) {
+        log("Peers test failed", error.message);
+      }
+    }
+
+    function updateWsStatus(text, ok = false, bad = false) {
+      const status = document.getElementById("wsStatus");
+      status.textContent = text;
+      status.className = "status";
+
+      if (ok) status.classList.add("ok");
+      if (bad) status.classList.add("bad");
+    }
+
+    function connectWs() {
+      const wsUrl = document.getElementById("wsUrl").value;
+
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        log("WebSocket is already connected");
+        return;
+      }
+
+      log("Connecting WebSocket...", wsUrl);
+
+      socket = new WebSocket(wsUrl);
+
+      socket.onopen = () => {
+        updateWsStatus("Connected", true, false);
+        log("WebSocket connected");
+      };
+
+      socket.onmessage = (event) => {
+        let data = event.data;
+
+        try {
+          data = JSON.parse(event.data);
+        } catch {}
+
+        log("WebSocket message received", data);
+      };
+
+      socket.onerror = () => {
+        updateWsStatus("Error", false, true);
+        log("WebSocket error");
+      };
+
+      socket.onclose = () => {
+        updateWsStatus("Disconnected", false, false);
+        log("WebSocket disconnected");
+      };
+    }
+
+    function sendPing() {
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        log("WebSocket is not connected");
+        return;
+      }
+
+      const payload = {
+        type: "ping",
+        timestamp: new Date().toISOString()
+      };
+
+      socket.send(JSON.stringify(payload));
+      log("Sent WebSocket ping", payload);
+    }
+
+    function disconnectWs() {
+      if (!socket) {
+        log("No WebSocket connection exists");
+        return;
+      }
+
+      socket.close();
+      socket = null;
+      updateWsStatus("Disconnected", false, false);
+      log("WebSocket manually disconnected");
+    }
+  </script>
+</body>
+</html>

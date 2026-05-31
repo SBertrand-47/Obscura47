@@ -57,7 +57,7 @@ BANNER = r"""
 ROLES = {
     "node": "Relay Node - forward encrypted traffic for others",
     "exit": "Exit Node  - provide internet egress for the network",
-    "proxy": "Proxy      - local SOCKS proxy (browse through Obscura)",
+    "proxy": "Proxy      - local HTTP proxy (browse through Obscura)",
     "registry": "Registry   - bootstrap server for peer discovery",
     "directory": "Directory  - publish an opt-in .obscura site directory",
     "host": "Host       - publish a local site/service as a .obscura address",

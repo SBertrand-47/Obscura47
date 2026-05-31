@@ -67,6 +67,7 @@ from src.utils.logger import get_logger
 from src.utils.onion_addr import (
     address_from_pubkey,
     build_descriptor,
+    DESCRIPTOR_REPUBLISH_INTERVAL,
     DESCRIPTOR_TTL,
 )
 
@@ -435,15 +436,22 @@ class HiddenServiceHost:
         if peers is None:
             peers = fetch_peers_from_registry()
         self._relay_pool = [p for p in peers if p.get('pub')]
-        if refresh:
-            self._intro_circuits.clear()
-            self._intro_peers.clear()
         intros = self._pick_intro_points(self._relay_pool, INTRO_POINT_COUNT)
         if not intros:
             log.error("No suitable intro points among peers")
-            return False
+            # On a refresh, keep the last-known-good intro set so the
+            # republish loop can still re-publish the existing descriptor.
+            # Wiping it on one bad cycle (common when the node "goes cold"
+            # or a stop/restart momentarily drains the small relay pool)
+            # would strand the descriptor and let it expire into a 404.
+            return bool(self._intro_peers) if refresh else False
 
-        established = 0
+        # Build the new intro set into locals and only commit it if at
+        # least one establish succeeds. A transient all-fail refresh then
+        # leaves the previous working intros in place instead of clearing
+        # them, so publish_descriptor() keeps the registry entry alive.
+        new_circuits: dict[str, dict[str, Any]] = {}
+        new_peers: list[dict[str, Any]] = []
         for peer in intros:
             req_id = f"H{time.time_ns()}"
             route = build_hs_route(self._relay_pool, peer, HS_CIRCUIT_HOPS)
@@ -454,9 +462,8 @@ class HiddenServiceHost:
                 'pub': self.pub_pem,
             }
             if send_hs_frame(route, envelope):
-                self._intro_circuits[req_id] = {'peer': peer, 'route': route}
-                self._intro_peers.append(peer)
-                established += 1
+                new_circuits[req_id] = {'peer': peer, 'route': route}
+                new_peers.append(peer)
                 log.info("HS %s established at intro %s:%s via %d hop(s)",
                          self.address, peer.get('host'), peer.get('port'),
                          len(route))
@@ -464,7 +471,14 @@ class HiddenServiceHost:
                 log.warning("Intro establish failed at %s:%s",
                             peer.get('host'), peer.get('port'))
 
-        return established > 0
+        if not new_peers:
+            log.warning("HS %s established no intro points this cycle", self.address)
+            return bool(self._intro_peers) if refresh else False
+
+        # Atomically swap in the freshly-established intro set.
+        self._intro_circuits = new_circuits
+        self._intro_peers = new_peers
+        return True
 
     def delete_descriptor(self) -> bool:
         """Tell the registry to drop our descriptor immediately.
@@ -588,28 +602,47 @@ class HiddenServiceHost:
         import atexit as _atexit
         _atexit.register(self.delete_descriptor)
 
-        if not self.establish():
-            return False
-        if not self.publish_descriptor():
-            return False
-
-        log.info("Hidden service %s serving → %s:%s",
-                 self.address, self.target_host, self.target_port)
+        # Try to publish immediately, but don't exit on a cold start: a
+        # registry/relay hiccup at boot shouldn't kill the host (systemd
+        # won't restart a clean exit), so fall through to the republish
+        # loop, which retries quickly until it succeeds.
+        if self.establish() and self.publish_descriptor():
+            log.info("Hidden service %s serving → %s:%s",
+                     self.address, self.target_host, self.target_port)
+        else:
+            log.warning("HS %s could not publish at startup; the republish "
+                        "loop will keep retrying", self.address)
 
         def republish_loop():
-            # Refresh more often than CHANNEL_IDLE_CLOSE_SECONDS (60s) so the
-            # intro WS connections stay warm - if they idle-close, the
-            # descriptor still points at the relay but introduces have no
-            # path back to the host and dials silently time out.
+            # Steady-state cadence: refresh more often than
+            # CHANNEL_IDLE_CLOSE_SECONDS so the intro WS connections stay
+            # warm - if they idle-close, the descriptor still points at the
+            # relay but introduces have no path back and dials silently time
+            # out. Capped below the idle window regardless of the configured
+            # interval.
             from src.utils.config import CHANNEL_IDLE_CLOSE_SECONDS
-            interval = max(20, min(DESCRIPTOR_TTL // 2,
-                                   int(CHANNEL_IDLE_CLOSE_SECONDS) - 10))
+            steady = max(20, min(DESCRIPTOR_REPUBLISH_INTERVAL,
+                                 int(CHANNEL_IDLE_CLOSE_SECONDS) - 10))
+            delay = steady
+            backoff = 5
             while not self._stopped.is_set():
-                time.sleep(interval)
+                for _ in range(int(delay)):
+                    if self._stopped.is_set():
+                        return
+                    time.sleep(1)
                 if self._stopped.is_set():
-                    break
-                self.establish(refresh=True)
-                self.publish_descriptor()
+                    return
+                ok = self.establish(refresh=True) and self.publish_descriptor()
+                if ok:
+                    delay = steady
+                    backoff = 5
+                else:
+                    # Retry fast (then back off) so a transient failure can't
+                    # leave the descriptor stale long enough to expire → 404.
+                    delay = backoff
+                    backoff = min(backoff * 2, steady)
+                    log.warning("HS %s republish failed; retrying in %ds",
+                                self.address, delay)
         threading.Thread(target=republish_loop, daemon=True).start()
 
         try:

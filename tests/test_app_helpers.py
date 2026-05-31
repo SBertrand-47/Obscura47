@@ -92,37 +92,49 @@ def test_count_unique_peers_falls_back_to_host_and_port():
     assert count_unique_peers(peers) == 2
 
 
-# ── GUI-dependent tests (require tkinter) ─────────────────────────────────────
+# ── GUI-dependent tests (require PySide6 / Qt) ────────────────────────────────
+
+# The GUI is built on PySide6. Run it headless so these tests need no display.
+import os  # noqa: E402
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    import tkinter  # noqa: F401
-    _has_tkinter = True
+    from PySide6.QtWidgets import QApplication  # noqa: F401
+    _has_qt = True
 except ImportError:
-    _has_tkinter = False
+    _has_qt = False
 
-_skip_no_tk = pytest.mark.skipif(not _has_tkinter, reason="tkinter not available")
+_skip_no_qt = pytest.mark.skipif(not _has_qt, reason="PySide6 not available")
 
 
 @pytest.fixture()
 def _stub_app():
+    from PySide6.QtWidgets import QApplication
     from app import ObscuraApp
 
-    return object.__new__(ObscuraApp)
+    # A QApplication must exist before any Qt object is created, but we don't
+    # build the UI - __new__ gives us a bare instance whose methods we can call
+    # with the Qt dialogs monkeypatched out.
+    if QApplication.instance() is None:
+        QApplication([])
+    return ObscuraApp.__new__(ObscuraApp)
 
 
-@_skip_no_tk
+@_skip_no_qt
 def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch, _stub_app):
     app = _stub_app
 
-    prompts = iter(["mysite", "./site", "directory.obscura"])
+    prompts = iter(["mysite", "directory.obscura"])
     app._prompt_text = lambda *args, **kwargs: next(prompts)
+    app._prompt_publish_target = lambda *args, **kwargs: "./site"
     app._log = lambda message: None
     app._address_from_pub = lambda pub: "alpha.obscura"
 
     infos = []
     errors = []
-    monkeypatch.setattr("tkinter.messagebox.showinfo", lambda title, message, parent=None: infos.append((title, message)))
-    monkeypatch.setattr("tkinter.messagebox.showerror", lambda title, message, parent=None: errors.append((title, message)))
+    monkeypatch.setattr("app.QMessageBox.information", lambda parent, title, message, *a, **k: infos.append((title, message)))
+    monkeypatch.setattr("app.QMessageBox.critical", lambda parent, title, message, *a, **k: errors.append((title, message)))
 
     monkeypatch.setattr("src.utils.sites.load_site_config", lambda name: None)
     monkeypatch.setattr(
@@ -174,7 +186,7 @@ def test_publish_hosted_site_writes_manifest_and_schedules_directory(monkeypatch
     assert not errors
 
 
-@_skip_no_tk
+@_skip_no_qt
 def test_remove_hosted_site_daemon_reports_success(monkeypatch, _stub_app):
     app = _stub_app
 
@@ -184,8 +196,8 @@ def test_remove_hosted_site_daemon_reports_success(monkeypatch, _stub_app):
 
     infos = []
     errors = []
-    monkeypatch.setattr("tkinter.messagebox.showinfo", lambda title, message, parent=None: infos.append((title, message)))
-    monkeypatch.setattr("tkinter.messagebox.showerror", lambda title, message, parent=None: errors.append((title, message)))
+    monkeypatch.setattr("app.QMessageBox.information", lambda parent, title, message, *a, **k: infos.append((title, message)))
+    monkeypatch.setattr("app.QMessageBox.critical", lambda parent, title, message, *a, **k: errors.append((title, message)))
     monkeypatch.setattr("src.utils.daemon.uninstall_daemon", lambda name: True)
 
     app._remove_hosted_site_daemon()

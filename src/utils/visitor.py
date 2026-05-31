@@ -1,17 +1,20 @@
 """Visitor launcher - open `.obscura` addresses in a regular browser.
 
 Generates a PAC (Proxy Auto-Config) file that routes ``*.obscura``
-through the local Obscura proxy while sending everything else direct.
-Then opens the system browser with the PAC configured.
+through the local Obscura proxy while sending everything else direct,
+serves it over a localhost HTTP server (browsers ignore file:// PAC), and
+launches a Chromium-based browser configured to use it.
 """
 
 from __future__ import annotations
 
+import http.server
 import os
 import platform
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 from src.utils.config import PROXY_HOST, PROXY_PORT
@@ -52,6 +55,86 @@ def generate_pac(
 def pac_file_url(pac_path: str) -> str:
     """Return a file:// URL for the PAC file."""
     return f"file://{os.path.abspath(pac_path)}"
+
+
+# ── PAC delivery over localhost HTTP ──────────────────────────────────────────
+# Chromium-based browsers refuse to load PAC files from file:// URLs (security
+# hardening), so `--proxy-pac-url=file://...` is silently ignored and every
+# request goes DIRECT - which is why `.obscura` "never loads". Serving the exact
+# same PAC from a localhost HTTP server is honored, so routing actually works.
+
+PAC_SERVER_PORT = 9077          # preferred port; falls back to an ephemeral one
+PAC_MIME = "application/x-ns-proxy-autoconfig"
+
+_pac_server = None
+_pac_server_lock = threading.Lock()
+
+
+def _make_pac_handler(content: str):
+    body = content.encode("utf-8")
+
+    class _PACHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", PAC_MIME)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # silence default stderr access logging
+            pass
+
+    return _PACHandler
+
+
+def serve_pac(
+    proxy_host: str = PROXY_HOST,
+    proxy_port: int = PROXY_PORT,
+    preferred_port: int = PAC_SERVER_PORT,
+) -> str:
+    """Serve the PAC from a localhost HTTP server and return its URL.
+
+    Idempotent within a process: the first call starts a daemon HTTP server
+    bound to 127.0.0.1; later calls reuse it. Unlike a file:// PAC, this URL
+    is actually honored by Chromium-based browsers.
+    """
+    global _pac_server
+    content = PAC_TEMPLATE.format(proxy_host=proxy_host, proxy_port=proxy_port)
+    with _pac_server_lock:
+        if _pac_server is None:
+            handler = _make_pac_handler(content)
+            try:
+                httpd = http.server.ThreadingHTTPServer(("127.0.0.1", preferred_port), handler)
+            except OSError:
+                # Port busy (e.g. a stale server from another instance): take any free port.
+                httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            _pac_server = httpd
+        port = _pac_server.server_address[1]
+    return f"http://127.0.0.1:{port}/{PAC_FILENAME}"
+
+
+def _chromium_profile_dir() -> str:
+    """Dedicated Chrome/Chromium profile for Obscura browsing.
+
+    A separate --user-data-dir is what forces a *new* browser instance that
+    honors --proxy-pac-url. Without it, launching Chrome while it's already
+    running just opens a tab in the existing process and the proxy flag is
+    ignored - the second reason `.obscura` "never loads". The isolated profile
+    also keeps Obscura browsing free of your normal cookies/identity.
+    """
+    return os.path.join(PAC_DIR, "browser-profile")
+
+
+def _chromium_cmd(browser_path: str, pac_url: str, url: str) -> list[str]:
+    return [
+        browser_path,
+        f"--proxy-pac-url={pac_url}",
+        f"--user-data-dir={_chromium_profile_dir()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        url,
+    ]
 
 
 def normalize_browser_url(url: str) -> str:
@@ -121,8 +204,10 @@ def open_in_browser(
     if not ensure_proxy_running(proxy_host=proxy_host, proxy_port=proxy_port):
         return False
 
-    pac_path = generate_pac(proxy_host=proxy_host, proxy_port=proxy_port)
-    pac_url = pac_file_url(pac_path)
+    # Keep a PAC file on disk for reference/debugging, but hand the browser the
+    # HTTP URL - a file:// PAC is silently ignored by Chromium and breaks routing.
+    generate_pac(proxy_host=proxy_host, proxy_port=proxy_port)
+    pac_url = serve_pac(proxy_host=proxy_host, proxy_port=proxy_port)
     system = platform.system()
     url = normalize_browser_url(url)
 
@@ -139,30 +224,33 @@ def open_in_browser(
 
 
 def _open_macos(url: str, host: str, port: int, pac_url: str) -> bool:
-    # Try Chromium-based browsers first (they accept --proxy-pac-url).
+    # Chromium-based browsers honor --proxy-pac-url (+ a dedicated profile).
     for browser in (
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     ):
         if os.path.isfile(browser):
             subprocess.Popen(
-                [browser, f"--proxy-pac-url={pac_url}", url],
+                _chromium_cmd(browser, pac_url, url),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             return True
-    # Fallback: open with default browser (no PAC flag).
+    # Fallback: default browser without proxy routing - .obscura won't load,
+    # but we still surface the page rather than failing silently.
     subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 
 
 def _open_linux(url: str, host: str, port: int, pac_url: str) -> bool:
-    for browser in ("google-chrome", "chromium-browser", "chromium", "brave-browser"):
+    for browser in ("google-chrome", "google-chrome-stable", "chromium-browser",
+                    "chromium", "brave-browser", "microsoft-edge"):
         path = _which(browser)
         if path:
             subprocess.Popen(
-                [path, f"--proxy-pac-url={pac_url}", url],
+                _chromium_cmd(path, pac_url, url),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -180,16 +268,21 @@ def _open_linux(url: str, host: str, port: int, pac_url: str) -> bool:
 
 
 def _open_windows(url: str, host: str, port: int, pac_url: str) -> bool:
-    chrome = os.path.expandvars(
-        r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"
-    )
-    if os.path.isfile(chrome):
-        subprocess.Popen(
-            [chrome, f"--proxy-pac-url={pac_url}", url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+    ]
+    for browser in candidates:
+        if os.path.isfile(browser):
+            subprocess.Popen(
+                _chromium_cmd(browser, pac_url, url),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
     subprocess.Popen(["start", url], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 

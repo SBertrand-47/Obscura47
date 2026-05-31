@@ -34,7 +34,31 @@ from src.core.encryptions import ecdsa_sign, ecdsa_verify
 
 ADDR_LEN = 16  # characters of base32, before the .obscura suffix
 ADDR_SUFFIX = ".obscura"
-DESCRIPTOR_TTL = 3600  # seconds
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer from the environment, else fall back."""
+    try:
+        value = int(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+# A live host refreshes its descriptor every DESCRIPTOR_REPUBLISH_INTERVAL
+# seconds, so the TTL is really just a *grace period* after republishing
+# stops - host offline, registry unreachable, or the node "goes cold" and
+# intro re-establishment fails for a while. The old 1h value meant a brief
+# cold spell or a stop/restart could expire the entry and make the site 404
+# for other hosts. 24h keeps a transiently-offline site discoverable while
+# still letting a genuinely-dead site age out within a day. The republish
+# interval is deliberately decoupled from the TTL: raising the TTL must not
+# slow down how often a running host refreshes (a bug when callers derived
+# the loop period from DESCRIPTOR_TTL // 2). Both are env-overridable.
+DESCRIPTOR_TTL = _env_int("OBSCURA_DESCRIPTOR_TTL", 86400)  # seconds (24h)
+DESCRIPTOR_REPUBLISH_INTERVAL = _env_int(
+    "OBSCURA_DESCRIPTOR_REPUBLISH_INTERVAL", 50
+)  # seconds
 
 
 def address_from_pubkey(pub_pem: str) -> str:

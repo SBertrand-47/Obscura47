@@ -1116,7 +1116,7 @@ async def delete_hs_descriptor(body: HSDescriptorDelete, request: Request):
         raise HTTPException(400, detail="Timestamp outside allowed skew window")
 
     cursor = await DB.execute(
-        "SELECT descriptor FROM hs_descriptors WHERE addr = ?", (body.addr,)
+        "SELECT descriptor, updated FROM hs_descriptors WHERE addr = ?", (body.addr,)
     )
     row = await cursor.fetchone()
     if not row:
@@ -1134,6 +1134,18 @@ async def delete_hs_descriptor(body: HSDescriptorDelete, request: Request):
     message = f"hs-delete:{body.addr}:{body.timestamp}".encode()
     if not _ecdsa_verify(pub_pem, message, body.signature):
         raise HTTPException(403, detail="Invalid signature")
+
+    # Stale-delete guard: a delete is only meant to retire the descriptor
+    # the signer was last running. If a fresher descriptor has since been
+    # published (the host restarted and re-published before this delete,
+    # signed by the *stopping* process, arrived), honoring the delete would
+    # wipe the live entry and 404 the site until the next republish. Ignore
+    # a delete whose signed timestamp predates the stored publish time.
+    updated = float(row[1])
+    if body.timestamp < updated:
+        print(f"[registry] - HS descriptor {body.addr} delete ignored "
+              f"(stale: signed {body.timestamp:.0f} < published {updated:.0f})")
+        return {"ok": True, "deleted": False, "stale": True}
 
     await DB.execute("DELETE FROM hs_descriptors WHERE addr = ?", (body.addr,))
     await DB.commit()

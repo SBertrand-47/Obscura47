@@ -28,7 +28,7 @@ from src.agent.tools import ParamSpec, ToolRegistry
 from src.core.hidden_service import HiddenServiceHost
 from src.core.router import set_proxy_ws_client, set_reverse_frame_callback
 from src.utils.logger import get_logger
-from src.utils.onion_addr import DESCRIPTOR_TTL
+from src.utils.onion_addr import DESCRIPTOR_REPUBLISH_INTERVAL
 
 if TYPE_CHECKING:
     from src.agent.observatory import Observer
@@ -227,7 +227,7 @@ class AgentRuntime:
             self.stop()
 
     def _republish_loop(self) -> None:
-        interval = max(60, DESCRIPTOR_TTL // 2)
+        interval = max(30, DESCRIPTOR_REPUBLISH_INTERVAL)
         while not self._stopped.is_set():
             for _ in range(interval):
                 if self._stopped.is_set():

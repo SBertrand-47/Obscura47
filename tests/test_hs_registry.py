@@ -135,6 +135,27 @@ def test_delete_stale_timestamp_rejected(client):
     assert client.get(f"/hs/descriptor/{desc['addr']}").status_code == 200
 
 
+def test_delete_older_than_publish_is_ignored(client):
+    """A delete signed before the stored descriptor was published must not
+    wipe it - this is the stop/restart race where the stopping process's
+    delete arrives after the restarted host has already re-published."""
+    import time
+    priv, _, desc = _fresh_descriptor()
+    client.post("/hs/descriptor", json=desc)  # updated ≈ now
+
+    # Within the skew window, but timestamped before the publish above.
+    stale = time.time() - 5
+    sig = ecdsa_sign(priv, f"hs-delete:{desc['addr']}:{stale}".encode())
+    r = client.post("/hs/descriptor/delete", json={
+        "addr": desc["addr"], "timestamp": stale, "signature": sig,
+    })
+    assert r.status_code == 200
+    assert r.json()["deleted"] is False
+    assert r.json().get("stale") is True
+    # The live descriptor survives the stale delete.
+    assert client.get(f"/hs/descriptor/{desc['addr']}").status_code == 200
+
+
 def test_delete_missing_descriptor_is_noop(client):
     import time
     priv, _ = ecc_generate_keypair()
