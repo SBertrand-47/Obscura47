@@ -42,6 +42,7 @@ pyinstaller ^
     --name "Obscura47" ^
     --icon "assets\icon.ico" ^
     --add-data "src;src" ^
+    --add-data "ui;ui" ^
     --add-data ".env.example;." ^
     --hidden-import "src.core.proxy" ^
     --hidden-import "src.core.node" ^
@@ -56,6 +57,9 @@ pyinstaller ^
     --hidden-import "src.utils.config" ^
     --hidden-import "src.utils.logger" ^
     --hidden-import "src.client.obscura_client" ^
+    --hidden-import "PySide6.QtQuick" ^
+    --hidden-import "PySide6.QtQml" ^
+    --hidden-import "PySide6.QtQuickControls2" ^
     --hidden-import "websockets" ^
     --hidden-import "websockets.asyncio.server" ^
     --hidden-import "websockets.asyncio.client" ^

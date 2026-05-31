@@ -83,7 +83,11 @@ python3 -m PyInstaller \
     --name "Obscura47" \
     $ICON_FLAG \
     --add-data "src:src" \
+    --add-data "ui:ui" \
     --add-data ".env.example:." \
+    --hidden-import "PySide6.QtQuick" \
+    --hidden-import "PySide6.QtQml" \
+    --hidden-import "PySide6.QtQuickControls2" \
     "${HIDDEN_IMPORTS[@]}" \
     --osx-bundle-identifier "com.obscura47.app" \
     app.py

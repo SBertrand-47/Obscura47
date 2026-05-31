@@ -51,6 +51,10 @@ hidden_imports = [
     'Crypto.Signature.DSS',
     'Crypto.Hash.SHA256',
     'Crypto.Random',
+    # QML UI (app.py launches the Qt Quick interface by default)
+    'PySide6.QtQuick',
+    'PySide6.QtQml',
+    'PySide6.QtQuickControls2',
 ]
 
 a = Analysis(
@@ -59,6 +63,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('src', 'src'),
+        ('ui', 'ui'),
         ('.env.example', '.'),
     ],
     hiddenimports=hidden_imports,
@@ -68,8 +73,8 @@ a = Analysis(
     excludes=[
         'tkinter',          # old GUI toolkit, no longer used
         'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
-        'PySide6.Qt3DCore', 'PySide6.QtMultimedia', 'PySide6.QtQuick',
-        'PySide6.QtQml', 'PySide6.QtCharts', 'PySide6.QtDataVisualization',
+        'PySide6.Qt3DCore', 'PySide6.QtMultimedia',
+        'PySide6.QtCharts', 'PySide6.QtDataVisualization',
     ],
     noarchive=False,
     optimize=0,

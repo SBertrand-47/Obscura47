@@ -4,9 +4,12 @@ Launch this file to run the Obscura Network GUI.
 Users join as relay nodes and use the local proxy to browse anonymously.
 Exit node status requires admin approval.
 
-The interface is built with PySide6 (Qt 6): a left navigation rail switches
-between Dashboard, Sites, Activity and Settings pages. All network/backend
-logic is unchanged from the original client - only the UI layer is Qt.
+The interface is built with PySide6 (Qt 6). By default it launches the Qt
+Quick (QML) UI in ui/Main.qml, driven by the Backend bridge below; all
+behaviour is delegated to a headless ObscuraApp - the original QWidgets logic
+engine - so the network code is shared and unchanged. Pass --classic to run
+that QWidgets interface directly (also the automatic fallback if QML fails to
+load). The nav rail switches between Dashboard, Sites, Activity and Settings.
 """
 
 import sys
@@ -17,7 +20,7 @@ import argparse
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QObject, Signal, Property, Slot, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -662,7 +665,7 @@ class _Worker(QObject):
 class ObscuraApp(QMainWindow):
     """Main application window."""
 
-    def __init__(self, background: bool = False):
+    def __init__(self, background: bool = False, headless: bool = False):
         super().__init__()
 
         self.setWindowTitle("Obscura47")
@@ -696,7 +699,10 @@ class ObscuraApp(QMainWindow):
         self._log("Welcome to Obscura47. Connect, then use the Sites tab to visit or publish sites.")
 
         # ── Background / autostart startup behaviour ───────────────
-        if background or self._settings.get("start_minimized", False):
+        # In headless mode the QWidgets window is only a logic engine behind
+        # the QML UI, so it must never show itself - the QML launcher handles
+        # minimize/auto-connect instead.
+        if not headless and (background or self._settings.get("start_minimized", False)):
             QTimer.singleShot(100, self.showMinimized)
             QTimer.singleShot(200, self._connect)
 
@@ -1735,17 +1741,212 @@ class ObscuraApp(QMainWindow):
         super().closeEvent(event)
 
 
+class Backend(QObject):
+    """Bridge between the QML shell and the existing Obscura47 logic.
+
+    The QML window is the face of the app; all behaviour is delegated to a
+    headless :class:`ObscuraApp` (the proven QWidgets logic engine, never
+    shown). That keeps every action - connect, discover, publish, diagnose,
+    settings - identical to the classic UI while the visible surface is QML.
+    Dialogs opened by those actions are themed by the same dark stylesheet.
+    """
+
+    changed = Signal()          # connection / metric / role state changed
+    settingsChanged = Signal()  # autostart / start-minimized changed
+    logLine = Signal(str)       # one formatted activity-log line
+
+    def __init__(self, logic: "ObscuraApp"):
+        super().__init__()
+        self._logic = logic
+        self._settings = _load_settings()
+
+        # Mirror state, refreshed by _poll.
+        self._connected = False
+        self._relays = self._healthy = self._exits = 0
+        self._status = "Disconnected"
+        self._role = "Not connected"
+        self._proxy = self._node = False
+
+        # Forward the logic engine's log stream into the QML activity page.
+        logic._signals.log.connect(self._forward_log)
+        self.logLine.emit(self._stamp(
+            "Welcome to Obscura47. Connect, then use Sites to visit or publish."))
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._poll)
+        self._timer.start(1000)
+        self._poll()
+
+    # ── log forwarding ────────────────────────────────────────────────
+    @staticmethod
+    def _stamp(msg: str) -> str:
+        return f"[{time.strftime('%H:%M:%S')}] {msg}"
+
+    def _forward_log(self, msg: str):
+        self.logLine.emit(self._stamp(msg))
+
+    # ── read-only state properties ────────────────────────────────────
+    def _g_connected(self):  return self._connected
+    def _g_relays(self):     return self._relays
+    def _g_healthy(self):    return self._healthy
+    def _g_exits(self):      return self._exits
+    def _g_status(self):     return self._status
+    def _g_role(self):       return self._role
+    def _g_proxy(self):      return self._proxy
+    def _g_node(self):       return self._node
+
+    connected     = Property(bool, _g_connected, notify=changed)
+    relays        = Property(int,  _g_relays,    notify=changed)
+    healthy       = Property(int,  _g_healthy,   notify=changed)
+    exits         = Property(int,  _g_exits,     notify=changed)
+    statusText    = Property(str,  _g_status,    notify=changed)
+    roleText      = Property(str,  _g_role,      notify=changed)
+    proxyRunning  = Property(bool, _g_proxy,     notify=changed)
+    nodeRunning   = Property(bool, _g_node,      notify=changed)
+
+    # ── settings properties ───────────────────────────────────────────
+    def _g_autostart(self):       return bool(self._settings.get("autostart", False))
+    def _g_start_minimized(self): return bool(self._settings.get("start_minimized", False))
+
+    autostartEnabled     = Property(bool, _g_autostart,       notify=settingsChanged)
+    startMinimizedEnabled = Property(bool, _g_start_minimized, notify=settingsChanged)
+
+    # ── action slots (delegate to the logic engine) ───────────────────
+    @Slot()
+    def toggle(self):          self._logic._toggle_connection()
+    @Slot()
+    def openAddress(self):     self._logic._open_visitor()
+    @Slot()
+    def discover(self):        self._logic._discover_sites()
+    @Slot()
+    def browseDirectory(self): self._logic._browse_directory()
+    @Slot()
+    def hostedSites(self):     self._logic._show_hosted_sites()
+    @Slot()
+    def addSite(self):         self._logic._add_hosted_site()
+    @Slot()
+    def publishSite(self):     self._logic._publish_hosted_site()
+    @Slot()
+    def removeSite(self):      self._logic._remove_hosted_site_daemon()
+    @Slot()
+    def diagnose(self):        self._logic._diagnose_connection()
+    @Slot()
+    def quickStart(self):      self._logic._show_quick_start()
+    @Slot()
+    def requestExit(self):     self._logic._request_exit_status()
+
+    # ── settings slots (handled here to stay independent of the hidden
+    #    QWidgets checkboxes) ───────────────────────────────────────────
+    @Slot(bool)
+    def setAutostart(self, enabled: bool):
+        self._settings["autostart"] = enabled
+        _save_settings(self._settings)
+        try:
+            if enabled:
+                setup_autostart(background=self._g_start_minimized())
+                self.logLine.emit(self._stamp("Auto-start on login enabled."))
+            else:
+                remove_autostart()
+                self.logLine.emit(self._stamp("Auto-start on login disabled."))
+        except Exception as exc:
+            self.logLine.emit(self._stamp(f"Could not update auto-start: {exc}"))
+        self.settingsChanged.emit()
+
+    @Slot(bool)
+    def setStartMinimized(self, enabled: bool):
+        self._settings["start_minimized"] = enabled
+        _save_settings(self._settings)
+        if self._g_autostart():
+            try:
+                setup_autostart(background=enabled)
+            except Exception as exc:
+                self.logLine.emit(self._stamp(f"Could not update auto-start: {exc}"))
+        self.settingsChanged.emit()
+
+    # ── polling ───────────────────────────────────────────────────────
+    def _poll(self):
+        counts = self._logic._get_peer_counts()
+        connected = bool(self._logic._connected)
+        proxy = bool(self._logic._running.get("proxy", False))
+        node = bool(self._logic._running.get("node", False))
+        both = proxy and node
+        status = "Connected" if both else ("Connecting…" if connected else "Disconnected")
+        # The hidden engine's own _poll keeps this label current.
+        try:
+            role = self._logic._role_label.text()
+        except Exception:
+            role = "Not connected"
+        if not connected:
+            role = "Not connected"
+
+        new = (connected, counts["relays"], counts["healthy"], counts["exits"],
+               status, role, proxy, node)
+        old = (self._connected, self._relays, self._healthy, self._exits,
+               self._status, self._role, self._proxy, self._node)
+        if new != old:
+            (self._connected, self._relays, self._healthy, self._exits,
+             self._status, self._role, self._proxy, self._node) = new
+            self.changed.emit()
+
+
+def _run_qml(app: "QApplication", background: bool) -> int:
+    """Launch the QML shell backed by a headless ObscuraApp. Returns exit code.
+
+    Raises if the QML fails to load so the caller can fall back to classic.
+    """
+    from PySide6.QtQml import QQmlApplicationEngine
+
+    logic = ObscuraApp(background=False, headless=True)  # hidden logic engine
+    backend = Backend(logic)
+
+    engine = QQmlApplicationEngine()
+    engine.rootContext().setContextProperty("backend", backend)
+    # When frozen by PyInstaller the data files live under sys._MEIPASS, not
+    # next to this script - resolve both cases.
+    base_dir = getattr(sys, "_MEIPASS", os.path.dirname(_APP_SCRIPT))
+    qml_path = os.path.join(base_dir, "ui", "Main.qml")
+    engine.load(QUrl.fromLocalFile(qml_path))
+    if not engine.rootObjects():
+        raise RuntimeError("QML failed to load")
+
+    # Keep strong refs alive for the lifetime of the app.
+    app._obscura_refs = (logic, backend, engine)
+
+    # Autostart / start-minimized behaviour, driven from the QML side.
+    if background or logic._settings.get("start_minimized", False):
+        root = engine.rootObjects()[0]
+        try:
+            root.showMinimized()
+        except Exception:
+            pass
+        backend.toggle()  # auto-connect
+
+    return app.exec()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Obscura47")
     parser.add_argument(
         "--background", action="store_true",
         help="Start minimized and connect automatically (used by autostart)",
     )
+    parser.add_argument(
+        "--classic", action="store_true",
+        help="Use the classic QWidgets interface instead of the QML UI",
+    )
     args, _ = parser.parse_known_args()
 
     app = QApplication(sys.argv)
     app.setApplicationName("Obscura47")
     app.setStyleSheet(STYLESHEET)
+
+    if not args.classic:
+        try:
+            sys.exit(_run_qml(app, background=args.background))
+        except Exception as exc:
+            # Never leave the user without a GUI: fall back to the classic UI.
+            print(f"[gui] QML unavailable ({exc}); using classic interface.",
+                  file=sys.stderr)
 
     window = ObscuraApp(background=args.background)
     window.show()

@@ -5,6 +5,6 @@
 cd "$(dirname "$0")"
 source venv/bin/activate
 pip install pyinstaller
-pyinstaller --onefile --noconsole --name Obscura47 --add-data "src:src" app.py
+pyinstaller --onefile --noconsole --name Obscura47 --add-data "src:src" --add-data "ui:ui" app.py
 echo ""
 echo "Done! Your binary is in the dist/ folder."
