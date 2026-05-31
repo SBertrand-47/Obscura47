@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QInputDialog,
+    QProgressBar,
 )
 
 # ── Autostart / settings helpers ──────────────────────────────────────────────
@@ -214,8 +215,6 @@ DOT = "●"
 from src.utils.app_helpers import (  # noqa: E402
     build_quick_start_text,
     count_unique_peers,
-    format_hosted_site_summary,
-    resolve_hosted_site_selection,
 )
 
 
@@ -286,6 +285,27 @@ QPushButton#Subtle {{
     border: 1px solid {BORDER}; border-radius: 9px; padding: 9px 16px;
 }}
 QPushButton#Subtle:hover {{ background: {BG_CARD}; color: {TEXT}; }}
+QPushButton#MiniPrimary {{
+    background: {ACCENT_DIM}; color: white; font-weight: 600; font-size: 12px;
+    border: none; border-radius: 8px; padding: 8px 18px;
+}}
+QPushButton#MiniPrimary:hover {{ background: {ACCENT}; }}
+QPushButton#Mini {{
+    background: transparent; color: {TEXT_DIM}; font-size: 12px;
+    border: 1px solid {BORDER}; border-radius: 8px; padding: 8px 14px;
+}}
+QPushButton#Mini:hover {{ background: {BG_CARD}; color: {TEXT}; }}
+
+/* ── Indeterminate progress (Discover loading) ── */
+QProgressBar {{
+    background: {BG_CARD_HI}; border: 1px solid {BORDER};
+    border-radius: 6px; max-height: 8px; min-height: 8px;
+}}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 6px; }}
+#AddressMono {{
+    color: {ACCENT};
+    font-family: "SF Mono", "Consolas", "Menlo", monospace; font-size: 12px;
+}}
 
 /* ── Misc ── */
 QCheckBox {{ font-size: 12px; color: {TEXT}; spacing: 8px; }}
@@ -325,11 +345,318 @@ def _card(title: str | None = None) -> tuple[QFrame, QVBoxLayout]:
     return frame, lay
 
 
+def _hint_card(text: str) -> QFrame:
+    """A plain card holding a wrapped message (empty/error states)."""
+    card, lay = _card()
+    lbl = QLabel(text)
+    lbl.setObjectName("CardSub")
+    lbl.setWordWrap(True)
+    lay.addWidget(lbl)
+    return card
+
+
+def _site_card(
+    *,
+    title: str,
+    address: str,
+    info_lines: list[str],
+    badge: str | None = None,
+    badge_color: str = TEXT_DIM,
+    on_open,
+    on_copy,
+) -> QFrame:
+    """One result/listing row: title, mono address, info, Copy + Open.
+
+    ``on_open`` / ``on_copy`` are called with the address string. Shared by
+    the Discover and My Hosted Sites dialogs so both look and behave alike.
+    """
+    card = QFrame()
+    card.setObjectName("Card")
+    lay = QVBoxLayout(card)
+    lay.setContentsMargins(16, 14, 16, 14)
+    lay.setSpacing(6)
+
+    top = QHBoxLayout()
+    name = QLabel(title or address)
+    name.setObjectName("CardTitle")
+    name.setWordWrap(True)
+    top.addWidget(name, 1)
+    if badge:
+        chip = QLabel(badge)
+        chip.setStyleSheet(f"color: {badge_color}; font-size: 11px; font-weight: 600;")
+        top.addWidget(chip, 0, Qt.AlignTop)
+    lay.addLayout(top)
+
+    addr = QLabel(address)
+    addr.setObjectName("AddressMono")
+    addr.setWordWrap(True)
+    addr.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    lay.addWidget(addr)
+
+    for line in info_lines:
+        if not line:
+            continue
+        info = QLabel(line)
+        info.setObjectName("CardSub")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+    btns = QHBoxLayout()
+    btns.addStretch(1)
+    copy_btn = QPushButton("Copy address")
+    copy_btn.setObjectName("Mini")
+    copy_btn.setCursor(Qt.PointingHandCursor)
+    copy_btn.clicked.connect(lambda: on_copy(address))
+    open_btn = QPushButton("Open")
+    open_btn.setObjectName("MiniPrimary")
+    open_btn.setCursor(Qt.PointingHandCursor)
+    open_btn.clicked.connect(lambda: on_open(address))
+    btns.addWidget(copy_btn)
+    btns.addWidget(open_btn)
+    lay.addLayout(btns)
+    return card
+
+
+class _DiscoverDialog(QDialog):
+    """List every live .obscura site, with a visible loading state.
+
+    Opens immediately showing an indeterminate progress bar so the user sees
+    work is happening, runs the registry query on a background thread, then
+    swaps in a scrollable list of site cards (or an empty/error message).
+    """
+
+    # sites, ok, error_text - emitted from the worker thread, handled on UI thread.
+    _loaded = Signal(list, bool, str)
+
+    def __init__(self, parent, *, connected: bool, on_open, on_copy, on_log):
+        super().__init__(parent)
+        self.setWindowTitle("Discover Sites")
+        self.setMinimumSize(560, 540)
+        self._connected = connected
+        self._on_open = on_open
+        self._on_copy = on_copy
+        self._on_log = on_log
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 20, 22, 18)
+        outer.setSpacing(14)
+
+        header = QLabel("Live .obscura sites")
+        header.setObjectName("CardTitle")
+        header.setStyleSheet("font-size: 16px; font-weight: 700;")
+        outer.addWidget(header)
+        sub = QLabel("Every site currently published to the network registry.")
+        sub.setObjectName("CardSub")
+        outer.addWidget(sub)
+
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack, 1)
+
+        # Page 0: loading
+        loading = QWidget()
+        l_lay = QVBoxLayout(loading)
+        l_lay.setAlignment(Qt.AlignCenter)
+        l_lay.setSpacing(18)
+        l_lay.addStretch(1)
+        spinner = QProgressBar()
+        spinner.setRange(0, 0)  # indeterminate "busy" animation
+        spinner.setTextVisible(False)
+        spinner.setFixedWidth(260)
+        msg = QLabel("Discovering live sites…")
+        msg.setObjectName("CardTitle")
+        msg.setAlignment(Qt.AlignCenter)
+        note = QLabel("Querying the registry for every published .obscura address.")
+        note.setObjectName("CardSub")
+        note.setAlignment(Qt.AlignCenter)
+        l_lay.addWidget(msg)
+        l_lay.addWidget(spinner, 0, Qt.AlignCenter)
+        l_lay.addWidget(note)
+        l_lay.addStretch(1)
+        self._stack.addWidget(loading)
+
+        # Page 1: results
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        body = QWidget()
+        self._results = QVBoxLayout(body)
+        self._results.setContentsMargins(2, 2, 2, 2)
+        self._results.setSpacing(10)
+        self._results.addStretch(1)
+        self._scroll.setWidget(body)
+        self._stack.addWidget(self._scroll)
+
+        # Footer: count + refresh/close
+        footer = QHBoxLayout()
+        self._count = QLabel("")
+        self._count.setObjectName("CardSub")
+        footer.addWidget(self._count)
+        footer.addStretch(1)
+        self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.setObjectName("Mini")
+        self._refresh_btn.setCursor(Qt.PointingHandCursor)
+        self._refresh_btn.clicked.connect(self._start)
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("Mini")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(self._refresh_btn)
+        footer.addWidget(close_btn)
+        outer.addLayout(footer)
+
+        self._loaded.connect(self._on_loaded)
+        self._start()
+
+    def _start(self):
+        self._stack.setCurrentIndex(0)
+        self._count.setText("")
+        self._refresh_btn.setEnabled(False)
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    def _fetch(self):
+        try:
+            from src.utils.site_directory import (
+                fetch_live_sites, enrich_with_manifests,
+            )
+            sites = fetch_live_sites()
+            if sites and self._connected:
+                # Best-effort titles/descriptions; only when the proxy is up
+                # to route the manifest fetches.
+                try:
+                    enrich_with_manifests(sites)
+                except Exception:
+                    pass
+            self._loaded.emit(sites, True, "")
+        except Exception as exc:
+            self._loaded.emit([], False, str(exc))
+
+    def _on_loaded(self, sites: list, ok: bool, err: str):
+        self._refresh_btn.setEnabled(True)
+        # Clear previous cards (keep the trailing stretch at the end).
+        while self._results.count() > 1:
+            item = self._results.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._stack.setCurrentIndex(1)
+
+        if not ok:
+            self._count.setText("Registry unreachable")
+            self._results.insertWidget(0, _hint_card(
+                "Could not reach the registry to list sites.\n\n"
+                f"{err}\n\nCheck your connection and try Refresh."))
+            self._on_log("Site discovery failed.")
+            return
+        if not sites:
+            self._count.setText("0 sites")
+            self._results.insertWidget(0, _hint_card(
+                "No live .obscura sites are currently published to the "
+                "registry.\n\nIf you're hosting one, make sure it's running "
+                "and connected."))
+            self._on_log("Site discovery complete: no live sites.")
+            return
+
+        self._count.setText(f"{len(sites)} live site(s)")
+        now = time.time()
+        for i, site in enumerate(sites):
+            self._results.insertWidget(i, self._build_card(site, now))
+        self._on_log(f"Site discovery complete: {len(sites)} live site(s).")
+
+    def _build_card(self, site: dict, now: float) -> QFrame:
+        addr = site.get("addr", "?")
+        title = (site.get("title") or "").strip()
+        info_lines = []
+        desc = (site.get("description") or "").strip()
+        if desc:
+            info_lines.append(desc[:200])
+        updated = site.get("updated")
+        if isinstance(updated, (int, float)):
+            info_lines.append(f"Last seen: {_format_age(now - updated)}")
+        return _site_card(
+            title=title or addr,
+            address=addr,
+            info_lines=info_lines,
+            on_open=self._on_open,
+            on_copy=self._on_copy,
+        )
+
+
+def _format_age(seconds: float) -> str:
+    """Compact 'time ago' for the Discover list (mirrors site_directory)."""
+    seconds = max(0, int(seconds))
+    if seconds < 90:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 90:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 36:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
+class _HostedSitesDialog(QDialog):
+    """A proper scrollable list of the user's hosted .obscura sites.
+
+    Replaces the old single message box dump - each site is a card showing
+    its address, target, and background/manual mode, with Copy and Open.
+    """
+
+    def __init__(self, parent, *, sites: list, background_for, on_open, on_copy):
+        super().__init__(parent)
+        self.setWindowTitle("My Hosted Sites")
+        self.setMinimumSize(560, 540)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(22, 20, 22, 18)
+        outer.setSpacing(14)
+
+        header = QLabel("My hosted sites")
+        header.setObjectName("CardTitle")
+        header.setStyleSheet("font-size: 16px; font-weight: 700;")
+        outer.addWidget(header)
+        sub = QLabel(f"{len(sites)} site(s) on this machine.")
+        sub.setObjectName("CardSub")
+        outer.addWidget(sub)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(10)
+        for site in sites:
+            try:
+                background = bool(background_for(site.name))
+            except Exception:
+                background = False
+            target = getattr(site, "target", None) or "(target not saved yet)"
+            lay.addWidget(_site_card(
+                title=site.name,
+                address=site.address,
+                info_lines=[f"Target: {target}"],
+                badge="● background" if background else "● manual",
+                badge_color=GREEN if background else TEXT_DIM,
+                on_open=on_open,
+                on_copy=on_copy,
+            ))
+        lay.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.setObjectName("Mini")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        outer.addLayout(footer)
+
+
 class _Worker(QObject):
     """Signal hub so background threads can update the UI thread safely."""
     log = Signal(str)
     diagnostic = Signal(str, bool)
-    discovery = Signal(str, bool)
 
 
 class ObscuraApp(QMainWindow):
@@ -358,7 +685,6 @@ class ObscuraApp(QMainWindow):
         self._signals = _Worker()
         self._signals.log.connect(self._append_log)
         self._signals.diagnostic.connect(self._show_diagnostic_result)
-        self._signals.discovery.connect(self._show_discovery_result)
 
         self._build_ui()
 
@@ -1030,34 +1356,27 @@ class ObscuraApp(QMainWindow):
     def _show_hosted_sites(self):
         hosted = self._get_hosted_sites()
         if not hosted:
-            QMessageBox.information(self, "My Hosted Sites", "No hosted sites yet.")
-            return
-
-        from src.utils.daemon import daemon_installed
-
-        message = "\n\n".join(
-            format_hosted_site_summary(
-                site,
-                background_enabled=daemon_installed(site.name),
+            QMessageBox.information(
+                self, "My Hosted Sites",
+                "No hosted sites yet.\n\nUse Add Site or Publish Site to "
+                "create one.",
             )
-            for site in hosted
-        )
-        QMessageBox.information(self, "My Hosted Sites", message)
-
-        selected = self._prompt_text(
-            "Open Hosted Site",
-            "Site name or .obscura address to open now (optional):",
-            initial=hosted[0].name,
-        )
-        if not selected:
             return
+
         try:
-            address = resolve_hosted_site_selection(selected, hosted)
-            self._open_address_in_browser(address)
-            self._log(f"Opened hosted site {address}.")
-        except Exception as exc:
-            QMessageBox.critical(self, "Open Hosted Site", str(exc))
-            self._log(f"Could not open hosted site: {exc}")
+            from src.utils.daemon import daemon_installed
+        except Exception:
+            def daemon_installed(_name):  # background status unavailable
+                return False
+
+        dlg = _HostedSitesDialog(
+            self,
+            sites=hosted,
+            background_for=daemon_installed,
+            on_open=self._open_site_address,
+            on_copy=self._copy_to_clipboard,
+        )
+        dlg.exec()
 
     def _add_hosted_site(self):
         name = self._prompt_text("Add .obscura Site", "Site name:")
@@ -1206,54 +1525,32 @@ class ObscuraApp(QMainWindow):
         Unlike Browse Directory (which queries one opt-in directory you must
         already know the address of), this reads the registry's global
         /hs/list, so it works with zero prior knowledge - the answer to
-        "what's out there?". Enriches with each site's manifest when the
-        proxy is connected.
+        "what's out there?". The dialog shows a loading state immediately,
+        fetches on a background thread, then lists each site as a card with
+        Open / Copy actions. Manifests are enriched when the proxy is up.
         """
         self._log("Discovering live .obscura sites…")
-        connected = self._connected
-
-        def _worker():
-            try:
-                from src.utils.site_directory import (
-                    fetch_live_sites, enrich_with_manifests, format_site_listing,
-                )
-                sites = fetch_live_sites()
-                if sites and connected:
-                    # Best-effort titles/descriptions; only when the proxy is
-                    # up to route the manifest fetches.
-                    try:
-                        enrich_with_manifests(sites)
-                    except Exception:
-                        pass
-                text = format_site_listing(sites)
-                ok = True
-            except Exception as exc:
-                text = (f"Could not reach the registry to list sites:\n{exc}")
-                ok = False
-            self._signals.discovery.emit(text, ok)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _show_discovery_result(self, text: str, ok: bool):
-        if ok:
-            QMessageBox.information(self, "Discover Sites", text)
-            self._log("Site discovery complete.")
-        else:
-            QMessageBox.warning(self, "Discover Sites", text)
-            self._log("Site discovery failed.")
-            return
-        # Offer to open one of the discovered addresses straight away.
-        selected = self._prompt_text(
-            "Open Discovered Site",
-            "Paste a .obscura address from the list to open it now (optional):",
+        dlg = _DiscoverDialog(
+            self,
+            connected=self._connected,
+            on_open=self._open_site_address,
+            on_copy=self._copy_to_clipboard,
+            on_log=self._log,
         )
-        if not selected:
-            return
+        dlg.exec()
+
+    def _open_site_address(self, address: str):
+        """Open a .obscura address in the browser, surfacing any error."""
         try:
-            self._open_address_in_browser(selected)
-            self._log(f"Opened {selected}.")
+            self._open_address_in_browser(address)
+            self._log(f"Opened {address}.")
         except Exception as exc:
-            QMessageBox.critical(self, "Open Discovered Site", str(exc))
+            QMessageBox.critical(self, "Open Site", str(exc))
+            self._log(f"Could not open {address}: {exc}")
+
+    def _copy_to_clipboard(self, text: str):
+        QApplication.clipboard().setText(text)
+        self._log(f"Copied {text} to clipboard.")
 
     def _browse_directory(self):
         directory_addr = self._prompt_text(
