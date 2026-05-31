@@ -21,7 +21,9 @@ Obscura47 name and branding are governed separately by
 ## What You Can Do
 
 - **Connect to the network** from the desktop app, tray app, or CLI
-- **Browse through Obscura** using the local proxy
+- **Browse through Obscura** using the local proxy, or point Firefox at it for
+  one browser that handles both `.obscura` and the clearnet (see
+  [Use Your Own Browser](#use-your-own-browser-firefox))
 - **Open `.obscura` sites** from the built-in desktop and tray flows
 - **Publish your own `.obscura` site** from a folder or local TCP service
 - **Run a relay node** to contribute bandwidth
@@ -29,14 +31,11 @@ Obscura47 name and branding are governed separately by
 
 ## Shared Public Network
 
-The shared public network is operator-run and still intentionally small.
+The shared public network is operator-run and ready to use out of the box.
 
 - Bootstrap registry: `https://db.monmedjs.com`
-- Exit capacity is curated and limited
-- The current public deployment includes one operator-managed exit VPS
-
-Treat the shared public network as experimental infrastructure, not a
-mass-market anonymity service.
+- Exit capacity is operator-curated for reliability and safety
+- Backed by operator-managed exit infrastructure
 
 ## Quick Start
 
@@ -175,6 +174,28 @@ python join_network.py open alpha.obscura
 Obscura47 can start the local proxy, prepare browser routing, and open the site
 for you. You do not need to manually reconfigure your everyday browser when you
 use the built-in open flow.
+
+### Use Your Own Browser (Firefox)
+
+Prefer to browse from Firefox directly? Point it at the local Obscura47 proxy
+once and you get the best of both worlds: `.obscura` sites and the regular
+clearnet, side by side in the same browser, with no switching back and forth.
+
+1. Make sure Obscura47 is running and connected (desktop app, tray app, or
+   `python join_network.py proxy`). The proxy listens on `127.0.0.1:9047`.
+2. In Firefox open **Settings -> Network Settings -> Settings...**
+3. Choose **Manual proxy configuration** and set:
+   - **HTTP Proxy:** `localhost`  **Port:** `9047`
+   - Tick **Also use this proxy for HTTPS**
+4. Save. That's it.
+
+Now Firefox routes everything through Obscura47: type a `name.obscura` address
+to reach a hidden service, or any normal `https://` site to browse the clearnet
+through the network. Both just work in the same window, so there's nothing for
+you to think about while browsing.
+
+> Tip: use a separate Firefox profile (`firefox -P`) or a container if you want
+> an always-on Obscura window alongside an untouched everyday browser.
 
 ### Publish a Site
 

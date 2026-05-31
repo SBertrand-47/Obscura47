@@ -1,0 +1,8 @@
+# Shell launchers and scripts must stay LF, or they break on macOS/Linux with
+# "bad interpreter" / "cannot execute". Force it regardless of core.autocrlf.
+*.sh        text eol=lf
+*.command   text eol=lf
+
+# Windows batch files want CRLF.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
