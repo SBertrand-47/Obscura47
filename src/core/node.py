@@ -4,6 +4,7 @@ import json
 import time
 import sys
 from src.core.router import Router
+from src.core import mixing
 from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import listen_for_discovery, broadcast_discovery
 from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
@@ -197,6 +198,13 @@ class ObscuraNode:
             log.error("Frame decode error: %s", e)
             return
 
+        # Cover-traffic drop cell: indistinguishable from a real frame on
+        # the wire (same fixed-size onion envelope), recognised only after
+        # decryption. Silently discard - it exists purely to pad the link.
+        if mixing.is_drop_frame(layer):
+            log.debug("Dropped cover-traffic cell")
+            return
+
         # Nested onion layer: next_hop/inner or terminal payload
         if isinstance(layer, dict) and ('payload' in layer or 'next_hop' in layer or 'inner' in layer):
             if 'payload' in layer:
@@ -211,7 +219,12 @@ class ObscuraNode:
                 return
             if isinstance(next_hop, dict):
                 encrypted_inner = inner if isinstance(inner, str) else json.dumps(inner)
-                self.router.send_to_next_hop(next_hop, encrypted_inner)
+                # Forward through the mix scheduler so timing defenses (jitter
+                # / Poisson mixing) apply. Generic onion relay frames carry no
+                # stream id, so they release order-independently.
+                mixing.submit_forward(
+                    lambda nh=next_hop, ei=encrypted_inner: self.router.send_to_next_hop(nh, ei)
+                )
                 return
             log.warning("Invalid next_hop format; dropping")
             return
@@ -240,7 +253,13 @@ class ObscuraNode:
             if route:
                 next_hop = route.pop(0)
                 log.info("Forwarding tunnel frame (%s) to %s:%s | request_id=%s", layer['type'], next_hop['host'], next_hop['port'], req_id)
-                self.router.forward_message(next_hop, layer)
+                # Mix-schedule with the request_id as stream key so data
+                # chunks of one tunnel keep their order while different
+                # tunnels are free to be reordered.
+                mixing.submit_forward(
+                    lambda nh=next_hop, ly=layer: self.router.forward_message(nh, ly),
+                    stream_key=req_id or None,
+                )
             else:
                 log.info("Tunnel frame with empty route at %s:%s | request_id=%s", self.host, self.port, req_id)
             # Clean up reverse channel on CLOSE
@@ -265,7 +284,10 @@ class ObscuraNode:
 
         if route:
             next_hop = route.pop(0)
-            self.router.forward_message(next_hop, layer)
+            mixing.submit_forward(
+                lambda nh=next_hop, ly=layer: self.router.forward_message(nh, ly),
+                stream_key=req_id or None,
+            )
             return
 
         # Terminal dispatch.
@@ -531,6 +553,11 @@ class ObscuraNode:
         """Start the node server in a separate daemon thread."""
         server_thread = threading.Thread(target=self.start_server, daemon=True)
         server_thread.start()
+
+        # Timing defenses: start the mix scheduler (no-op while jitter/mixing
+        # are disabled) and the cover-traffic emitter (no-op while disabled).
+        mixing.SCHEDULER.start()
+        mixing.start_cover_traffic(self)
 
         # Start kill switch monitor
         start_kill_switch_monitor(self._shutdown)

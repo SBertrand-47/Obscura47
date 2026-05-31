@@ -103,6 +103,35 @@ CHANNEL_IDLE_CLOSE_SECONDS = float(os.getenv("OBSCURA_CHANNEL_IDLE_CLOSE_SECONDS
 # General socket connect timeout (seconds) for relay/router TCP connections
 SOCKET_CONNECT_TIMEOUT = float(os.getenv("OBSCURA_SOCKET_CONNECT_TIMEOUT", "5.0"))
 
+# ── Traffic-analysis resistance: timing & cover traffic ────────────
+# These defenses trade latency/bandwidth for resistance to timing and
+# volume correlation. All default OFF so a node behaves exactly as before
+# until an operator opts in - turning them on makes the network slower by
+# design (mixing in particular is high-latency). Fixed-size cells (in
+# encryptions.py) and stream multiplexing (router.py) are always on; these
+# knobs control the optional timing layer on top.
+#
+# Layer 3a - per-frame forward JITTER. A relay waits a uniform random delay
+# in [0, MIX_JITTER_MAX_MS] before forwarding each frame. Cheap, mild.
+MIX_JITTER_ENABLED = getenv_str("OBSCURA_MIX_JITTER_ENABLED", "false").lower() in ("1", "true", "yes")
+MIX_JITTER_MAX_MS = float(os.getenv("OBSCURA_MIX_JITTER_MAX_MS", "0"))
+
+# Layer 3b - COVER traffic (chaff). Each node emits indistinguishable
+# fixed-size "drop" cells to random neighbours at a Poisson rate with this
+# mean inter-arrival time, so a link observer cannot tell real frames from
+# padding. 0 / disabled = no cover traffic.
+COVER_ENABLED = getenv_str("OBSCURA_COVER_ENABLED", "false").lower() in ("1", "true", "yes")
+COVER_MEAN_INTERVAL_MS = float(os.getenv("OBSCURA_COVER_MEAN_INTERVAL_MS", "1000"))
+
+# Layer 4 - Poisson MIX batching. When enabled, a relay holds each forwarded
+# cell in a pool and releases it after an exponential (memoryless) delay of
+# this mean, decoupling output timing from input timing. Order is preserved
+# WITHIN a stream (request_id); cells of different streams are freely
+# reordered - which is exactly what defeats flow correlation. This makes the
+# network high-latency: end-to-end delay grows ~ hops * MIX_MEAN_DELAY_MS.
+MIX_ENABLED = getenv_str("OBSCURA_MIX_ENABLED", "false").lower() in ("1", "true", "yes")
+MIX_MEAN_DELAY_MS = float(os.getenv("OBSCURA_MIX_MEAN_DELAY_MS", "200"))
+
 # WebSocket send timeout (seconds). Has to cover the worst case of TCP
 # handshake + WS upgrade + two-round-trip ECDSA challenge-response when
 # the connection is brand-new and the peer is across the public internet

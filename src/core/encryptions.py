@@ -79,27 +79,69 @@ def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, tag: bytes) -> 
         return None
 
 
-# --- Padding for traffic analysis resistance ---
+# --- Fixed-size cells for traffic-analysis resistance ---
+#
+# The old scheme padded to the next 128-byte multiple (PKCS7). Because
+# AES-GCM is length-preserving, that still leaked the payload length at
+# 128-byte granularity: an observer at any hop could read the ciphertext
+# length and learn the message size to within 128 bytes, which is enough
+# to fingerprint and to correlate the flow entering the network with the
+# flow leaving it.
+#
+# Instead we quantise every frame to one of a small set of fixed CELL
+# sizes. A 4-byte big-endian length prefix records the true plaintext
+# length; the remainder is zero-filled up to the chosen bucket. The
+# ciphertext length (== padded length, GCM is a stream mode) therefore
+# reveals only *which bucket* the frame fell into, not its real size.
+# Two different payloads that land in the same bucket are byte-length
+# identical on the wire.
+#
+# Frames larger than the largest bucket quantise up to a multiple of the
+# largest bucket, so size is still revealed only at 64 KiB granularity at
+# the very top end (real payloads almost always fit a single bucket).
+#
+# NOTE: this is a wire-format break. A node running the old PKCS7 scheme
+# and a node running this scheme cannot exchange frames. All nodes on a
+# network must run the same build.
 
-# Frames are padded to the nearest multiple of this block size before encryption.
-# This prevents packet-length correlation across hops.
-PADDING_BLOCK = 128  # bytes (must be <= 255 for PKCS7)
+_LEN_PREFIX = 4  # bytes, big-endian uint32 length header
+
+# Bucket ladder (bytes of padded plaintext, including the length prefix).
+# Chosen to cover control frames (small), typical data chunks (the proxy
+# reads in 8 KiB units, ~11 KiB once base64-wrapped), and nested onion
+# layers for long routes, without wasting too much on the common case.
+CELL_BUCKETS = (512, 2048, 8192, 16384, 65536)
+CELL_MAX = CELL_BUCKETS[-1]
+
+
+def _cell_size(n: int) -> int:
+    """Return the fixed cell size that a payload of *n* bytes pads up to."""
+    for b in CELL_BUCKETS:
+        if n <= b:
+            return b
+    # Above the ladder: round up to a whole multiple of the largest bucket
+    # so very large frames still quantise (to CELL_MAX granularity) rather
+    # than revealing their exact length.
+    return ((n + CELL_MAX - 1) // CELL_MAX) * CELL_MAX
 
 
 def _pad(plaintext: bytes) -> bytes:
-    """PKCS7-style pad to a multiple of PADDING_BLOCK."""
-    pad_len = PADDING_BLOCK - (len(plaintext) % PADDING_BLOCK)
-    return plaintext + bytes([pad_len]) * pad_len
+    """Length-prefix and zero-fill *plaintext* to a fixed cell size."""
+    if len(plaintext) >= 2 ** (8 * _LEN_PREFIX):
+        raise ValueError("plaintext too large to length-prefix")
+    prefixed = len(plaintext).to_bytes(_LEN_PREFIX, "big") + plaintext
+    target = _cell_size(len(prefixed))
+    return prefixed + b"\x00" * (target - len(prefixed))
 
 
 def _unpad(data: bytes) -> bytes:
-    """Remove PKCS7 padding."""
-    pad_len = data[-1]
-    if pad_len < 1 or pad_len > PADDING_BLOCK:
-        raise ValueError("invalid padding")
-    if data[-pad_len:] != bytes([pad_len]) * pad_len:
-        raise ValueError("corrupt padding")
-    return data[:-pad_len]
+    """Recover the original plaintext from a fixed-size cell."""
+    if len(data) < _LEN_PREFIX:
+        raise ValueError("cell shorter than length prefix")
+    n = int.from_bytes(data[:_LEN_PREFIX], "big")
+    if n > len(data) - _LEN_PREFIX:
+        raise ValueError("corrupt cell: length prefix exceeds payload")
+    return data[_LEN_PREFIX:_LEN_PREFIX + n]
 
 
 def onion_encrypt_for_peer(peer_pub_pem: str, plaintext: str) -> str:

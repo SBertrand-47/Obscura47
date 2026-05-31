@@ -7,6 +7,7 @@ from src.core.encryptions import (
     onion_encrypt_for_peer, onion_decrypt_with_priv,
     ecdsa_sign, ecdsa_verify,
     aes_gcm_encrypt, aes_gcm_decrypt,
+    _pad, _unpad, _cell_size, CELL_BUCKETS, CELL_MAX,
 )
 
 
@@ -110,6 +111,49 @@ class TestOnionEncryption:
         # Peel layer 3 (payload)
         decrypted3 = json.loads(onion_decrypt_with_priv(p3, decrypted2["inner"]))
         assert decrypted3["payload"] == payload
+
+
+# ── Fixed-size cells (traffic-analysis resistance) ────────────────
+
+class TestFixedSizeCells:
+    def test_pad_roundtrip_various_lengths(self):
+        for n in (0, 1, 50, 511, 512, 513, 8000, 16384, 70000):
+            data = b"x" * n
+            assert _unpad(_pad(data)) == data
+
+    def test_pad_lands_on_bucket(self):
+        """Padded length is always exactly a bucket size (or CELL_MAX multiple)."""
+        for n in (0, 1, 200, 600, 9000):
+            padded = _pad(b"y" * n)
+            assert len(padded) == _cell_size(n + 4)  # +4 length prefix
+            assert len(padded) in CELL_BUCKETS or len(padded) % CELL_MAX == 0
+
+    def test_same_bucket_same_wire_length(self):
+        """The core property: two payloads in the same bucket are
+        byte-length identical on the wire, so ciphertext length leaks
+        only the bucket, not the real size."""
+        priv, pub = ecc_generate_keypair()
+        # 10 bytes and 400 bytes both fall in the 512 bucket
+        small = onion_encrypt_for_peer(pub, "a" * 10)
+        bigger = onion_encrypt_for_peer(pub, "a" * 400)
+        assert len(small) == len(bigger)
+        # ciphertext field itself must match in length
+        assert len(json.loads(small)["ct"]) == len(json.loads(bigger)["ct"])
+        # and both still decrypt correctly
+        assert onion_decrypt_with_priv(priv, small) == "a" * 10
+        assert onion_decrypt_with_priv(priv, bigger) == "a" * 400
+
+    def test_different_buckets_differ_in_length(self):
+        priv, pub = ecc_generate_keypair()
+        small = onion_encrypt_for_peer(pub, "a" * 10)       # 512 bucket
+        large = onion_encrypt_for_peer(pub, "a" * 3000)     # 8192 bucket
+        assert len(large) > len(small)
+
+    def test_corrupt_length_prefix_rejected(self):
+        # Length prefix claiming more bytes than the cell holds must raise.
+        bad = (9999).to_bytes(4, "big") + b"short"
+        with pytest.raises(ValueError):
+            _unpad(bad)
 
 
 # ── ECDSA Sign / Verify ───────────────────────────────────────────

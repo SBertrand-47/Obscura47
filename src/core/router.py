@@ -17,7 +17,17 @@ log = get_logger(__name__)
 
 # Router-level metrics
 FRAME_RETRIES = 0
-TUNNEL_SOCKETS = {}  # (request_id, host, port) -> {'sock': socket, 'last': ts, 'q': list}
+# Shared per-hop multiplexing channels. Keyed by (host, port) - NOT by
+# request_id - so that many streams to the same next hop ride a single
+# connection. This both saves connections and removes a traffic-analysis
+# side channel: with one socket per stream, an observer could count
+# concurrent flows and correlate stream open/close events by watching
+# TCP connection setup/teardown. Multiplexing hides per-stream boundaries
+# inside one long-lived connection. Reverse frames are demultiplexed by
+# request_id by the registered callback, so one reader per socket serves
+# every stream. A single stream's close frame is forwarded like any other
+# frame; the shared socket is reclaimed only by the idle sweeper.
+TUNNEL_SOCKETS = {}  # (host, port) -> {'sock': socket, 'last': ts, 'q': list}
 
 # ---------------------------------------------------------------------------
 # Per-role WebSocket client binding
@@ -270,10 +280,12 @@ class Router:
             log.info("Sent (persist/WS) to %s:%s", next_node['host'], next_node.get('ws_port', '?'))
             return
 
-        # Fall back to TCP persistent socket
+        # Fall back to TCP persistent socket. Keyed by (host, port) so all
+        # streams to this hop share one multiplexed connection (request_id
+        # is carried inside each frame and demuxed on the reverse path).
         if not hasattr(self, '_tunnel_sockets'):
             self._tunnel_sockets = {}
-        key = (request_id, next_node['host'], next_node['port'])
+        key = (next_node['host'], next_node['port'])
         entry = self._tunnel_sockets.get(key)
         try:
             if entry is None:
@@ -303,13 +315,12 @@ class Router:
                     entry['q'][0] = chunk[sent:]
                     time.sleep(0.01)
             log.info("Sent (persist/TCP) to %s:%s", next_node['host'], next_node['port'])
-            if is_close:
-                ent = self._tunnel_sockets.pop(key, None)
-                try:
-                    if ent and ent.get('sock'):
-                        ent['sock'].close()
-                except Exception:
-                    pass
+            # NOTE: a single stream's close does NOT tear down the shared
+            # socket - other multiplexed streams may still be using it. The
+            # close frame itself has already been forwarded above; the
+            # connection is reclaimed by the idle sweeper once no stream has
+            # used it for CHANNEL_IDLE_CLOSE_SECONDS.
+            _ = is_close
         except Exception as e:
             try:
                 ent = self._tunnel_sockets.pop(key, None)
@@ -563,9 +574,11 @@ def _send_frame_via_route(route, envelope, ws_client=None):
 
     frame_json = json.dumps({"encrypted_data": encrypted})
 
-    # Detect tunnel frame and reuse persistent socket to first hop
+    # Detect tunnel frame and reuse the shared multiplexed socket to the
+    # first hop. Keyed by (host, port) so every stream to this hop shares
+    # one connection - request_id travels inside the frame.
     is_tunnel = isinstance(envelope, dict) and envelope.get('type') in ('connect', 'data', 'close', 'hs_establish', 'hs_introduce', 'rv_establish', 'rv_join', 'hs_data', 'hs_close') and envelope.get('request_id')
-    key = (envelope['request_id'], first_hop['host'], first_hop['port']) if is_tunnel else None
+    key = (first_hop['host'], first_hop['port']) if is_tunnel else None
 
     while attempt < FRAME_RETRY_ATTEMPTS:
         try:
@@ -609,18 +622,17 @@ def _send_frame_via_route(route, envelope, ws_client=None):
                 with socket.create_connection((first_hop['host'], first_hop['port']), timeout=SOCKET_CONNECT_TIMEOUT) as sock:
                     sock.send((frame_json + "\n").encode())
             log.info("Sent frame to %s:%s (TCP)", first_hop['host'], first_hop['port'])
-            if is_tunnel and envelope.get('type') in ('close', 'hs_close'):
-                try:
-                    ent = TUNNEL_SOCKETS.pop(key, None)
-                    if ent and ent.get('sock'):
-                        ent['sock'].close()
-                except Exception:
-                    pass
+            # A close frame for one stream is forwarded like any other frame;
+            # the shared socket stays up for other multiplexed streams and is
+            # reclaimed by the idle sweeper. (Previously this closed the
+            # socket, which would have killed every co-resident stream.)
             return True
         except Exception as e:
             attempt += 1
             FRAME_RETRIES += 1
-            # If persistent socket used, drop it on failure
+            # A genuine socket error means the shared channel is broken for
+            # every stream on it - drop it so the next frame rebuilds it.
+            # The affected streams retry/rebuild via the normal retry loop.
             if is_tunnel:
                 ent = TUNNEL_SOCKETS.pop(key, None)
                 try:
