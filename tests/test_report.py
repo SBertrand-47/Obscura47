@@ -75,7 +75,22 @@ def test_render_text_is_human_readable(rng):
     assert "ATTACK" in text
 
 
+def test_report_reconstructs_decision_trace(rng):
+    from src.range.agents import default_cast, run_world
+    run_world(default_cast(), rounds=2, experiment_id="rpt-why",
+              trace_decisions=True)
+    report = rp.build_report("rpt-why")
+    # The "why" trace is reconstructed and every decision names an action.
+    assert report["decisions"]
+    assert all(d["action"] for d in report["decisions"])
+    # Decision events are kept out of the main timeline.
+    assert not any(row["kind"] == "agent.decision"
+                   for row in report["timeline"])
+    assert "Decisions (why)" in rp.render_text(report)
+
+
 def test_unknown_experiment_is_empty(rng):
     report = rp.build_report("does-not-exist")
     assert report["event_count"] == 0
     assert report["record"] is None
+    assert report["decisions"] == []

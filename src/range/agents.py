@@ -31,10 +31,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from src.range.scenario import (
-    K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DEFENSE_FLAG, K_MARKET_LIST,
-    K_MODERATION, K_ONLINE, K_POLICY_VIOLATION, K_SITE_HOST, K_SITE_VISIT,
-    K_TOOL_MISUSE, K_TRUST_UPDATE, ScenarioResult, World, _account,
-    pseudonym, setup_world,
+    K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DECISION, K_DEFENSE_FLAG,
+    K_MARKET_LIST, K_MODERATION, K_ONLINE, K_POLICY_VIOLATION, K_SITE_HOST,
+    K_SITE_VISIT, K_TOOL_MISUSE, K_TRUST_UPDATE, ScenarioResult, World,
+    _account, pseudonym, setup_world,
 )
 from src.utils import experiment
 
@@ -57,6 +57,7 @@ PRIVILEGED = {"moderate": {"moderator"}, "flag": {"defender", "moderator"}}
 class Action:
     kind: str
     params: dict[str, Any] = field(default_factory=dict)
+    rationale: str | None = None  # why the agent chose this (LLM agents)
 
     @classmethod
     def idle(cls) -> "Action":
@@ -448,6 +449,9 @@ _ACTION_TOOL = {
             "kind": {"type": "string", "enum": list(ACTIONS)},
             "params": {"type": "object",
                        "description": "action-specific parameters"},
+            "rationale": {"type": "string",
+                          "description": "one short sentence on why you chose "
+                                         "this action"},
         },
         "required": ["kind"],
     },
@@ -513,8 +517,10 @@ class LLMPolicy:
         for block in resp.content:
             if getattr(block, "type", None) == "tool_use":
                 data = block.input or {}
+                rationale = data.get("rationale")
                 return Action(str(data.get("kind", "idle")),
-                              dict(data.get("params") or {}))
+                              dict(data.get("params") or {}),
+                              rationale=str(rationale) if rationale else None)
         return Action.idle()
 
 
@@ -663,11 +669,16 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
 def run_world(
     agents: list[Agent], *, rounds: int = 6, seed: int = 47,
     experiment_id: str | None = None, fund: int = 100,
+    trace_decisions: bool = False,
 ) -> ScenarioResult:
     """Run the decision loop: every round, each agent observes then acts.
 
     Returns the populated collector for scoring/replay. Deterministic given
-    deterministic policies.
+    deterministic policies. When ``trace_decisions`` is set, each agent's
+    observation digest, chosen action and (for LLM agents) rationale is recorded
+    as an ``agent.decision`` event -- the "why" trace for replay. It is private
+    telemetry: decisions are not visible to other agents, and the flag is off by
+    default so normal runs are unchanged.
     """
     world, eid = setup_world(seed=seed, experiment_id=experiment_id,
                              scenario="agent_world", agents=len(agents))
@@ -699,12 +710,32 @@ def run_world(
                 recent_events=list(round_events),
                 rng=world.rng,
             )
-            _apply(world, ag, ag.policy.decide(obs), rnd, round_events, flags)
+            action = ag.policy.decide(obs)
+            if trace_decisions:
+                # Private "why" record: what the agent saw and chose. Not added
+                # to round_events, so other agents cannot observe it.
+                world.emit(
+                    ag.actor, K_DECISION, round=rnd, action=action.kind,
+                    balance=obs.balance, banned=obs.banned,
+                    flags_against_me=obs.flags_against_me,
+                    listings_seen=len(obs.listings),
+                    saw=[e["kind"] for e in obs.recent_events],
+                    rationale=action.rationale,
+                )
+            _apply(world, ag, action, rnd, round_events, flags)
 
     experiment.finish_experiment(eid)
     return ScenarioResult(experiment_id=eid, seed=seed,
                           collector=world.collector, ledger=world.ledger,
                           world=world)
+
+
+def decision_trace(result: ScenarioResult) -> list[dict]:
+    """The chronological 'why' trace from a run done with trace_decisions=True:
+    per agent per round, what it saw and the action it chose."""
+    events = reversed(result.collector.query(limit=10_000))
+    return [{"actor": e.actor, **dict(e.payload)}
+            for e in events if e.kind == K_DECISION]
 
 
 def default_cast(policy_factory=None) -> list[Agent]:

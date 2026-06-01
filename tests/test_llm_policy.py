@@ -100,3 +100,21 @@ def test_llm_attacker_drives_a_real_world_run(monkeypatch):
     # The attack came from the LLM-driven attacker.
     assert any(e.kind == "attack.attempt" and e.actor == "attacker-1"
                for e in events)
+
+
+def test_llm_rationale_appears_in_decision_trace(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.agents import decision_trace
+    fake = _FakeClient({"kind": "attack",
+                        "params": {"technique": "phishing",
+                                   "target": "seller-1"},
+                        "rationale": "probe the seller for weakness"})
+
+    def factory(role, goal):
+        return (LLMPolicy(role, goal, client=fake) if role == "attacker"
+                else ScriptedPolicy())
+
+    result = run_world(default_cast(factory), rounds=2, trace_decisions=True)
+    attacker = [d for d in decision_trace(result)
+                if d["actor"] == "attacker-1"]
+    assert attacker and attacker[0]["rationale"] == "probe the seller for weakness"

@@ -23,8 +23,9 @@ from typing import Any
 
 from src.agent.observatory import Event
 from src.range.scenario import (
-    K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DEFENSE_FLAG, K_MODERATION,
-    K_ONLINE, K_POLICY_VIOLATION, K_SITE_HOST, K_SITE_VISIT, K_TRUST_UPDATE,
+    K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DECISION, K_DEFENSE_FLAG,
+    K_MODERATION, K_ONLINE, K_POLICY_VIOLATION, K_SITE_HOST, K_SITE_VISIT,
+    K_TRUST_UPDATE,
 )
 from src.utils import experiment
 
@@ -91,9 +92,17 @@ def build_report(experiment_id: str) -> dict[str, Any]:
     rec = experiment.load_record(experiment_id)
     events = load_events(experiment_id)
 
+    # Decision-trace events are surfaced in their own "why" section, not the
+    # main timeline, so the timeline stays a clean record of what happened.
     timeline = [
         {"ts": e.ts, "actor": e.actor, "kind": e.kind, "what": _summary(e)}
-        for e in events
+        for e in events if e.kind != K_DECISION
+    ]
+    decisions = [
+        {"round": e.payload.get("round"), "actor": e.actor,
+         "action": e.payload.get("action"),
+         "rationale": e.payload.get("rationale")}
+        for e in events if e.kind == K_DECISION
     ]
 
     agents: dict[str, dict[str, Any]] = {}
@@ -150,6 +159,7 @@ def build_report(experiment_id: str) -> dict[str, Any]:
         "reconstructed_from_storage": True,
         "event_count": len(events),
         "timeline": timeline,
+        "decisions": decisions,
         "agents": agents,
         "transactions": transactions,
         "trust": trust,
@@ -177,6 +187,13 @@ def render_text(report: dict[str, Any]) -> str:
     lines.append("\nTimeline")
     for row in report["timeline"]:
         lines.append(f"  {row['actor']:<16} {row['what']}")
+
+    if report.get("decisions"):
+        lines.append("\nDecisions (why)")
+        for d in report["decisions"]:
+            why = f"  ({d['rationale']})" if d.get("rationale") else ""
+            lines.append(f"  r{d['round']:<2} {d['actor']:<16} "
+                         f"chose {d['action']}{why}")
 
     lines.append("\nTransactions")
     for t in report["transactions"]:
