@@ -59,6 +59,15 @@ def test_cli_passes(capsys):
     assert "9/9" in out
 
 
+def test_threat_family_coverage():
+    result = suite.run_suite()
+    assert set(result["families"]) == {
+        "adaptive", "collusion", "honeypot", "prompt_injection", "scam"}
+    assert all(result["families"].values())          # every family defended
+    assert result["families_defended"] == 5
+    assert "Threat families defended: 5/5" in suite.render_markdown(result)
+
+
 def test_markdown_scorecard():
     md = suite.render_markdown(suite.run_suite())
     assert "# Obscura47 Range Security Scorecard" in md
