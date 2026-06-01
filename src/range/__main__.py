@@ -203,9 +203,20 @@ _DISPATCH = {
     "ablation": _ablation.main,
 }
 
-_USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"
-          "adaptive|agents|scenario|matrix|gate|suite|evidence|incidents|"
-          "trajectory} [args...]")
+_RUN_KINDS = ("readiness", "adaptive", "agents", "society")
+
+_USAGE = ("usage: python -m src.range {run|list|report|evaluate|compare|"
+          "dashboard|adaptive|agents|scenario|matrix|gate|suite|evidence|"
+          "incidents|trajectory|coverage|ablation} [args...]")
+
+
+def _list_main(argv: list[str]) -> int:
+    """Enumerate the runnable pieces of the range."""
+    print(f"run kinds:    {', '.join(_RUN_KINDS)}")
+    print(f"casts:        default, {', '.join(sorted(_agents.CASTS))}")
+    print(f"suite:        {', '.join(c.name for c in _suite.DEFAULT_SUITE)}")
+    print(f"subcommands:  run, list, {', '.join(sorted(_DISPATCH))}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -216,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd == "run":
         return _run_main(rest)
+    if cmd == "list":
+        return _list_main(rest)
     if cmd in _DISPATCH:
         return _DISPATCH[cmd](rest)
     print(f"[range] unknown subcommand {cmd!r}\n{_USAGE}", file=sys.stderr)

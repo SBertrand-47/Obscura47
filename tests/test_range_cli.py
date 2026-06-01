@@ -105,6 +105,14 @@ def test_unknown_subcommand(capsys):
     assert "unknown subcommand" in capsys.readouterr().err
 
 
+def test_list_command_enumerates_the_surface(capsys):
+    assert cli.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "run kinds:" in out and "casts:" in out and "subcommands:" in out
+    for token in ("society", "honeypot", "scam-escrow", "ablation"):
+        assert token in out
+
+
 def test_help_lists_subcommands(capsys):
     assert cli.main([]) == 0
     assert "run" in capsys.readouterr().out
