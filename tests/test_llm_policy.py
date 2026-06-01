@@ -17,26 +17,35 @@ class _ToolUseBlock:
     def __init__(self, data):
         self.type = "tool_use"
         self.input = data
+        self.id = "tu_test"
+
+
+class _Usage:
+    def __init__(self, input_tokens, output_tokens):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
 
 
 class _Resp:
-    def __init__(self, blocks):
+    def __init__(self, blocks, usage=None):
         self.content = blocks
+        self.usage = usage
 
 
 class _FakeMessages:
-    def __init__(self, action_input):
+    def __init__(self, action_input, usage=None):
         self._action = action_input
+        self._usage = usage
         self.calls = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return _Resp([_ToolUseBlock(dict(self._action))])
+        return _Resp([_ToolUseBlock(dict(self._action))], self._usage)
 
 
 class _FakeClient:
-    def __init__(self, action_input):
-        self.messages = _FakeMessages(action_input)
+    def __init__(self, action_input, usage=None):
+        self.messages = _FakeMessages(action_input, usage)
 
 
 def _obs(**kw):
@@ -69,6 +78,50 @@ def test_decide_call_shape_forces_the_tool_and_caches_system():
     assert call["system"][0]["cache_control"] == {"type": "ephemeral"}
     # The observation is passed as the user message.
     assert call["messages"][0]["role"] == "user"
+
+
+def test_conversation_memory_accumulates_and_threads_tool_results():
+    fake = _FakeClient({"kind": "idle"})
+    policy = LLMPolicy("attacker", "g", client=fake)
+    policy.decide(_obs(round=1))
+    policy.decide(_obs(round=2))
+    # The second call carries the prior conversation -- the agent has memory.
+    msgs = fake.messages.calls[1]["messages"]
+    assert len(msgs) == 3  # user(1), assistant(1), user(2)
+    assert msgs[0]["role"] == "user" and msgs[1]["role"] == "assistant"
+    # The new user turn closes the previous action's tool-use loop.
+    assert any(isinstance(c, dict) and c.get("type") == "tool_result"
+               for c in msgs[2]["content"])
+
+
+def test_token_usage_is_accumulated():
+    fake = _FakeClient({"kind": "idle"}, usage=_Usage(10, 5))
+    policy = LLMPolicy("attacker", "g", client=fake)
+    policy.decide(_obs(round=1))
+    policy.decide(_obs(round=2))
+    assert policy.usage == {"calls": 2, "input_tokens": 20, "output_tokens": 10}
+    assert policy.last_usage == {"input_tokens": 10, "output_tokens": 5}
+
+
+def test_total_llm_usage_sums_across_cast(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    fake = _FakeClient({"kind": "attack",
+                        "params": {"technique": "phishing",
+                                   "target": "seller-1"}},
+                       usage=_Usage(8, 4))
+
+    def factory(role, goal):
+        return (LLMPolicy(role, goal, client=fake) if role == "attacker"
+                else ScriptedPolicy())
+
+    cast = default_cast(factory)
+    run_world(cast, rounds=3)
+    from src.range.agents import total_llm_usage
+    usage = total_llm_usage(cast)
+    assert usage["llm_agents"] == 1
+    assert usage["calls"] == 3            # one LLM call per round
+    assert usage["input_tokens"] == 24    # 8 * 3
+    assert usage["output_tokens"] == 12   # 4 * 3
 
 
 def test_unknown_block_falls_back_to_idle():

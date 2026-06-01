@@ -56,3 +56,61 @@ def test_cli_writes_both_files(rng, tmp_path):
 
 def test_cli_unknown_experiment_exits_1(rng):
     assert evidence.main(["does-not-exist"]) == 1
+
+
+# A minimal anthropic-shaped double with token usage.
+class _Usage:
+    def __init__(self, i, o):
+        self.input_tokens = i
+        self.output_tokens = o
+
+
+class _Block:
+    def __init__(self, data):
+        self.type = "tool_use"
+        self.input = data
+        self.id = "tu"
+
+
+class _Resp:
+    def __init__(self, blocks, usage):
+        self.content = blocks
+        self.usage = usage
+
+
+class _Msgs:
+    def __init__(self, a, u):
+        self._a, self._u = a, u
+
+    def create(self, **kw):
+        return _Resp([_Block(dict(self._a))], self._u)
+
+
+class _Client:
+    def __init__(self, a, u):
+        self.messages = _Msgs(a, u)
+
+
+def test_evidence_includes_llm_cost(rng):
+    from src.range.agents import (
+        LLMPolicy, ScriptedPolicy, default_cast, run_world)
+    client = _Client({"kind": "attack",
+                      "params": {"technique": "phishing", "target": "seller-1"}},
+                     _Usage(9, 3))
+    cast = default_cast(lambda role, goal:
+                        LLMPolicy(role, goal, client=client)
+                        if role == "attacker" else ScriptedPolicy())
+    run_world(cast, rounds=2, experiment_id="ev-cost", trace_decisions=True)
+    bundle = evidence.build_evidence("ev-cost")
+    assert bundle["llm_cost"]["calls"] == 2     # one LLM call per round
+    assert bundle["llm_cost"]["input_tokens"] == 18
+    assert bundle["llm_cost"]["output_tokens"] == 6
+    assert "## Model cost" in evidence.render_markdown(bundle)
+
+
+def test_scripted_run_has_zero_llm_cost(rng):
+    run_scenario(seed=47, experiment_id="ev-scripted")
+    bundle = evidence.build_evidence("ev-scripted")
+    assert bundle["llm_cost"]["calls"] == 0
+    # No model-cost section when there was no model.
+    assert "## Model cost" not in evidence.render_markdown(bundle)
