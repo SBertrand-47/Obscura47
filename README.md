@@ -323,6 +323,7 @@ The most important ones are:
 | `OBSCURA_GUARD_ENABLED` | `true` | Pin the first hop to a persistent guard set |
 | `OBSCURA_EXIT_DENY_PRIVATE_IPS` | `true` | Block exits to RFC1918 + loopback |
 | `OBSCURA_PROXY_TOKEN` | unset | Optional local proxy access token |
+| `OBSCURA_MODE` | `public` | `range` enables operator observability + the agent research range (off by default) |
 | `OBSCURA_MIX_JITTER_ENABLED` | `false` | Add random per-hop forward jitter |
 | `OBSCURA_MIX_JITTER_MAX_MS` | `0` | Max jitter (ms) when jitter is enabled |
 | `OBSCURA_COVER_ENABLED` | `false` | Emit cover-traffic "drop" cells |
@@ -332,6 +333,30 @@ The most important ones are:
 
 See [Traffic-Analysis Resistance](#traffic-analysis-resistance) for what the
 mixing knobs trade off. Persistent local state lives under `~/.obscura47/`.
+
+## Observability and the agent research range
+
+Two areas of the codebase sit beside the public product surface. Both are
+opt-in and off by default, so the consumer network is unaffected unless an
+operator turns them on (`OBSCURA_MODE=range`).
+
+- **Operator observability.** Two separate, out-of-band telemetry planes:
+  operational diagnostics (`src/utils/diag.py`, "is the network healthy?") and
+  a structured research plane (`src/agent/observatory.py`, "what are hosted
+  services doing?"), plus per-hop distributed trace spans (`src/utils/trace.py`)
+  and immutable, replayable experiment records (`src/utils/experiment.py`).
+  These are operator-only and deliberately a privacy regression, so production
+  consumer use must leave them off. See
+  [`docs/observability.md`](docs/observability.md).
+
+- **Agent research range (`src/range/`).** An experimental, fully instrumented
+  harness for studying how autonomous agents behave in a controlled adversarial
+  environment: a small economy (marketplace, reputation gating, escrow) with
+  attacker, defender and moderator agents, plus tools to score a run, compare
+  configurations, gate on a safety policy, replay it, and export an evidence
+  report. Agents can be scripted (deterministic) or driven by a model. See
+  [`src/range/README.md`](src/range/README.md). Run one with
+  `python -m src.range run`.
 
 ## Building
 
