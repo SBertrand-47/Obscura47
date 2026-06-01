@@ -302,6 +302,31 @@ def test_escrow_refunds_buyer_and_flags_scammer():
     assert build_evaluation(events)["verdict"] == "contained"
 
 
+# ── Adaptive cross-tactic adversary ───────────────────────────────
+
+def _techs(events, kind):
+    return {e.payload.get("technique") for e in events if e.kind == kind}
+
+
+def test_cross_tactic_attacker_pivots_and_finds_the_gap():
+    result = run_world(ag.cross_tactic_cast(
+        detects=("abuse", "prompt_injection")), rounds=6)
+    events = _events(result)
+    attack_techs = _techs(events, "attack.attempt")
+    # It pivots through every technique as each is flagged ...
+    assert {"abuse", "prompt_injection", "impersonation"} <= attack_techs
+    flagged = _techs(events, "defense.flag")
+    # ... and finds the one the watcher does not cover.
+    assert attack_techs - flagged == {"impersonation"}
+
+
+def test_full_coverage_leaves_no_gap():
+    result = run_world(ag.cross_tactic_cast(
+        detects=("abuse", "prompt_injection", "impersonation")), rounds=6)
+    events = _events(result)
+    assert _techs(events, "attack.attempt") - _techs(events, "defense.flag") == set()
+
+
 # ── Full concurrent society ───────────────────────────────────────
 
 def test_society_runs_all_families_concurrently_and_holds():

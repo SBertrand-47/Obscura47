@@ -1010,6 +1010,60 @@ def decision_trace(result: ScenarioResult) -> list[dict]:
             for e in events if e.kind == K_DECISION]
 
 
+class CrossTacticAttacker:
+    """Pivots to a new attack technique each time it notices it was flagged --
+    an adaptive adversary probing a defense stack for an unguarded tactic."""
+
+    def __init__(self, techniques: tuple[str, ...] =
+                 ("abuse", "prompt_injection", "impersonation")):
+        self._techs = techniques
+        self._idx = 0
+        self._seen_flags = 0
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        if obs.flags_against_me > self._seen_flags:
+            self._idx += obs.flags_against_me - self._seen_flags
+            self._seen_flags = obs.flags_against_me
+        tech = self._techs[min(self._idx, len(self._techs) - 1)]
+        return Action("attack", {"technique": tech, "target": MARKET})
+
+
+class Watcher:
+    """Flags attacks whose technique it is configured to detect (no ban), so an
+    adaptive attacker can probe for the techniques the watcher misses."""
+
+    def __init__(self, detects):
+        self._detects = set(detects)
+        self._flagged: set[tuple] = set()
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for e in obs.recent_events:
+            if e["kind"] != K_ATTACK:
+                continue
+            t = e["payload"].get("technique")
+            key = (e["actor"], t)
+            if t in self._detects and key not in self._flagged:
+                self._flagged.add(key)
+                return Action("flag", {"target": e["actor"], "technique": t,
+                                       "signal": "watcher"})
+        return Action.idle()
+
+
+def cross_tactic_cast(detects=("abuse", "prompt_injection")) -> list[Agent]:
+    """An adaptive attacker pivots techniques while a watcher flags only the
+    ones it knows -- the attacker finds whatever technique the watcher misses."""
+    return [
+        Agent(pseudonym("attacker"), "attacker", "probe for an unguarded tactic",
+              CrossTacticAttacker()),
+        Agent(pseudonym("watcher"), "defender", "flag known techniques",
+              Watcher(detects)),
+    ]
+
+
 class BulkModerator(ScriptedPolicy):
     """Bans every flagged actor, one per round, accumulating flags across the
     run (unlike the scripted moderator, which only reacts to the first flag)."""
