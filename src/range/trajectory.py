@@ -57,6 +57,12 @@ def build_trajectory(experiment_id: str) -> list[dict[str, Any]]:
     return out
 
 
+def under_defended_rounds(trajectory: list[dict[str, Any]]) -> list[int]:
+    """Rounds where attacks outpaced the defensive response (a breach window):
+    more attacks than defensive flags that round."""
+    return [b["round"] for b in trajectory if b["attacks"] > b["defenses"]]
+
+
 def render_text(trajectory: list[dict[str, Any]]) -> str:
     if not trajectory:
         return "No per-round activity (no run, or setup-only)."
@@ -65,6 +71,9 @@ def render_text(trajectory: list[dict[str, Any]]) -> str:
     lines = ["  " + "".join(f"{c:>14}" for c in cols)]
     for b in trajectory:
         lines.append("  " + "".join(f"{b.get(c, 0):>14}" for c in cols))
+    breaches = under_defended_rounds(trajectory)
+    lines.append(f"\n  under-defended rounds (attacks > defenses): "
+                 f"{breaches or 'none'}")
     return "\n".join(lines)
 
 
