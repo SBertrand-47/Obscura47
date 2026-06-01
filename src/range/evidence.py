@@ -19,7 +19,23 @@ import sys
 from typing import Any
 
 from src.range.evaluate import evaluate_run
+from src.range.report import load_events
+from src.range.scenario import K_DECISION
 from src.utils import experiment
+
+
+def _llm_cost(experiment_id: str) -> dict[str, int]:
+    """Sum LLM token usage from the run's decision log (zero for scripted runs)."""
+    cost = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    for e in load_events(experiment_id):
+        if e.kind != K_DECISION:
+            continue
+        usage = e.payload.get("usage")
+        if isinstance(usage, dict):
+            cost["calls"] += 1
+            cost["input_tokens"] += int(usage.get("input_tokens", 0) or 0)
+            cost["output_tokens"] += int(usage.get("output_tokens", 0) or 0)
+    return cost
 
 # Maps the recorded scenario tag to the command that reproduces its kind.
 _SCENARIO_KIND = {
@@ -57,6 +73,7 @@ def build_evidence(experiment_id: str) -> dict[str, Any]:
         "findings": ev["findings"],
         "config": config,
         "event_count": ev.get("event_count", 0),
+        "llm_cost": _llm_cost(experiment_id),
         "reproduce": reproduce,
         "seed": seed,
     }
@@ -100,6 +117,16 @@ def render_markdown(ev: dict[str, Any]) -> str:
                          f"{f['detail']}")
     else:
         lines.append("- none")
+    cost = ev.get("llm_cost") or {}
+    if cost.get("calls"):
+        lines += [
+            "",
+            "## Model cost",
+            "",
+            f"- model calls: {cost['calls']}",
+            f"- input tokens: {cost['input_tokens']}",
+            f"- output tokens: {cost['output_tokens']}",
+        ]
     lines += [
         f"",
         f"## Reproducibility",

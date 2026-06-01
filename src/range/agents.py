@@ -209,6 +209,31 @@ class RobustBuyer(ScriptedPolicy):
     purchases. (ScriptedPolicy's buyer logic already does exactly this.)"""
 
 
+class ReputationGatedBuyer:
+    """Only transacts with sellers whose reputation clears a threshold.
+
+    Makes reputation consequential: an unproven or flagged seller gets no
+    business. It also gives reputation manipulation a concrete payoff -- a
+    collusion ring that inflates a seller's trust past the gate unlocks sales
+    the seller could not earn honestly.
+    """
+
+    def __init__(self, min_trust: int = 1):
+        self.min_trust = min_trust
+        self._done = False
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._done:
+            return Action.idle()
+        for lst in obs.listings:
+            if lst["by"] == obs.actor or obs.balance < lst["price"]:
+                continue
+            if obs.trust.get(lst["by"], 0) >= self.min_trust:
+                self._done = True
+                return Action("buy", {"listing_id": lst["listing_id"]})
+        return Action.idle()  # nothing trustworthy enough to buy
+
+
 class StochasticBuyer:
     """Follows injected instructions with probability ``p_follow`` (models a
     model that is fooled only some of the time). Uses the run's seeded RNG, so
@@ -497,6 +522,15 @@ class LLMPolicy:
             "text": _SYSTEM_TEMPLATE.format(role=role, goal=goal),
             "cache_control": {"type": "ephemeral"},  # cache the static prefix
         }]
+        # Conversation memory: the running message history makes the agent
+        # stateful, so it can adapt over the run rather than reacting one turn
+        # at a time. Each turn appends the observation (with a tool_result for
+        # the prior action) and the model's tool_use reply.
+        self._history: list[dict[str, Any]] = []
+        self._last_tool_use_id: str | None = None
+        # Token accounting, for run cost and the evidence package.
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.last_usage: dict[str, int] | None = None
 
     def _observation_text(self, obs: Observation) -> str:
         return json.dumps({
@@ -506,16 +540,42 @@ class LLMPolicy:
         }, default=str)
 
     def decide(self, obs: Observation) -> Action:
+        # Build this turn's user message: the result of the previous action
+        # (closing the tool-use loop) plus the new observation.
+        content: list[dict[str, Any]] = []
+        if self._last_tool_use_id is not None:
+            content.append({"type": "tool_result",
+                            "tool_use_id": self._last_tool_use_id,
+                            "content": "action applied"})
+        content.append({"type": "text", "text": self._observation_text(obs)})
+        self._history.append({"role": "user", "content": content})
+
         resp = self._client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             system=self._system,
             tools=[_ACTION_TOOL],
             tool_choice={"type": "tool", "name": "take_action"},
-            messages=[{"role": "user", "content": self._observation_text(obs)}],
+            messages=list(self._history),
         )
+        self._history.append({"role": "assistant", "content": resp.content})
+
+        # Record token usage for cost accounting.
+        self.usage["calls"] += 1
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            it = int(getattr(usage, "input_tokens", 0) or 0)
+            ot = int(getattr(usage, "output_tokens", 0) or 0)
+            self.last_usage = {"input_tokens": it, "output_tokens": ot}
+            self.usage["input_tokens"] += it
+            self.usage["output_tokens"] += ot
+        else:
+            self.last_usage = None
+
+        self._last_tool_use_id = None
         for block in resp.content:
             if getattr(block, "type", None) == "tool_use":
+                self._last_tool_use_id = getattr(block, "id", None)
                 data = block.input or {}
                 rationale = data.get("rationale")
                 return Action(str(data.get("kind", "idle")),
@@ -721,6 +781,7 @@ def run_world(
                     listings_seen=len(obs.listings),
                     saw=[e["kind"] for e in obs.recent_events],
                     rationale=action.rationale,
+                    usage=getattr(ag.policy, "last_usage", None),
                 )
             _apply(world, ag, action, rnd, round_events, flags)
 
@@ -728,6 +789,20 @@ def run_world(
     return ScenarioResult(experiment_id=eid, seed=seed,
                           collector=world.collector, ledger=world.ledger,
                           world=world)
+
+
+def total_llm_usage(agents: list[Agent]) -> dict[str, int]:
+    """Sum token usage across the LLM-driven agents in a cast (run cost)."""
+    total = {"llm_agents": 0, "calls": 0, "input_tokens": 0,
+             "output_tokens": 0}
+    for ag in agents:
+        u = getattr(ag.policy, "usage", None)
+        if isinstance(u, dict):
+            total["llm_agents"] += 1
+            total["calls"] += u.get("calls", 0)
+            total["input_tokens"] += u.get("input_tokens", 0)
+            total["output_tokens"] += u.get("output_tokens", 0)
+    return total
 
 
 def decision_trace(result: ScenarioResult) -> list[dict]:

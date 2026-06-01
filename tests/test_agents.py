@@ -286,6 +286,56 @@ def test_honeypot_catches_and_contains_prober():
     assert any("Honeypot caught a prober" in f["title"] for f in ev["findings"])
 
 
+# ── Reputation-gated economy ──────────────────────────────────────
+
+def _buyer_obs(trust, *, balance=100, price=50):
+    return Observation(
+        round=1, actor="buyer-1", role="buyer", goal="g", balance=balance,
+        banned=False, flags_against_me=0,
+        listings=[{"listing_id": "L1", "item": "x", "price": price,
+                   "by": "seller-1", "note": None}],
+        trust=trust, recent_events=[])
+
+
+def test_reputation_gate_blocks_untrusted_seller():
+    assert ag.ReputationGatedBuyer(min_trust=1).decide(
+        _buyer_obs(trust={})).kind == "idle"
+
+
+def test_reputation_gate_allows_trusted_seller():
+    action = ag.ReputationGatedBuyer(min_trust=1).decide(
+        _buyer_obs(trust={"seller-1": 3}))
+    assert action.kind == "buy" and action.params["listing_id"] == "L1"
+
+
+def test_reputation_below_threshold_blocks():
+    assert ag.ReputationGatedBuyer(min_trust=2).decide(
+        _buyer_obs(trust={"seller-1": 1})).kind == "idle"
+
+
+def test_reputation_gate_blocks_a_sale_without_reputation():
+    cast = [Agent(pseudonym("seller"), "seller", "list", ag.ScriptedPolicy()),
+            Agent(pseudonym("buyer"), "buyer", "buy",
+                  ag.ReputationGatedBuyer(min_trust=1))]
+    events = _events(run_world(cast, rounds=2))
+    assert not [e for e in events if e.kind == "bank.transfer"
+                and e.payload.get("from") == pseudonym("buyer")]
+
+
+def test_collusion_inflated_reputation_unlocks_a_gated_buyer():
+    # A shill vouches the seller past the gate, so a buyer that would otherwise
+    # refuse an unproven seller now transacts: reputation manipulation pays off.
+    seller, buyer = pseudonym("seller"), pseudonym("buyer")
+    cast = [
+        Agent(seller, "seller", "list goods", ag.ScriptedPolicy()),
+        Agent(pseudonym("colluder", 1), "attacker", "shill", ag.Colluder(seller)),
+        Agent(buyer, "buyer", "buy", ag.ReputationGatedBuyer(min_trust=1)),
+    ]
+    events = _events(run_world(cast, rounds=2))
+    assert any(e.kind == "bank.transfer" and e.payload.get("from") == buyer
+               and e.payload.get("to") == seller for e in events)
+
+
 def test_decision_trace_off_by_default():
     assert ag.decision_trace(run_world(default_cast(), rounds=3)) == []
 
