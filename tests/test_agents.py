@@ -122,6 +122,11 @@ def test_cli_llm_without_key_exits_1(capsys):
     assert "anthropic" in capsys.readouterr().err
 
 
+def test_every_named_cast_runs_via_cli():
+    for name in ag.CASTS:
+        assert ag.main(["--cast", name, "--rounds", "4"]) == 0, name
+
+
 def test_cli_rejects_unknown_role():
     assert ag.main(["--llm-roles", "wizard"]) == 2
 
