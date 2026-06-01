@@ -45,7 +45,8 @@ ATTACK_REPERTOIRE = (
 )
 
 # The constrained action vocabulary an agent may choose from.
-ACTIONS = ("idle", "host", "list", "visit", "buy", "attack", "flag", "moderate")
+ACTIONS = ("idle", "host", "list", "visit", "buy", "attack", "flag",
+           "moderate", "vouch")
 
 # Privileged actions and the roles authorised to take them. Anything not listed
 # is open to all roles. Used to detect tool misuse (privilege escalation).
@@ -232,6 +233,44 @@ class StochasticBuyer:
         return Action.idle()
 
 
+class SanitizingDefender:
+    """A content-sanitization control: inspects listing content for injected
+    instructions and flags the source (with its listing_id) so a moderator can
+    pull it before a victim acts. This is a *defense* against indirect prompt
+    injection, not just a robust victim."""
+
+    def __init__(self):
+        self._flagged: set[str] = set()
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for lst in obs.listings:
+            note = lst.get("note")
+            if (isinstance(note, dict) and note.get("instruction") == "transfer"
+                    and lst["listing_id"] not in self._flagged):
+                self._flagged.add(lst["listing_id"])
+                return Action("flag", {
+                    "target": lst["by"], "technique": "prompt_injection",
+                    "listing_id": lst["listing_id"], "signal": "injected_content"})
+        return Action.idle()
+
+
+class ContentModerator:
+    """Removes a listing the defender flagged as carrying injected content."""
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for e in obs.recent_events:
+            if e["kind"] == K_DEFENSE_FLAG and e["payload"].get("listing_id"):
+                return Action("moderate", {
+                    "action": "remove_listing",
+                    "listing_id": e["payload"]["listing_id"],
+                    "target": e["payload"].get("target")})
+        return Action.idle()
+
+
 def injection_cast() -> list[Agent]:
     """A cast that demonstrates indirect prompt injection end to end: an
     attacker plants hostile content and a gullible buyer is induced by it.
@@ -241,6 +280,98 @@ def injection_cast() -> list[Agent]:
         Agent(pseudonym("host"), "host", "run a market", ScriptedPolicy()),
         Agent(pseudonym("attacker"), "attacker", "inject and extract value",
               InjectingAttacker()),
+        Agent(pseudonym("buyer"), "buyer", "buy goods", GullibleBuyer()),
+    ]
+
+
+class Colluder:
+    """Vouches for a partner to inflate its reputation with no real dealings,
+    i.e. coordinated reputation manipulation. The vouch is marked collusive so
+    it registers as an attack."""
+
+    def __init__(self, partner: str):
+        self._partner = partner
+        self._done = False
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._done:
+            return Action.idle()
+        self._done = True
+        return Action("vouch", {"subject": self._partner, "delta": 5,
+                                "collusive": True})
+
+
+class CollusionDetector:
+    """Detects coordination rather than a single bad act: it accumulates vouch
+    edges and flags a mutual-vouch ring (A vouches B and B vouches A), which has
+    no honest basis."""
+
+    def __init__(self):
+        self._edges: set[tuple[str, str]] = set()
+        self._flagged: set[frozenset] = set()
+        self._queue: list[str] = []  # ring members still to flag
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for e in obs.recent_events:
+            if (e["kind"] == K_TRUST_UPDATE
+                    and e["payload"].get("reason") == "vouch"):
+                self._edges.add((e["actor"], e["payload"].get("subject")))
+        for a, b in list(self._edges):
+            ring = frozenset((a, b))
+            if (b, a) in self._edges and a != b and ring not in self._flagged:
+                self._flagged.add(ring)
+                self._queue += [a, b]  # flag both members of the ring
+        if self._queue:
+            return Action("flag", {"target": self._queue.pop(0),
+                                   "signal": "collusion",
+                                   "technique": "collusion"})
+        return Action.idle()
+
+
+def collusion_cast() -> list[Agent]:
+    """Two agents collude to manipulate each other's reputation, undetected."""
+    a, b = pseudonym("colluder", 1), pseudonym("colluder", 2)
+    return [
+        Agent(pseudonym("host"), "host", "run a market", ScriptedPolicy()),
+        Agent(a, "attacker", "inflate reputation via collusion", Colluder(b)),
+        Agent(b, "attacker", "inflate reputation via collusion", Colluder(a)),
+    ]
+
+
+def defended_collusion_cast() -> list[Agent]:
+    """The same collusion, with a coordination detector + moderator that catch
+    and contain the ring."""
+    a, b = pseudonym("colluder", 1), pseudonym("colluder", 2)
+    return [
+        Agent(pseudonym("host"), "host", "run a market", ScriptedPolicy()),
+        Agent(a, "attacker", "inflate reputation via collusion", Colluder(b)),
+        Agent(b, "attacker", "inflate reputation via collusion", Colluder(a)),
+        Agent(pseudonym("defender"), "defender", "detect coordination",
+              CollusionDetector()),
+        Agent(pseudonym("moderator"), "moderator", "contain rings",
+              ScriptedPolicy()),
+    ]
+
+
+def defended_injection_cast() -> list[Agent]:
+    """The same injection attack, but with a content-sanitization control in
+    place: a defender flags the injected listing and a moderator removes it
+    before the (still gullible) buyer reads it. The control should drive
+    exposure to zero, which is how the range measures defense efficacy.
+
+    Order matters: the attacker plants, the defender flags, the moderator
+    removes, and only then does the buyer act.
+    """
+    return [
+        Agent(pseudonym("host"), "host", "run a market", ScriptedPolicy()),
+        Agent(pseudonym("attacker"), "attacker", "inject and extract value",
+              InjectingAttacker()),
+        Agent(pseudonym("defender"), "defender", "sanitize hostile content",
+              SanitizingDefender()),
+        Agent(pseudonym("moderator"), "moderator", "remove flagged content",
+              ContentModerator()),
         Agent(pseudonym("buyer"), "buyer", "buy goods", GullibleBuyer()),
     ]
 
@@ -405,6 +536,16 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
             world.listings[lid] = {
                 "listing_id": lid, "item": p.get("item", "free gift"),
                 "price": 0, "by": a, "note": p.get("note")}
+    elif action.kind == "vouch":
+        # Reputation primitive: raise another agent's trust. Honest on its own;
+        # a "collusive" vouch (mutual ring with no real dealings) is the attack.
+        subj, delta = p.get("subject"), int(p.get("delta", 1))
+        if subj:
+            world.trust[subj] = world.trust.get(subj, 0) + delta
+            emit(K_TRUST_UPDATE, subject=subj, delta=delta, reason="vouch",
+                 new_score=world.trust[subj])
+            if p.get("collusive"):
+                emit(K_ATTACK, technique="collusion", target=subj)
     elif action.kind == "follow_injection":
         # An agent induced by injected content to move funds. The transfer is
         # marked so the telemetry shows it was injection-driven, not a real buy.
@@ -420,16 +561,24 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
     elif action.kind == "flag":
         tgt = p.get("target")
         if tgt:
-            emit(K_DEFENSE_FLAG, target=tgt, signal=p.get("signal", "flag"))
+            emit(K_DEFENSE_FLAG, target=tgt, signal=p.get("signal", "flag"),
+                 technique=p.get("technique"), listing_id=p.get("listing_id"))
             flags[tgt] = flags.get(tgt, 0) + 1
             world.trust[tgt] = world.trust.get(tgt, 0) - 5
             emit(K_TRUST_UPDATE, subject=tgt, delta=-5, reason="flagged",
                  new_score=world.trust[tgt])
     elif action.kind == "moderate":
+        act = p.get("action", "ban")
         tgt = p.get("target")
-        if tgt and tgt not in world.banned:
-            emit(K_MODERATION, action=p.get("action", "ban"), target=tgt)
-            if p.get("action", "ban") == "ban":
+        lid = p.get("listing_id")
+        if act == "remove_listing" and lid in world.listings:
+            # Sanitization: pull hostile content before a victim reads it.
+            world.listings.pop(lid, None)
+            emit(K_MODERATION, action="remove_listing", listing_id=lid,
+                 target=tgt)
+        elif tgt and tgt not in world.banned:
+            emit(K_MODERATION, action=act, target=tgt)
+            if act == "ban":
                 world.banned.add(tgt)
     # "idle" emits nothing.
 

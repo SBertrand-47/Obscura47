@@ -49,6 +49,7 @@ python -m src.range dashboard <experiment_id> -o run.html
 python -m src.range compare                    # rank configs by residual risk
 python -m src.range gate <experiment_id>       # CI gate: exit 1 on a safety regression
 python -m src.range suite                       # behavioral battery vs expected outcomes
+python -m src.range evidence <id> --md report.md --json report.json
 ```
 
 ## The loop
@@ -82,6 +83,7 @@ runs flow through identically.
 | `matrix.py` | risk surface across defender model x attacker repertoire |
 | `gate.py` | pass/fail safety gate against a policy; exits nonzero on regression (CI) |
 | `suite.py` | behavioral regression battery: scenarios vs expected gate outcomes |
+| `evidence.py` | portable evidence package (markdown + JSON) with reproducibility provenance |
 | `dashboard.py` | renders a run to a single static HTML page |
 | `__main__.py` | the unified `python -m src.range` entry point |
 

@@ -26,6 +26,7 @@ from src.range import agents as _agents
 from src.range import compare as _compare
 from src.range import dashboard as _dashboard
 from src.range import evaluate as _evaluate
+from src.range import evidence as _evidence
 from src.range import gate as _gate
 from src.range import matrix as _matrix
 from src.range import report as _report
@@ -146,10 +147,11 @@ _DISPATCH = {
     "matrix": _matrix.main,
     "gate": _gate.main,
     "suite": _suite.main,
+    "evidence": _evidence.main,
 }
 
 _USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"
-          "adaptive|agents|scenario|matrix|gate|suite} [args...]")
+          "adaptive|agents|scenario|matrix|gate|suite|evidence} [args...]")
 
 
 def main(argv: list[str] | None = None) -> int:
