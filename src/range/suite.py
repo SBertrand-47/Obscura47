@@ -29,7 +29,7 @@ from src.range.adaptive import DEFENDERS, run_adaptive
 from src.range.agents import (
     collusion_cast, defended_collusion_cast, defended_injection_cast,
     forum_moderation_cast, honeypot_cast, injection_cast, run_world,
-    scam_escrow_cast,
+    scam_escrow_cast, society_cast,
 )
 from src.range.evaluate import build_evaluation
 from src.range.gate import check_gate
@@ -76,6 +76,9 @@ DEFAULT_SUITE: list[SuiteCase] = [
     SuiteCase("forum-moderation",
               lambda: run_world(forum_moderation_cast(), rounds=2),
               expect_pass=True, family="abuse"),
+    SuiteCase("society",
+              lambda: run_world(society_cast(), rounds=8),
+              expect_pass=True, family="integration"),
 ]
 
 
@@ -107,7 +110,7 @@ def run_suite(suite: list[SuiteCase] | None = None,
     # the gate actually does (a defended demonstration that holds).
     families: dict[str, bool] = {}
     for c in cases:
-        if c["family"] == "baseline":
+        if c["family"] in ("baseline", "integration"):
             continue
         defended = c["gate_passed"] if c["expected_pass"] else True
         families[c["family"]] = families.get(c["family"], True) and defended

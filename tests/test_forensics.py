@@ -111,7 +111,7 @@ def test_campaign_portfolio(monkeypatch):
     assert agg["suspects"] >= 4
     assert agg["total_funds_extracted"] == 50      # the undefended injection
     assert 0.0 <= agg["containment_rate"] <= 1.0
-    assert len(result["scenarios"]) == 10
+    assert len(result["scenarios"]) == 11
 
 
 def test_cli_campaign_and_missing_arg(capsys, monkeypatch):
