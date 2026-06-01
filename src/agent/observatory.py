@@ -59,6 +59,7 @@ import queue
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Protocol
@@ -66,6 +67,8 @@ from typing import Any, Callable, Iterable, Protocol
 from src.agent.app import AgentApp, Request, Response
 from src.agent.runtime import AgentRuntime
 from src.agent.tools import ParamSpec, ToolError, ToolRegistry, Topic
+from src.utils import config
+from src.utils import experiment as _experiment
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -118,6 +121,7 @@ class Event:
     session_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     submitted_by: str | None = None
+    experiment_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -131,6 +135,8 @@ class Event:
             out["session_id"] = self.session_id
         if self.submitted_by is not None:
             out["submitted_by"] = self.submitted_by
+        if self.experiment_id is not None:
+            out["experiment_id"] = self.experiment_id
         return out
 
     @classmethod
@@ -157,6 +163,9 @@ class Event:
         submitted_by = raw.get("submitted_by")
         if submitted_by is not None and not isinstance(submitted_by, str):
             submitted_by = str(submitted_by)
+        experiment_id = raw.get("experiment_id")
+        if experiment_id is not None and not isinstance(experiment_id, str):
+            experiment_id = str(experiment_id)
         return cls(
             event_id=event_id,
             ts=ts,
@@ -165,6 +174,7 @@ class Event:
             session_id=session_id,
             payload=_sanitise_payload(payload),
             submitted_by=submitted_by,
+            experiment_id=experiment_id,
         )
 
 
@@ -285,34 +295,25 @@ class MultiSink:
                 pass
 
 
-class RemoteSink:
-    """Pushes events to a remote :func:`build_observatory_app` collector.
+class _BufferedSink:
+    """Shared egress machinery for sinks that ship events off-process.
 
-    Events are buffered on a bounded queue and drained by a worker
-    thread that batches them through the ``ingest`` tool. Backpressure
-    is intentional: when the queue is full, oldest events are dropped
-    so the producer cannot stall on a slow collector. ``close`` flushes
-    pending events with a configurable timeout.
+    Events land on a bounded queue and are drained by a worker thread that
+    batches them. Backpressure is intentional: when the queue is full the
+    oldest event is dropped so the producer never stalls on a slow consumer.
+    ``close`` flushes pending events with a configurable timeout. Subclasses
+    implement :meth:`_send` to do the actual delivery.
     """
 
     def __init__(
         self,
-        addr: str,
         *,
-        agent: Any | None = None,
-        port: int = 80,
-        source: str | None = None,
+        worker_name: str,
         batch_size: int = 32,
         flush_interval: float = 1.0,
         max_queue: int = 4096,
         on_drop: Callable[[int], None] | None = None,
     ):
-        from src.agent.client import AgentClient
-
-        self.addr = addr
-        self.port = int(port)
-        self.source = source
-        self.agent = agent or AgentClient()
         self._batch_size = max(1, int(batch_size))
         self._flush_interval = max(0.05, float(flush_interval))
         self._queue: queue.Queue[Event] = queue.Queue(maxsize=max(1, int(max_queue)))
@@ -320,7 +321,7 @@ class RemoteSink:
         self._on_drop = on_drop
         self._dropped = 0
         self._worker = threading.Thread(
-            target=self._run, name=f"observatory-remote-{addr}", daemon=True,
+            target=self._run, name=worker_name, daemon=True,
         )
         self._worker.start()
 
@@ -375,6 +376,45 @@ class RemoteSink:
         if leftovers:
             self._send(leftovers)
 
+    def _send(self, batch: list[Event]) -> None:  # pragma: no cover - abstract
+        raise NotImplementedError
+
+
+class RemoteSink(_BufferedSink):
+    """Pushes events to a remote :func:`build_observatory_app` collector via
+    the ``ingest`` tool, i.e. *over the overlay*.
+
+    This is the right sink for the public observatory product, where anyone
+    can run a collector reachable at a `.obscura` address. It is the WRONG sink
+    in range mode: the overlay is under study, so research telemetry must not
+    ride the paths being studied. :func:`build_observer_from_flags` refuses it
+    in range mode and steers callers to :class:`HttpSink` instead.
+    """
+
+    def __init__(
+        self,
+        addr: str,
+        *,
+        agent: Any | None = None,
+        port: int = 80,
+        source: str | None = None,
+        batch_size: int = 32,
+        flush_interval: float = 1.0,
+        max_queue: int = 4096,
+        on_drop: Callable[[int], None] | None = None,
+    ):
+        from src.agent.client import AgentClient
+
+        self.addr = addr
+        self.port = int(port)
+        self.source = source
+        self.agent = agent or AgentClient()
+        super().__init__(
+            worker_name=f"observatory-remote-{addr}",
+            batch_size=batch_size, flush_interval=flush_interval,
+            max_queue=max_queue, on_drop=on_drop,
+        )
+
     def _send(self, batch: list[Event]) -> None:
         args: dict[str, Any] = {
             "events": [e.to_dict() for e in batch],
@@ -387,6 +427,60 @@ class RemoteSink:
             log.warning(
                 "observatory: ingest to %s:%s failed: %s; %d events lost",
                 self.addr, self.port, e, len(batch),
+            )
+
+
+class HttpSink(_BufferedSink):
+    """Out-of-band research-plane egress: POSTs event batches directly to an
+    operator collector over HTTP, bypassing the overlay entirely.
+
+    This is the range-mode path. Because the overlay is under study, telemetry
+    must not travel the paths being studied (an on-path agent could observe or
+    game it). It mirrors how :mod:`src.utils.diag` ships ops events to the
+    registry ``/diag`` endpoint: a plain authenticated POST on a side channel
+    the studied agents never see.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        token: str | None = None,
+        source: str | None = None,
+        timeout: float = 4.0,
+        batch_size: int = 32,
+        flush_interval: float = 1.0,
+        max_queue: int = 4096,
+        on_drop: Callable[[int], None] | None = None,
+    ):
+        self.url = url
+        self.token = token
+        self.source = source
+        self.timeout = float(timeout)
+        super().__init__(
+            worker_name="observatory-http",
+            batch_size=batch_size, flush_interval=flush_interval,
+            max_queue=max_queue, on_drop=on_drop,
+        )
+
+    def _send(self, batch: list[Event]) -> None:
+        body = json.dumps({
+            "events": [e.to_dict() for e in batch],
+            "source": self.source,
+        }).encode()
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["X-Obscura-Research-Token"] = self.token
+        req = urllib.request.Request(
+            self.url, data=body, headers=headers, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp.read()  # drain
+        except Exception as e:
+            log.warning(
+                "observatory: research egress to %s failed: %s; %d events lost",
+                self.url, e, len(batch),
             )
 
 
@@ -412,6 +506,7 @@ class Observer:
         kind: str,
         *,
         session_id: str | None = None,
+        experiment_id: str | None = None,
         **payload: Any,
     ) -> Event:
         if not kind:
@@ -423,6 +518,9 @@ class Observer:
             kind=kind,
             session_id=session_id,
             payload=_sanitise_payload(payload),
+            # Stamp the active run so every research-plane event is
+            # attributable to an experiment. None in public mode.
+            experiment_id=experiment_id or _experiment.current_experiment_id(),
         )
         try:
             self.sink.write(event)
@@ -485,6 +583,7 @@ class ObservatoryState:
         actor: str | None = None,
         submitted_by: str | None = None,
         session_id: str | None = None,
+        experiment_id: str | None = None,
         since: float | None = None,
         until: float | None = None,
         limit: int = QUERY_DEFAULT_LIMIT,
@@ -503,6 +602,8 @@ class ObservatoryState:
             if submitted_by and e.submitted_by != submitted_by:
                 continue
             if session_id and e.session_id != session_id:
+                continue
+            if experiment_id and e.experiment_id != experiment_id:
                 continue
             if since is not None and e.ts < float(since):
                 continue
@@ -619,6 +720,7 @@ def build_observatory_app(
                 session_id=event.session_id,
                 payload=event.payload,
                 submitted_by=submitted_by,
+                experiment_id=event.experiment_id,
             )
             state.append(event)
             _publish(event)
@@ -633,6 +735,8 @@ def build_observatory_app(
             ParamSpec("actor", type="string", required=False),
             ParamSpec("submitted_by", type="string", required=False),
             ParamSpec("session_id", type="string", required=False),
+            ParamSpec("experiment_id", type="string", required=False,
+                      description="filter to one experiment run"),
             ParamSpec("since", type="float", required=False,
                       description="lower-bound unix timestamp"),
             ParamSpec("until", type="float", required=False,
@@ -648,6 +752,7 @@ def build_observatory_app(
             actor=args.get("actor"),
             submitted_by=args.get("submitted_by"),
             session_id=args.get("session_id"),
+            experiment_id=args.get("experiment_id"),
             since=args.get("since"),
             until=args.get("until"),
             limit=args.get("limit") or QUERY_DEFAULT_LIMIT,
@@ -678,20 +783,45 @@ def build_observer_from_flags(
     jsonl_path: str | None = None,
     remote_addr: str | None = None,
     remote_port: int = 80,
+    http_collector_url: str | None = None,
+    http_collector_token: str | None = None,
 ) -> Observer | None:
     """Construct an :class:`Observer` from a small set of CLI flags.
 
-    Returns ``None`` when no sink is configured. When both flags are
-    supplied a :class:`MultiSink` is built so events land locally
-    *and* on a remote collector - this is the typical operator setup
-    where the JSONL file is the durable record and the remote
-    collector is a live dashboard.
+    Returns ``None`` when no sink is configured. Multiple sinks are combined
+    into a :class:`MultiSink` so events can land locally (durable JSONL record)
+    *and* on a collector (live dashboard).
+
+    Egress choice respects the deployment mode:
+
+    * ``remote_addr`` builds a :class:`RemoteSink` that ships over the overlay.
+      In **range mode** this is refused, because research telemetry must not
+      travel the paths under study; set an out-of-band collector instead.
+    * ``http_collector_url`` (defaulting to ``OBSCURA_RESEARCH_COLLECTOR_URL``)
+      builds an out-of-band :class:`HttpSink`. This is the range-mode path.
     """
+    if http_collector_url is None:
+        http_collector_url = config.RESEARCH_COLLECTOR_URL or None
+    if http_collector_token is None:
+        http_collector_token = config.RESEARCH_COLLECTOR_TOKEN or None
+
     sinks: list[EventSink] = []
     if jsonl_path:
         sinks.append(JsonlSink(jsonl_path))
+    if http_collector_url:
+        sinks.append(HttpSink(
+            http_collector_url, token=http_collector_token, source=actor,
+        ))
     if remote_addr:
-        sinks.append(RemoteSink(remote_addr, port=remote_port, source=actor))
+        if config.IS_RANGE_MODE:
+            log.warning(
+                "observatory: range mode refuses overlay RemoteSink to %s; "
+                "research telemetry must go out-of-band. Set "
+                "OBSCURA_RESEARCH_COLLECTOR_URL.",
+                remote_addr,
+            )
+        else:
+            sinks.append(RemoteSink(remote_addr, port=remote_port, source=actor))
     if not sinks:
         return None
     sink: EventSink = sinks[0] if len(sinks) == 1 else MultiSink(sinks)

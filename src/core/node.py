@@ -11,6 +11,7 @@ from src.core.internet_discovery import start_heartbeat, start_kill_switch_monit
 from src.core.ws_transport import WSServer, WSClient
 from src.core.peer_health import start_self_ws_probe
 from src.utils import diag
+from src.utils import trace
 from src.utils.logger import get_logger
 from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
@@ -253,6 +254,15 @@ class ObscuraNode:
             if route:
                 next_hop = route.pop(0)
                 log.info("Forwarding tunnel frame (%s) to %s:%s | request_id=%s", layer['type'], next_hop['host'], next_hop['port'], req_id)
+                # Range-mode trace span; rewrites the in-band block in place so
+                # the next hop's parent points at us. No-op on the public net.
+                new_block = trace.relay_span(
+                    layer.get(trace.TRACE_KEY), request_id=req_id,
+                    frame_type=layer['type'],
+                    next_host=next_hop.get('host'), next_port=next_hop.get('port'),
+                )
+                if new_block is not None:
+                    layer[trace.TRACE_KEY] = new_block
                 # Mix-schedule with the request_id as stream key so data
                 # chunks of one tunnel keep their order while different
                 # tunnels are free to be reordered.
@@ -284,6 +294,12 @@ class ObscuraNode:
 
         if route:
             next_hop = route.pop(0)
+            new_block = trace.relay_span(
+                layer.get(trace.TRACE_KEY), request_id=req_id, frame_type=typ,
+                next_host=next_hop.get('host'), next_port=next_hop.get('port'),
+            )
+            if new_block is not None:
+                layer[trace.TRACE_KEY] = new_block
             mixing.submit_forward(
                 lambda nh=next_hop, ly=layer: self.router.forward_message(nh, ly),
                 stream_key=req_id or None,
@@ -389,6 +405,10 @@ class ObscuraNode:
             self._hs_pubs[client_req] = client_pub
         log.info("RV established: cookie=%s… client_req=%s",
                  cookie[:8], client_req)
+        # Range-mode trace: leaf span closing the HS dial at the rendezvous
+        # point (parallels the exit terminal span for tunnels).
+        trace.terminal_span(layer.get(trace.TRACE_KEY), request_id=client_req,
+                            role="rendezvous")
 
     def _rv_terminal_join(self, layer: dict):
         """Rendezvous point: match the cookie and splice the two circuits."""

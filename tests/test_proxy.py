@@ -44,7 +44,7 @@ def test_handle_connect_falls_back_to_direct_exit_when_no_relays(monkeypatch):
 
     received_route = {"value": None}
 
-    def _capture_start(destination, peers, request_id, host, port, return_path, route=None):
+    def _capture_start(destination, peers, request_id, host, port, return_path, route=None, session_id=None):
         received_route["value"] = route
         return None  # simulate tunnel setup failure to short-circuit the test
 

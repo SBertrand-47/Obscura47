@@ -28,12 +28,14 @@ from src.agent.observatory import (
     QUERY_DEFAULT_LIMIT,
     QUERY_MAX_LIMIT,
     Event,
+    HttpSink,
     JsonlSink,
     MemorySink,
     MultiSink,
     NullSink,
     ObservatoryState,
     Observer,
+    RemoteSink,
     build_observatory_app,
     build_observer_from_flags,
     new_session_id,
@@ -708,3 +710,75 @@ def test_build_observer_from_flags_remote_only(monkeypatch):
     """
     obs = build_observer_from_flags(actor="x", remote_addr="some.obscura")
     assert obs is not None
+    assert isinstance(obs.sink, RemoteSink)
+
+
+# ---------------------------------------------------------------------------
+# Range-mode egress: research telemetry must go out-of-band, never the overlay
+# ---------------------------------------------------------------------------
+
+
+def test_range_mode_refuses_overlay_remote_sink(monkeypatch):
+    """In range mode an overlay-only RemoteSink config yields no observer:
+    research telemetry must not ride the paths under study."""
+    from src.utils import config
+    monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+    monkeypatch.setattr(config, "RESEARCH_COLLECTOR_URL", "")
+    monkeypatch.setattr(config, "RESEARCH_COLLECTOR_TOKEN", "")
+    assert build_observer_from_flags(actor="x", remote_addr="leak.obscura") is None
+
+
+def test_range_mode_uses_out_of_band_http_sink(monkeypatch):
+    """With a collector URL set, range mode builds an out-of-band HttpSink and
+    still refuses the overlay RemoteSink even when both are supplied."""
+    from src.utils import config
+    monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+    monkeypatch.setattr(config, "RESEARCH_COLLECTOR_URL", "http://127.0.0.1:9/x")
+    monkeypatch.setattr(config, "RESEARCH_COLLECTOR_TOKEN", "tok")
+    obs = build_observer_from_flags(actor="a", remote_addr="leak.obscura")
+    assert obs is not None
+    assert isinstance(obs.sink, HttpSink)
+    obs.close()
+
+
+def test_http_sink_posts_out_of_band(monkeypatch):
+    """HttpSink delivers batched events via a direct HTTP POST (no overlay),
+    with the auth token header and source label."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received: list[tuple[str | None, dict]] = []
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            received.append((
+                self.headers.get("X-Obscura-Research-Token"),
+                json.loads(self.rfile.read(n)),
+            ))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        sink = HttpSink(f"http://127.0.0.1:{port}/ingest", token="sekret",
+                        source="agent-7", flush_interval=0.05)
+        sink.write(Event(event_id="e1", ts=time.time(), actor="agent-7",
+                         kind=KIND_TX_COMMIT, payload={"amount": 42}))
+        sink.close(timeout=3.0)
+        deadline = time.time() + 3.0
+        while not received and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        srv.shutdown()
+
+    assert received, "collector received nothing"
+    token, body = received[0]
+    assert token == "sekret"
+    assert body["source"] == "agent-7"
+    assert [e["kind"] for e in body["events"]] == [KIND_TX_COMMIT]

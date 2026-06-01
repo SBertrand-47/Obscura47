@@ -3,7 +3,7 @@
 Obscura47 is a Tor-style overlay network written in Python. It lets people
 route traffic through relay nodes and publish private `.obscura` hidden
 services without exposing those services directly to the clearnet. It aims to
-resist traffic analysis — see [Traffic-Analysis Resistance](#traffic-analysis-resistance)
+resist traffic analysis - see [Traffic-Analysis Resistance](#traffic-analysis-resistance)
 for what that protects against and, just as importantly, what it does not.
 
 The public framing of this project is intentionally simple:
@@ -242,28 +242,28 @@ Obscura47 supports:
 ## Traffic-Analysis Resistance
 
 An adversary who can watch the network at both the **entry** and the **exit**
-tries to **correlate** flows — matching traffic going in to traffic coming out
-— by their packet **sizes** and **timing**. Obscura47 layers several defenses
+tries to **correlate** flows - matching traffic going in to traffic coming out
+- by their packet **sizes** and **timing**. Obscura47 layers several defenses
 against this. Two are always on; the timing defenses are opt-in because they
 trade latency and bandwidth for protection.
 
 | Defense | Status | What it hides | Cost |
 |---|---|---|---|
-| **Fixed-size cells** | always on | message *length* — every frame is padded to one of a few fixed bucket sizes, so the ciphertext length on the wire reveals only the bucket, not the real payload size | minimal bandwidth |
-| **Stream multiplexing** | always on | per-stream connection boundaries — many streams share one connection to each hop, so an observer cannot count concurrent flows or line up stream open/close with TCP connect/close events | none (also fewer sockets) |
-| **Forward jitter** | opt-in | fine-grained timing — each relay delays each frame by a small random amount | mild latency |
-| **Cover traffic** | opt-in | whether a link is idle or busy — relays emit indistinguishable "drop" cells at a Poisson rate, padding the link | extra bandwidth |
-| **Poisson mixing** | opt-in | end-to-end *timing correlation* — each relay holds cells in a pool and releases them after an exponential delay, statistically decoupling output timing from input timing | **high latency** |
+| **Fixed-size cells** | always on | message *length* - every frame is padded to one of a few fixed bucket sizes, so the ciphertext length on the wire reveals only the bucket, not the real payload size | minimal bandwidth |
+| **Stream multiplexing** | always on | per-stream connection boundaries - many streams share one connection to each hop, so an observer cannot count concurrent flows or line up stream open/close with TCP connect/close events | none (also fewer sockets) |
+| **Forward jitter** | opt-in | fine-grained timing - each relay delays each frame by a small random amount | mild latency |
+| **Cover traffic** | opt-in | whether a link is idle or busy - relays emit indistinguishable "drop" cells at a Poisson rate, padding the link | extra bandwidth |
+| **Poisson mixing** | opt-in | end-to-end *timing correlation* - each relay holds cells in a pool and releases them after an exponential delay, statistically decoupling output timing from input timing | **high latency** |
 
 Within a single stream, cell ordering is always preserved; only cells of
-*different* streams are reordered — which is exactly what frustrates
+*different* streams are reordered - which is exactly what frustrates
 correlation without corrupting any byte stream.
 
 **What this does and does not buy you.** Fixed-size cells and multiplexing
 close the *size* and *connection-shape* side channels cheaply, bringing the
 default posture roughly in line with Tor. But defeating *timing* correlation
 against a global passive adversary is an unsolved problem for any low-latency
-network — **including Tor, which does not defend against it.** Only Poisson
+network - **including Tor, which does not defend against it.** Only Poisson
 mixing genuinely frustrates timing correlation, and it does so by making the
 network high-latency (end-to-end delay grows with hop count × mean mix delay).
 With the timing defenses left at their off-by-default settings, assume a
@@ -327,7 +327,7 @@ The most important ones are:
 | `OBSCURA_MIX_JITTER_MAX_MS` | `0` | Max jitter (ms) when jitter is enabled |
 | `OBSCURA_COVER_ENABLED` | `false` | Emit cover-traffic "drop" cells |
 | `OBSCURA_COVER_MEAN_INTERVAL_MS` | `1000` | Mean gap between cover cells |
-| `OBSCURA_MIX_ENABLED` | `false` | Poisson mixing — defeats timing correlation, high latency |
+| `OBSCURA_MIX_ENABLED` | `false` | Poisson mixing - defeats timing correlation, high latency |
 | `OBSCURA_MIX_MEAN_DELAY_MS` | `200` | Mean per-hop mix delay when mixing is enabled |
 
 See [Traffic-Analysis Resistance](#traffic-analysis-resistance) for what the

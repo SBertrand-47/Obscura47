@@ -175,6 +175,10 @@ def emit(event: str, **fields: Any) -> None:
         "node_id": _node_id,
         "event": event,
     }
+    # Stamp the active experiment so ops-plane events are attributable to a
+    # run. Empty in public mode, so the record shape is unchanged there.
+    from src.utils import experiment as _experiment
+    record.update(_experiment.experiment_fields())
     if fields:
         # JSON-safe coercion: stringify anything urllib/json can't serialise.
         safe = {}

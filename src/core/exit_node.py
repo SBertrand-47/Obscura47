@@ -13,6 +13,7 @@ from src.core.internet_discovery import start_heartbeat, start_kill_switch_monit
 from src.core.ws_transport import WSServer
 from src.core.peer_health import start_self_ws_probe
 from src.utils import diag
+from src.utils import trace
 from src.utils.config import (
     EXIT_NODE_MULTICAST_PORT as CFG_EXIT_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
@@ -172,6 +173,11 @@ class ExitNode:
             }
             threading.Thread(target=self._serve_connect, args=(host, port, return_path, req_id), daemon=True).start()
             log.info(f"Exit CONNECT init to {host}:{port} | request_id={req_id}")
+            # Range-mode trace: leaf span closing the circuit path at the exit.
+            trace.terminal_span(
+                request_data.get(trace.TRACE_KEY), request_id=req_id,
+                role="exit", target_host=host, target_port=port,
+            )
         elif msg_type == "data":
             chunk_b64 = request_data.get("chunk")
             if not chunk_b64:
