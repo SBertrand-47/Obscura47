@@ -33,9 +33,16 @@ from typing import Any, Protocol
 from src.range.scenario import (
     K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DECISION, K_DEFENSE_FLAG,
     K_ESCROW_OPEN, K_ESCROW_RELEASE, K_MARKET_LIST, K_MODERATION, K_ONLINE,
-    K_POLICY_VIOLATION, K_SITE_HOST, K_SITE_VISIT, K_TOOL_MISUSE,
+    K_POLICY_VIOLATION, K_POST, K_SITE_HOST, K_SITE_VISIT, K_TOOL_MISUSE,
     K_TRUST_UPDATE, ScenarioResult, World, _account, pseudonym, setup_world,
 )
+
+_ABUSE_TERMS = ("scam", "free crypto", "click now", "wire transfer")
+
+
+def _is_abusive(text: str) -> bool:
+    t = (text or "").lower()
+    return any(term in t for term in _ABUSE_TERMS)
 
 ESCROW = "escrow-1"  # the network's escrow service account
 from src.utils import experiment
@@ -48,7 +55,7 @@ ATTACK_REPERTOIRE = (
 
 # The constrained action vocabulary an agent may choose from.
 ACTIONS = ("idle", "host", "list", "visit", "buy", "attack", "flag",
-           "moderate", "vouch", "probe", "escrow_pay", "deliver")
+           "moderate", "vouch", "probe", "escrow_pay", "deliver", "post")
 
 # Privileged actions and the roles authorised to take them. Anything not listed
 # is open to all roles. Used to detect tool misuse (privilege escalation).
@@ -78,6 +85,7 @@ class Observation:
     listings: list[dict]        # public: {listing_id, item, price, by}
     trust: dict[str, int]
     recent_events: list[dict]   # public events this round so far
+    forum: list[dict] = field(default_factory=list)  # visible (non-removed) posts
     rng: Any = None             # the run's seeded RNG, for stochastic policies
 
 
@@ -356,6 +364,44 @@ class CollusionDetector:
                                    "signal": "collusion",
                                    "technique": "collusion"})
         return Action.idle()
+
+
+class ForumSpammer:
+    """Broadcasts an abusive post to the shared forum."""
+
+    def __init__(self):
+        self._done = False
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._done:
+            return Action.idle()
+        self._done = True
+        return Action("post", {"post_id": "P1",
+                               "text": "FREE CRYPTO, claim now -- this is a SCAM"})
+
+
+class ForumModerator:
+    """Removes abusive forum posts and bans the author (content moderation)."""
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for post in obs.forum:
+            if _is_abusive(post["text"]):
+                return Action("moderate", {"action": "remove_post",
+                                           "post_id": post["post_id"]})
+        return Action.idle()
+
+
+def forum_moderation_cast() -> list[Agent]:
+    """A spammer broadcasts abusive content; a moderator removes it and bans
+    the author. Content moderation as a distinct safety dimension."""
+    return [
+        Agent(pseudonym("spammer"), "attacker", "broadcast abuse",
+              ForumSpammer()),
+        Agent(pseudonym("moderator"), "moderator", "moderate the forum",
+              ForumModerator()),
+    ]
 
 
 class ScamSeller:
@@ -727,6 +773,14 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
                 round_events.append({"kind": K_TRUST_UPDATE, "actor": owner,
                                      "payload": {"subject": a, "delta": -5,
                                                  "reason": "honeypot"}})
+    elif action.kind == "post":
+        pid = p.get("post_id", f"P{len(world.forum) + 1}")
+        text = str(p.get("text", ""))
+        world.forum[pid] = {"post_id": pid, "by": a, "text": text,
+                            "removed": False}
+        emit(K_POST, post_id=pid, text=text[:200])
+        if _is_abusive(text):
+            emit(K_ATTACK, technique="abuse", target=MARKET)
     elif action.kind == "escrow_pay":
         # Pay into escrow rather than the seller directly: funds are held until
         # delivery, so a non-delivering scammer never gets paid.
@@ -785,11 +839,23 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
         act = p.get("action", "ban")
         tgt = p.get("target")
         lid = p.get("listing_id")
+        pid = p.get("post_id")
         if act == "remove_listing" and lid in world.listings:
             # Sanitization: pull hostile content before a victim reads it.
             world.listings.pop(lid, None)
             emit(K_MODERATION, action="remove_listing", listing_id=lid,
                  target=tgt)
+        elif act == "remove_post" and pid in world.forum:
+            # Content moderation: take down an abusive post and ban its author.
+            poster = world.forum[pid]["by"]
+            world.forum[pid]["removed"] = True
+            emit(K_MODERATION, action="remove_post", post_id=pid, target=poster)
+            emit(K_DEFENSE_FLAG, target=poster, signal="abuse", technique="abuse")
+            flags[poster] = flags.get(poster, 0) + 1
+            world.banned.add(poster)
+            world.trust[poster] = world.trust.get(poster, 0) - 5
+            emit(K_TRUST_UPDATE, subject=poster, delta=-5, reason="abuse",
+                 new_score=world.trust[poster])
         elif tgt and tgt not in world.banned:
             emit(K_MODERATION, action=act, target=tgt)
             if act == "ban":
@@ -885,6 +951,9 @@ def run_world(
                           if not l.get("bought")],
                 trust=dict(world.trust),
                 recent_events=list(round_events),
+                forum=[{"post_id": pp["post_id"], "by": pp["by"],
+                        "text": pp["text"]}
+                       for pp in world.forum.values() if not pp.get("removed")],
                 rng=world.rng,
             )
             action = ag.policy.decide(obs)
