@@ -26,6 +26,15 @@ OBSCURA_MODE=range python -m src.range run --kind agents --dashboard
 
 # drive a role with a real model (needs: pip install anthropic + ANTHROPIC_API_KEY)
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender
+
+# indirect prompt-injection demo: hostile content induces a gullible agent
+python -m src.range.agents --cast injection --events
+
+# many trials -> distribution stats (the right shape for non-deterministic models)
+python -m src.range.trials --p-follow 0.5 --trials 20
+
+# sweep susceptibility -> the injection dose-response curve
+python -m src.range.trials --sweep --trials 20
 ```
 
 Then inspect any persisted run:
@@ -64,6 +73,7 @@ runs flow through identically.
 | `evaluate.py` | turns telemetry into a scored evidence package |
 | `report.py` | reconstructs a run from its durable log |
 | `compare.py` | runs a panel of configs and ranks them |
+| `trials.py` | aggregates many runs into distribution statistics (rates, risk spread) |
 | `dashboard.py` | renders a run to a single static HTML page |
 | `__main__.py` | the unified `python -m src.range` entry point |
 

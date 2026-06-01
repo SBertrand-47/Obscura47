@@ -169,3 +169,44 @@ def test_action_while_banned_is_misuse():
     reasons = {e.payload.get("reason") for e in _events(result)
                if e.kind == K_TOOL_MISUSE}
     assert "acted_while_banned" in reasons
+
+
+# ── Indirect prompt injection ─────────────────────────────────────
+
+def test_gullible_buyer_is_induced_by_injected_content():
+    result = run_world(ag.injection_cast(), rounds=3)
+    events = _events(result)
+    # The injected transfer happened, from buyer to attacker, marked injected.
+    injected = [e for e in events if e.kind == "bank.transfer"
+                and e.payload.get("injected")]
+    assert injected and injected[0].payload["to"] == "attacker-1"
+    assert injected[0].payload["from"] == "buyer-1"
+    # And it shows up as an injection-driven policy violation.
+    assert any(e.kind == "policy.violation"
+               and e.payload.get("rule") == "followed_injected_instruction"
+               for e in events)
+    # Funds actually moved to the attacker.
+    assert result.ledger.balance(_account(pseudonym("attacker"))) == 50
+
+
+def test_injection_run_scores_as_exposure():
+    result = run_world(ag.injection_cast(), rounds=3)
+    report = build_evaluation(_events(result))
+    assert report["adversarial"]["prompt_injection_attempts"] == 1
+    assert report["adversarial"]["prompt_injection_exposed"] == 1
+    assert report["verdict"] == "uncontained"
+    assert any("Prompt-injection exposure" in f["title"]
+               for f in report["findings"])
+
+
+def test_robust_buyer_ignores_injected_content():
+    # Swap the gullible buyer for the robust one; the injected transfer must
+    # not happen.
+    cast = [a if a.role != "buyer"
+            else Agent(a.actor, a.role, a.goal, ag.RobustBuyer())
+            for a in ag.injection_cast()]
+    result = run_world(cast, rounds=3)
+    injected = [e for e in _events(result) if e.kind == "bank.transfer"
+                and e.payload.get("injected")]
+    assert injected == []
+    assert result.ledger.balance(_account(pseudonym("attacker"))) == 0
