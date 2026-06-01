@@ -358,6 +358,15 @@ def _hint_card(text: str) -> QFrame:
     return card
 
 
+def _obscura_url(address: str) -> str:
+    """A copy/paste-ready URL: ensure a scheme so the address works when pasted
+    straight into a browser, no manual editing needed."""
+    a = (address or "").strip()
+    if a and not a.startswith(("http://", "https://")):
+        return "http://" + a
+    return a
+
+
 def _site_card(
     *,
     title: str,
@@ -390,7 +399,9 @@ def _site_card(
         top.addWidget(chip, 0, Qt.AlignTop)
     lay.addLayout(top)
 
-    addr = QLabel(address)
+    # Show (and copy) a browser-ready URL so users do not have to add a scheme.
+    url = _obscura_url(address)
+    addr = QLabel(url)
     addr.setObjectName("AddressMono")
     addr.setWordWrap(True)
     addr.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -409,7 +420,14 @@ def _site_card(
     copy_btn = QPushButton("Copy address")
     copy_btn.setObjectName("Mini")
     copy_btn.setCursor(Qt.PointingHandCursor)
-    copy_btn.clicked.connect(lambda: on_copy(address))
+
+    def _do_copy():
+        on_copy(url)
+        # Visible confirmation: flip the label briefly, then restore.
+        copy_btn.setText("Copied!")
+        QTimer.singleShot(1400, lambda: copy_btn.setText("Copy address"))
+
+    copy_btn.clicked.connect(_do_copy)
     open_btn = QPushButton("Open")
     open_btn.setObjectName("MiniPrimary")
     open_btn.setCursor(Qt.PointingHandCursor)
@@ -1508,22 +1526,44 @@ class ObscuraApp(QMainWindow):
             self._log(f"Could not publish hosted site: {exc}")
 
     def _remove_hosted_site_daemon(self):
-        name = self._prompt_text("Remove Site Daemon", "Site name:")
+        name = self._prompt_text("Remove Site", "Site name:")
         if not name:
             return
+
+        # Stop the background service (if any).
+        removed_daemon = False
         try:
             from src.utils.daemon import uninstall_daemon
-
-            if not uninstall_daemon(name):
-                raise RuntimeError(f"no background service found for {name!r}")
-            QMessageBox.information(
-                self, "Remove Site Daemon",
-                f"Removed background service for {name}.",
-            )
-            self._log(f"Removed background service for site {name}.")
+            removed_daemon = bool(uninstall_daemon(name))
         except Exception as exc:
-            QMessageBox.critical(self, "Remove Site Daemon", str(exc))
-            self._log(f"Could not remove hosted site daemon: {exc}")
+            self._log(f"Could not remove background service for {name}: {exc}")
+
+        # Withdraw the descriptor from the registry so the site stops showing
+        # up when others run Discover.
+        withdrawn = False
+        try:
+            from src.core.hidden_service import withdraw_descriptor_by_name
+            withdrawn = withdraw_descriptor_by_name(name)
+        except Exception as exc:
+            self._log(f"Could not withdraw descriptor for {name}: {exc}")
+
+        if not removed_daemon and not withdrawn:
+            QMessageBox.information(
+                self, "Remove Site",
+                f"Nothing to remove for {name!r} - no background service or "
+                f"published descriptor was found.",
+            )
+            self._log(f"Remove Site: nothing to remove for {name}.")
+            return
+
+        parts = []
+        if removed_daemon:
+            parts.append("background service removed")
+        if withdrawn:
+            parts.append("descriptor withdrawn from the registry")
+        summary = f"{name}: " + ", ".join(parts) + "."
+        QMessageBox.information(self, "Remove Site", summary)
+        self._log(f"Remove Site - {summary}")
 
     def _discover_sites(self):
         """List every live .obscura site the registry knows about.
