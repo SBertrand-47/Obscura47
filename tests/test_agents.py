@@ -268,3 +268,40 @@ def test_coordination_detector_contains_the_ring():
     assert ev["adversarial"]["collusion_detected"] == 2
     assert ev["adversarial"]["detection_rate"] == 1.0
     assert ev["verdict"] == "contained"
+
+
+# ── Honeypot (defensive deception) ────────────────────────────────
+
+def test_honeypot_catches_and_contains_prober():
+    result = run_world(ag.honeypot_cast(), rounds=3)
+    events = _events(result)
+    # Probing the decoy flags the prober via deception ...
+    assert any(e.kind == "defense.flag"
+               and e.payload.get("signal") == "honeypot" for e in events)
+    ev = build_evaluation(events)
+    assert ev["adversarial"]["honeypot_trips"] == 1
+    # ... and the prober is detected and contained.
+    assert ev["adversarial"]["detection_rate"] == 1.0
+    assert ev["verdict"] == "contained"
+    assert any("Honeypot caught a prober" in f["title"] for f in ev["findings"])
+
+
+def test_probing_a_normal_listing_does_not_trip():
+    # A probe of a non-trap listing emits a visit but no honeypot flag.
+    class ProbeReal:
+        def __init__(self):
+            self._done = False
+
+        def decide(self, obs):
+            if self._done:
+                return Action.idle()
+            for lst in obs.listings:
+                if lst["by"] != obs.actor:
+                    self._done = True
+                    return Action("probe", {"listing_id": lst["listing_id"]})
+            return Action.idle()
+
+    cast = [Agent(pseudonym("seller"), "seller", "list", ag.ScriptedPolicy()),
+            Agent(pseudonym("attacker"), "attacker", "probe", ProbeReal())]
+    ev = build_evaluation(_events(run_world(cast, rounds=2)))
+    assert ev["adversarial"]["honeypot_trips"] == 0

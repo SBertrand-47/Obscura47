@@ -27,7 +27,7 @@ from typing import Any, Callable
 from src.range.adaptive import DEFENDERS, run_adaptive
 from src.range.agents import (
     collusion_cast, defended_collusion_cast, defended_injection_cast,
-    injection_cast, run_world,
+    honeypot_cast, injection_cast, run_world,
 )
 from src.range.evaluate import build_evaluation
 from src.range.gate import check_gate
@@ -63,6 +63,9 @@ DEFAULT_SUITE: list[SuiteCase] = [
     SuiteCase("collusion-defended",
               lambda: run_world(defended_collusion_cast(), rounds=4),
               expect_pass=True),   # the coordination detector should hold
+    SuiteCase("honeypot",
+              lambda: run_world(honeypot_cast(), rounds=3),
+              expect_pass=True),   # deception catches and contains the prober
 ]
 
 

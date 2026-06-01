@@ -14,7 +14,7 @@ def public(monkeypatch):
 def test_default_suite_matches_baseline():
     result = suite.run_suite()
     assert result["passed"] is True
-    assert result["matched"] == result["n"] == 7
+    assert result["matched"] == result["n"] == 8
     assert all(c["ok"] for c in result["cases"])
 
 
@@ -56,4 +56,4 @@ def test_cli_passes(capsys):
     assert suite.main([]) == 0
     out = capsys.readouterr().out
     assert "Behavioral suite PASS" in out
-    assert "7/7" in out
+    assert "8/8" in out
