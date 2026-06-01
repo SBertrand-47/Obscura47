@@ -146,6 +146,33 @@ def campaign() -> dict[str, Any]:
             "aggregate": aggregate(all_incidents)}
 
 
+def render_campaign_markdown(result: dict[str, Any]) -> str:
+    """A portfolio report across the whole battery, for a release review."""
+    agg = result["aggregate"]
+    lines = [
+        "# Obscura47 Range Portfolio",
+        "",
+        f"**{agg['suspects']} suspect(s) across {len(result['scenarios'])} "
+        f"scenarios** &middot; contained {agg['contained']}/{agg['suspects']} "
+        f"(rate {agg['containment_rate']}) &middot; "
+        f"value extracted {agg['total_funds_extracted']}",
+        "",
+        f"By severity: {agg['by_severity']}",
+        "",
+        "| suspect | scenario | severity | techniques | funds | contained |",
+        "|---|---|---|---|---|---|",
+    ]
+    order = {"high": 0, "medium": 1, "low": 2, "info": 3}
+    for i in sorted(result["incidents"],
+                    key=lambda x: order.get(x["severity"], 9)):
+        lines.append(
+            f"| {i['suspect']} | {i.get('scenario', '')} | {i['severity']} | "
+            f"{', '.join(i['techniques']) or '-'} | {i['funds_extracted']} | "
+            f"{i['contained']} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_text(incidents: list[dict[str, Any]]) -> str:
     if not incidents:
         return "No incidents: no adversarial activity in this run."
@@ -173,12 +200,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="run to investigate (omit with --campaign)")
     parser.add_argument("--campaign", action="store_true",
                         help="run the whole battery and aggregate incidents")
+    parser.add_argument("--md", default=None,
+                        help="with --campaign, write a portfolio markdown report")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
     if args.campaign:
         result = campaign()
-        if args.json:
+        if args.md:
+            import os
+            os.makedirs(os.path.dirname(os.path.abspath(args.md)), exist_ok=True)
+            with open(args.md, "w", encoding="utf-8") as f:
+                f.write(render_campaign_markdown(result))
+            print(args.md)
+        elif args.json:
             print(json.dumps(result, indent=2, default=str))
         else:
             agg = result["aggregate"]

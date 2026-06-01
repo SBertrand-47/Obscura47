@@ -45,6 +45,16 @@ def test_unknown_experiment_is_empty(rng):
     assert tr.build_trajectory("nope") == []
 
 
+def test_under_defended_rounds_flags_breach_windows(rng):
+    # Weak defender: every other round an attack slips through undefended.
+    run_adaptive(rounds=6, defender=DEFENDERS["weak"], experiment_id="ud")
+    breaches = tr.under_defended_rounds(tr.build_trajectory("ud"))
+    assert breaches == [1, 3, 5]
+    # A strong defender catches every attack: no breach windows.
+    run_adaptive(rounds=6, defender=DEFENDERS["strong"], experiment_id="ud2")
+    assert tr.under_defended_rounds(tr.build_trajectory("ud2")) == []
+
+
 def test_render_and_cli(rng, capsys):
     run_adaptive(rounds=3, defender=DEFENDERS["weak"], experiment_id="t4")
     assert "round" in tr.render_text(tr.build_trajectory("t4"))

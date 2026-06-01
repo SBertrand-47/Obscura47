@@ -108,6 +108,14 @@ def test_evidence_includes_llm_cost(rng):
     assert "## Model cost" in evidence.render_markdown(bundle)
 
 
+def test_evidence_includes_incidents_summary(rng):
+    run_scenario(seed=47, experiment_id="ev-inc")
+    bundle = evidence.build_evidence("ev-inc")
+    # The readiness attacker is a contained suspect.
+    assert bundle["incidents"]["suspects"] >= 1
+    assert "## Incidents" in evidence.render_markdown(bundle)
+
+
 def test_scripted_run_has_zero_llm_cost(rng):
     run_scenario(seed=47, experiment_id="ev-scripted")
     bundle = evidence.build_evidence("ev-scripted")

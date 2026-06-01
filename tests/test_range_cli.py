@@ -12,6 +12,36 @@ def public(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
 
 
+def test_every_readonly_subcommand_works_on_a_persisted_run(monkeypatch,
+                                                            tmp_path, capsys):
+    # Persist one rich run, then smoke-test every read tool against it.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+    monkeypatch.setattr(experiment, "EXPERIMENTS_DIR", str(tmp_path / "exp"))
+    monkeypatch.setattr(experiment, "_current_id", None)
+    monkeypatch.setattr(experiment, "_env_resolved", False)
+    from src.range.agents import default_cast, run_world
+    run_world(default_cast(), rounds=4, experiment_id="smoke",
+              trace_decisions=True)
+
+    out = str(tmp_path / "x")
+    for argv in (["report", "smoke"], ["evaluate", "smoke"],
+                 ["incidents", "smoke"], ["trajectory", "smoke"],
+                 ["dashboard", "smoke", "-o", out + ".html"],
+                 ["evidence", "smoke", "--md", out + ".md"],
+                 ["gate", "smoke"]):
+        assert cli.main(argv) == 0, argv
+
+
+def test_every_generator_subcommand_works(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    assert cli.main(["suite"]) == 0
+    assert cli.main(["compare"]) == 0
+    assert cli.main(["matrix", "--rounds", "8"]) == 0
+    assert cli.main(["incidents", "--campaign"]) == 0
+    assert cli.main(["adaptive", "--rounds", "4"]) == 0
+    assert cli.main(["agents", "--cast", "society", "--rounds", "8"]) == 0
+
+
 def test_run_readiness(capsys):
     assert cli.main(["run", "--kind", "readiness"]) == 0
     out = capsys.readouterr().out

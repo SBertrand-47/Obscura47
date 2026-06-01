@@ -24,6 +24,7 @@ from typing import Any
 from src.range import adaptive as _adaptive
 from src.range import agents as _agents
 from src.range import compare as _compare
+from src.range import coverage as _coverage
 from src.range import dashboard as _dashboard
 from src.range import evaluate as _evaluate
 from src.range import evidence as _evidence
@@ -138,8 +139,12 @@ def _run_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     raw = (args.llm_roles or "").strip().lower()
-    llm_roles = set() if raw in ("", "none") else {
-        r.strip() for r in raw.split(",") if r.strip()}
+    if raw == "all":
+        llm_roles = set(_agents.CAST_ROLES)
+    elif raw in ("", "none"):
+        llm_roles = set()
+    else:
+        llm_roles = {r.strip() for r in raw.split(",") if r.strip()}
 
     try:
         out = run_pipeline(kind=args.kind, rounds=args.rounds, seed=args.seed,
@@ -186,6 +191,7 @@ _DISPATCH = {
     "evidence": _evidence.main,
     "incidents": _forensics.main,
     "trajectory": _trajectory.main,
+    "coverage": _coverage.main,
 }
 
 _USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"
