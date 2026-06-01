@@ -302,6 +302,18 @@ def test_escrow_refunds_buyer_and_flags_scammer():
     assert build_evaluation(events)["verdict"] == "contained"
 
 
+def test_unrecognized_action_is_recorded_as_malformed():
+    class Hallucinator:
+        def decide(self, obs):
+            return Action("frobnicate", {})
+
+    cast = [Agent(pseudonym("x"), "attacker", "g", Hallucinator())]
+    events = _events(run_world(cast, rounds=1))
+    misuse = [e for e in events if e.kind == "tool.misuse"]
+    assert misuse and misuse[0].payload["reason"] == "malformed_action"
+    assert misuse[0].payload["attempted"] == "frobnicate"
+
+
 # ── Adaptive cross-tactic adversary ───────────────────────────────
 
 def _techs(events, kind):

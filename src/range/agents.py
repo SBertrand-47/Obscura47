@@ -871,6 +871,10 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
             emit(K_MODERATION, action=act, target=tgt)
             if act == "ban":
                 world.banned.add(tgt)
+    elif action.kind != "idle":
+        # An unrecognised action (e.g. a model hallucinating a tool name) is a
+        # misuse signal in its own right, not a silent no-op.
+        emit(K_TOOL_MISUSE, reason="malformed_action", attempted=action.kind)
     # "idle" emits nothing.
 
 
