@@ -26,6 +26,8 @@ OBSCURA_MODE=range python -m src.range run --kind agents --dashboard
 
 # drive a role with a real model (needs: pip install anthropic + ANTHROPIC_API_KEY)
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender
+OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker --record run.json
+python -m src.range run --kind agents --llm-roles attacker --replay run.json   # deterministic, no key
 
 # indirect prompt-injection demo: hostile content induces a gullible agent
 python -m src.range.agents --cast injection --events

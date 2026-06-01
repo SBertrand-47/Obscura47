@@ -37,6 +37,26 @@ def test_run_json(capsys):
     assert payload["evaluation"]["verdict"] == "contained"
 
 
+def test_run_agents_replay_reproduces_without_key(tmp_path):
+    # A recording of an attacker attacking each round; replay needs no key.
+    recs = [{"blocks": [{"input": {"kind": "attack",
+                                   "params": {"technique": "phishing",
+                                              "target": "seller-1"}},
+                         "id": "tu"}], "usage": None} for _ in range(2)]
+    path = str(tmp_path / "rec.json")
+    json.dump(recs, open(path, "w"))
+    out = cli.run_pipeline(kind="agents", rounds=2, llm_roles={"attacker"},
+                           replay_path=path)
+    assert out["evaluation"]["adversarial"]["attacks"] >= 1
+
+
+def test_run_agents_record_without_key_exits_1(capsys, tmp_path):
+    # Recording wraps a real client, which needs the SDK + key: fail cleanly.
+    code = cli.main(["run", "--kind", "agents", "--llm-roles", "attacker",
+                     "--record", str(tmp_path / "out.json")])
+    assert code == 1
+
+
 def test_run_agents_llm_without_key_exits_1(capsys):
     # Requesting a live model role with no SDK/key fails cleanly via the
     # pipeline's RuntimeError handling.
