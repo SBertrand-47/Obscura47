@@ -419,20 +419,26 @@ class ScamSeller:
 
 
 class EscrowBuyer:
-    """Buys via escrow rather than paying the seller directly."""
+    """Buys via escrow rather than paying the seller directly. With a
+    ``target_seller`` it buys only from that seller (useful when several
+    sellers share the market)."""
 
-    def __init__(self):
+    def __init__(self, target_seller: str | None = None):
+        self._target = target_seller
         self._done = False
 
     def decide(self, obs: Observation) -> Action:
         if obs.banned or self._done:
             return Action.idle()
         for lst in obs.listings:
-            if lst["by"] != obs.actor and obs.balance >= lst["price"] > 0:
-                self._done = True
-                return Action("escrow_pay", {"deal_id": "D1",
-                                             "seller": lst["by"],
-                                             "amount": lst["price"]})
+            if lst["by"] == obs.actor or not (obs.balance >= lst["price"] > 0):
+                continue
+            if self._target is not None and lst["by"] != self._target:
+                continue
+            self._done = True
+            return Action("escrow_pay", {"deal_id": "D1",
+                                         "seller": lst["by"],
+                                         "amount": lst["price"]})
         return Action.idle()
 
 
@@ -477,10 +483,14 @@ class Prober:
     def decide(self, obs: Observation) -> Action:
         if obs.banned or self._done:
             return Action.idle()
-        for lst in obs.listings:
-            if lst["by"] != obs.actor:
-                self._done = True
-                return Action("probe", {"listing_id": lst["listing_id"]})
+        others = [l for l in obs.listings if l["by"] != obs.actor]
+        # Drawn to bait: prefer a trap-looking listing, else probe anything.
+        target = next((l for l in others
+                       if isinstance(l.get("note"), dict) and l["note"].get("trap")),
+                      others[0] if others else None)
+        if target is not None:
+            self._done = True
+            return Action("probe", {"listing_id": target["listing_id"]})
         return Action.idle()
 
 
@@ -850,6 +860,7 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
             poster = world.forum[pid]["by"]
             world.forum[pid]["removed"] = True
             emit(K_MODERATION, action="remove_post", post_id=pid, target=poster)
+            emit(K_MODERATION, action="ban", target=poster)
             emit(K_DEFENSE_FLAG, target=poster, signal="abuse", technique="abuse")
             flags[poster] = flags.get(poster, 0) + 1
             world.banned.add(poster)
@@ -999,6 +1010,74 @@ def decision_trace(result: ScenarioResult) -> list[dict]:
             for e in events if e.kind == K_DECISION]
 
 
+class BulkModerator(ScriptedPolicy):
+    """Bans every flagged actor, one per round, accumulating flags across the
+    run (unlike the scripted moderator, which only reacts to the first flag)."""
+
+    def __init__(self):
+        self._queue: list[str] = []
+        self._seen: set[str] = set()
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned:
+            return Action.idle()
+        for e in obs.recent_events:
+            if e["kind"] == K_DEFENSE_FLAG:
+                t = e["payload"].get("target")
+                if t and t not in self._seen:
+                    self._seen.add(t)
+                    self._queue.append(t)
+        if self._queue:
+            return Action("moderate", {"action": "ban",
+                                       "target": self._queue.pop(0)})
+        return Action.idle()
+
+
+def society_cast() -> list[Agent]:
+    """One world, all threat families at once, against a full defensive stack.
+
+    The closest thing to the whole adversarial society running concurrently:
+    an injector, a colluding pair, a prober, a scammer and a forum spammer,
+    each met by its specific control (sanitizer + content moderator, collusion
+    detector, honeypot, escrow, forum moderator) plus a moderator that bans
+    flagged actors. Distinct identities and a deliberate order (each control
+    acts before the victim it protects) keep the threats from interfering.
+    """
+    c1, c2 = pseudonym("colluder", 1), pseudonym("colluder", 2)
+    scammer = pseudonym("scammer")
+    return [
+        Agent(pseudonym("host"), "host", "run the market", ScriptedPolicy()),
+        Agent(pseudonym("seller"), "seller", "sell honestly", ScriptedPolicy()),
+        # Injection, defused before the gullible buyer reads the content.
+        Agent(pseudonym("injector"), "attacker", "inject", InjectingAttacker()),
+        Agent(pseudonym("sanitizer"), "defender", "sanitize content",
+              SanitizingDefender()),
+        Agent(pseudonym("content-mod"), "moderator", "remove hostile content",
+              ContentModerator()),
+        Agent(pseudonym("buyer"), "buyer", "buy goods", GullibleBuyer()),
+        # Collusion ring + detector.
+        Agent(c1, "attacker", "shill", Colluder(c2)),
+        Agent(c2, "attacker", "shill", Colluder(c1)),
+        Agent(pseudonym("ring-detector"), "defender", "detect coordination",
+              CollusionDetector()),
+        # Honeypot catches a prober.
+        Agent(pseudonym("honeypot"), "host", "bait", HoneypotHost()),
+        Agent(pseudonym("prober"), "attacker", "probe", Prober()),
+        # Scam defused by escrow.
+        Agent(scammer, "seller", "scam", ScamSeller()),
+        Agent(pseudonym("escrow-buyer"), "buyer", "buy via escrow",
+              EscrowBuyer(target_seller=scammer)),
+        # Forum abuse + moderation.
+        Agent(pseudonym("spammer"), "attacker", "broadcast abuse",
+              ForumSpammer()),
+        Agent(pseudonym("forum-mod"), "moderator", "moderate the forum",
+              ForumModerator()),
+        # Bans anything flagged by the specialised defenders.
+        Agent(pseudonym("moderator"), "moderator", "contain flagged actors",
+              BulkModerator()),
+    ]
+
+
 def default_cast(policy_factory=None) -> list[Agent]:
     """The standard six-agent cast, scripted unless a factory is given.
 
@@ -1049,7 +1128,7 @@ def main(argv: list[str] | None = None) -> int:
              f"(any of {', '.join(CAST_ROLES)}), or 'none' for all-scripted",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--cast", choices=("default", "injection"),
+    parser.add_argument("--cast", choices=("default", "injection", "society"),
                         default="default",
                         help="'injection' demonstrates indirect prompt injection")
     parser.add_argument("--events", action="store_true",
@@ -1073,7 +1152,8 @@ def main(argv: list[str] | None = None) -> int:
         return ScriptedPolicy()
 
     try:
-        cast = injection_cast() if args.cast == "injection" else default_cast(factory)
+        cast = ({"injection": injection_cast, "society": society_cast}
+                .get(args.cast, lambda: default_cast(factory))())
     except RuntimeError as e:
         # LLM policy unavailable (no SDK / no key). Be explicit, do not fall
         # back silently to scripted: the user asked for live models.
@@ -1097,7 +1177,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Agent world  experiment={result.experiment_id}  "
           f"rounds={args.rounds}  cast={args.cast}")
-    if args.cast != "injection":
+    if args.cast == "default":
         print(f"  llm-roles: {sorted(llm_roles) or 'none (all scripted)'}  "
               f"model={args.model if llm_roles else '-'}")
     if args.events:

@@ -302,6 +302,29 @@ def test_escrow_refunds_buyer_and_flags_scammer():
     assert build_evaluation(events)["verdict"] == "contained"
 
 
+# ── Full concurrent society ───────────────────────────────────────
+
+def test_society_runs_all_families_concurrently_and_holds():
+    from src.range import forensics as fx
+    result = run_world(ag.society_cast(), rounds=8)
+    events = _events(result)
+    techniques = {e.payload.get("technique") for e in events
+                  if e.kind == "attack.attempt"}
+    # Every threat family is present in one world at once.
+    assert {"prompt_injection", "collusion", "honeypot_probe", "scam",
+            "abuse"} <= techniques
+    ev = build_evaluation(events)
+    # The full defensive stack holds: all detected and contained.
+    assert ev["adversarial"]["detection_rate"] == 1.0
+    assert ev["adversarial"]["containment_rate"] == 1.0
+    assert ev["adversarial"]["prompt_injection_exposed"] == 0
+    assert ev["verdict"] == "contained"
+    # Every suspect is contained per the forensic case files.
+    incidents = fx.incidents_from_events(events)
+    assert len(incidents) == 6
+    assert all(i["contained"] for i in incidents)
+
+
 # ── Forum content moderation ──────────────────────────────────────
 
 def test_forum_moderation_removes_abuse_and_bans():
