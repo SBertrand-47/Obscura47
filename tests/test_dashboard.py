@@ -59,6 +59,14 @@ def test_dashboard_shows_decisions_when_traced(rng):
     assert "Decisions (why)" in html
 
 
+def test_dashboard_includes_incidents_and_trajectory(rng):
+    from src.range.agents import default_cast, run_world
+    run_world(default_cast(), rounds=3, experiment_id="dash-full")
+    html = dash.render_html("dash-full")
+    assert "<h2>Incidents</h2>" in html
+    assert "Trajectory (per round)" in html
+
+
 def test_dashboard_omits_decisions_when_untraced(rng):
     run_scenario(seed=47, experiment_id="dash-plain")
     html = dash.render_html("dash-plain")
