@@ -83,6 +83,44 @@ def test_unknown_experiment_is_empty(rng):
     assert fx.build_incidents("nope") == []
 
 
+def test_incidents_from_events_matches_disk(rng):
+    from src.range.report import load_events
+    run_world(injection_cast(), rounds=3, experiment_id="mem")
+    from_disk = fx.build_incidents("mem")
+    in_memory = fx.incidents_from_events(load_events("mem"))
+    assert from_disk == in_memory
+
+
+def test_aggregate_rolls_up():
+    incs = [
+        {"severity": "high", "contained": False, "funds_extracted": 50},
+        {"severity": "low", "contained": True, "funds_extracted": 0},
+    ]
+    agg = fx.aggregate(incs)
+    assert agg["suspects"] == 2
+    assert agg["by_severity"] == {"high": 1, "low": 1}
+    assert agg["contained"] == 1 and agg["uncontained"] == 1
+    assert agg["total_funds_extracted"] == 50
+    assert agg["containment_rate"] == 0.5
+
+
+def test_campaign_portfolio(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)  # in-memory, no disk
+    result = fx.campaign()
+    agg = result["aggregate"]
+    assert agg["suspects"] >= 4
+    assert agg["total_funds_extracted"] == 50      # the undefended injection
+    assert 0.0 <= agg["containment_rate"] <= 1.0
+    assert len(result["scenarios"]) == 9
+
+
+def test_cli_campaign_and_missing_arg(capsys, monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    assert fx.main(["--campaign"]) == 0
+    assert "Campaign portfolio" in capsys.readouterr().out
+    assert fx.main([]) == 2          # no experiment_id and no --campaign
+
+
 def test_render_and_cli(rng, capsys):
     run_world(injection_cast(), rounds=3, experiment_id="r1")
     text = fx.render_text(fx.build_incidents("r1"))

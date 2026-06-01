@@ -42,8 +42,12 @@ def _severity(*, flagged: bool, banned: bool, funds: int,
 
 
 def build_incidents(experiment_id: str) -> list[dict[str, Any]]:
-    """Reconstruct a case file per suspect from the run's event log."""
-    events = load_events(experiment_id)
+    """Reconstruct case files per suspect from a run's durable event log."""
+    return incidents_from_events(load_events(experiment_id))
+
+
+def incidents_from_events(events: list) -> list[dict[str, Any]]:
+    """Build per-suspect case files from an event list (disk or in-memory)."""
     attacks = [e for e in events if e.kind == K_ATTACK]
     flags = [e for e in events if e.kind == K_DEFENSE_FLAG]
     mods = [e for e in events if e.kind == K_MODERATION]
@@ -103,6 +107,45 @@ def build_incidents(experiment_id: str) -> list[dict[str, Any]]:
     return incidents
 
 
+def aggregate(incidents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Roll up a set of incidents into a portfolio summary."""
+    by_severity: dict[str, int] = {}
+    for inc in incidents:
+        by_severity[inc["severity"]] = by_severity.get(inc["severity"], 0) + 1
+    contained = sum(1 for i in incidents if i["contained"])
+    return {
+        "suspects": len(incidents),
+        "by_severity": by_severity,
+        "contained": contained,
+        "uncontained": len(incidents) - contained,
+        "total_funds_extracted": sum(i["funds_extracted"] for i in incidents),
+        "containment_rate": (round(contained / len(incidents), 3)
+                             if incidents else 1.0),
+    }
+
+
+def campaign() -> dict[str, Any]:
+    """Run the behavioral battery in-memory and aggregate incidents across it.
+
+    The portfolio view: every suspect the battery surfaced, rolled up by
+    severity, containment and value extracted.
+    """
+    from src.range.suite import DEFAULT_SUITE
+
+    per_scenario = []
+    all_incidents: list[dict[str, Any]] = []
+    for case in DEFAULT_SUITE:
+        result = case.run()
+        events = list(reversed(result.collector.query(limit=10_000)))
+        incs = incidents_from_events(events)
+        for i in incs:
+            i["scenario"] = case.name
+        per_scenario.append({"scenario": case.name, "incidents": len(incs)})
+        all_incidents.extend(incs)
+    return {"scenarios": per_scenario, "incidents": all_incidents,
+            "aggregate": aggregate(all_incidents)}
+
+
 def render_text(incidents: list[dict[str, Any]]) -> str:
     if not incidents:
         return "No incidents: no adversarial activity in this run."
@@ -126,10 +169,31 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range.forensics",
         description="Reconstruct per-suspect incident case files from a run.")
-    parser.add_argument("experiment_id")
+    parser.add_argument("experiment_id", nargs="?",
+                        help="run to investigate (omit with --campaign)")
+    parser.add_argument("--campaign", action="store_true",
+                        help="run the whole battery and aggregate incidents")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.campaign:
+        result = campaign()
+        if args.json:
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            agg = result["aggregate"]
+            print(f"Campaign portfolio: {agg['suspects']} suspect(s) across "
+                  f"{len(result['scenarios'])} scenarios")
+            print(f"  by severity: {agg['by_severity']}")
+            print(f"  contained: {agg['contained']}/{agg['suspects']}  "
+                  f"(rate {agg['containment_rate']})")
+            print(f"  total funds extracted: {agg['total_funds_extracted']}")
+        return 0
+
+    if not args.experiment_id:
+        print("[incidents] give an experiment_id or --campaign",
+              file=sys.stderr)
+        return 2
     incidents = build_incidents(args.experiment_id)
     print(json.dumps(incidents, indent=2, default=str) if args.json
           else render_text(incidents))
