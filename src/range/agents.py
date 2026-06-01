@@ -1211,9 +1211,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     raw = (args.llm_roles or "").strip().lower()
-    llm_roles = set() if raw in ("", "none") else {
-        r.strip() for r in raw.split(",") if r.strip()
-    }
+    if raw == "all":
+        llm_roles = set(CAST_ROLES)
+    elif raw in ("", "none"):
+        llm_roles = set()
+    else:
+        llm_roles = {r.strip() for r in raw.split(",") if r.strip()}
     bad = llm_roles - set(CAST_ROLES)
     if bad:
         print(f"[agents] unknown role(s): {sorted(bad)}; "

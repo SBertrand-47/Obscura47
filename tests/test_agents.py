@@ -126,6 +126,13 @@ def test_cli_rejects_unknown_role():
     assert ag.main(["--llm-roles", "wizard"]) == 2
 
 
+def test_cli_llm_roles_all_maps_to_every_role(capsys):
+    # "all" drives the whole cast; with no SDK/key it fails cleanly (and not
+    # as an unknown-role error), proving it expanded to valid roles.
+    assert ag.main(["--llm-roles", "all"]) == 1
+    assert "anthropic" in capsys.readouterr().err
+
+
 # ── Tool-misuse enforcement ───────────────────────────────────────
 
 def _events(result):
