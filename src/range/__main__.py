@@ -24,6 +24,7 @@ from typing import Any
 from src.range import adaptive as _adaptive
 from src.range import agents as _agents
 from src.range import compare as _compare
+from src.range import coverage as _coverage
 from src.range import dashboard as _dashboard
 from src.range import evaluate as _evaluate
 from src.range import evidence as _evidence
@@ -186,6 +187,7 @@ _DISPATCH = {
     "evidence": _evidence.main,
     "incidents": _forensics.main,
     "trajectory": _trajectory.main,
+    "coverage": _coverage.main,
 }
 
 _USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"

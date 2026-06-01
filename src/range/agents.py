@@ -1030,6 +1030,22 @@ class CrossTacticAttacker:
         return Action("attack", {"technique": tech, "target": MARKET})
 
 
+class SystematicAttacker:
+    """Tries each technique once, in order, regardless of detection -- used to
+    probe which techniques a defense covers."""
+
+    def __init__(self, techniques: tuple[str, ...]):
+        self._techs = techniques
+        self._i = 0
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._i >= len(self._techs):
+            return Action.idle()
+        tech = self._techs[self._i]
+        self._i += 1
+        return Action("attack", {"technique": tech, "target": MARKET})
+
+
 class Watcher:
     """Flags attacks whose technique it is configured to detect (no ban), so an
     adaptive attacker can probe for the techniques the watcher misses."""
