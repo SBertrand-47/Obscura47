@@ -82,6 +82,7 @@ runs flow through identically.
 | `evaluate.py` | turns telemetry into a scored evidence package |
 | `report.py` | reconstructs a run from its durable log |
 | `forensics.py` | per-suspect incident case files (techniques, accomplices, funds, severity) |
+| `trajectory.py` | per-round activity (attacks, defenses, volume, trust) -- how a run evolved |
 | `compare.py` | runs a panel of configs and ranks them |
 | `trials.py` | aggregates many runs into distribution statistics (rates + Wilson CIs, susceptibility sweep) |
 | `matrix.py` | risk surface across defender model x attacker repertoire |

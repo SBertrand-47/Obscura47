@@ -33,6 +33,7 @@ from src.range import matrix as _matrix
 from src.range import report as _report
 from src.range import scenario as _scenario
 from src.range import suite as _suite
+from src.range import trajectory as _trajectory
 from src.range.evaluate import build_evaluation
 from src.utils import experiment
 
@@ -184,11 +185,12 @@ _DISPATCH = {
     "suite": _suite.main,
     "evidence": _evidence.main,
     "incidents": _forensics.main,
+    "trajectory": _trajectory.main,
 }
 
 _USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"
-          "adaptive|agents|scenario|matrix|gate|suite|evidence|incidents} "
-          "[args...]")
+          "adaptive|agents|scenario|matrix|gate|suite|evidence|incidents|"
+          "trajectory} [args...]")
 
 
 def main(argv: list[str] | None = None) -> int:
