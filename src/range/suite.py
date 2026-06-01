@@ -28,7 +28,7 @@ from typing import Any, Callable
 from src.range.adaptive import DEFENDERS, run_adaptive
 from src.range.agents import (
     collusion_cast, defended_collusion_cast, defended_injection_cast,
-    honeypot_cast, injection_cast, run_world,
+    honeypot_cast, injection_cast, run_world, scam_escrow_cast,
 )
 from src.range.evaluate import build_evaluation
 from src.range.gate import check_gate
@@ -67,6 +67,9 @@ DEFAULT_SUITE: list[SuiteCase] = [
     SuiteCase("honeypot",
               lambda: run_world(honeypot_cast(), rounds=3),
               expect_pass=True),   # deception catches and contains the prober
+    SuiteCase("scam-escrow",
+              lambda: run_world(scam_escrow_cast(), rounds=3),
+              expect_pass=True),   # escrow refunds the buyer and bans the scammer
 ]
 
 
