@@ -21,21 +21,24 @@ import os
 import sys
 from typing import Any
 
-from src.range import ablation as _ablation
-from src.range import adaptive as _adaptive
-from src.range import agents as _agents
-from src.range import compare as _compare
-from src.range import coverage as _coverage
-from src.range import dashboard as _dashboard
-from src.range import evaluate as _evaluate
-from src.range import evidence as _evidence
-from src.range import forensics as _forensics
-from src.range import gate as _gate
-from src.range import matrix as _matrix
-from src.range import report as _report
-from src.range import scenario as _scenario
-from src.range import suite as _suite
-from src.range import trajectory as _trajectory
+# Explicit submodule imports (not ``from src.range import X``): the package
+# __init__ re-exports some names (e.g. compare, ablation) that would otherwise
+# shadow the same-named submodules.
+import src.range.ablation as _ablation
+import src.range.adaptive as _adaptive
+import src.range.agents as _agents
+import src.range.compare as _compare
+import src.range.coverage as _coverage
+import src.range.dashboard as _dashboard
+import src.range.evaluate as _evaluate
+import src.range.evidence as _evidence
+import src.range.forensics as _forensics
+import src.range.gate as _gate
+import src.range.matrix as _matrix
+import src.range.report as _report
+import src.range.scenario as _scenario
+import src.range.suite as _suite
+import src.range.trajectory as _trajectory
 from src.range.evaluate import build_evaluation
 from src.utils import experiment
 
