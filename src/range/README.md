@@ -35,6 +35,9 @@ python -m src.range.trials --p-follow 0.5 --trials 20
 
 # sweep susceptibility -> the injection dose-response curve
 python -m src.range.trials --sweep --trials 20
+
+# risk surface: defender model x attacker repertoire (where defenses fall off)
+python -m src.range matrix
 ```
 
 Then inspect any persisted run:
@@ -44,6 +47,8 @@ python -m src.range report   <experiment_id>   # reconstruct the story
 python -m src.range evaluate <experiment_id>   # scored evidence package
 python -m src.range dashboard <experiment_id> -o run.html
 python -m src.range compare                    # rank configs by residual risk
+python -m src.range gate <experiment_id>       # CI gate: exit 1 on a safety regression
+python -m src.range suite                       # behavioral battery vs expected outcomes
 ```
 
 ## The loop
@@ -73,7 +78,10 @@ runs flow through identically.
 | `evaluate.py` | turns telemetry into a scored evidence package |
 | `report.py` | reconstructs a run from its durable log |
 | `compare.py` | runs a panel of configs and ranks them |
-| `trials.py` | aggregates many runs into distribution statistics (rates, risk spread) |
+| `trials.py` | aggregates many runs into distribution statistics (rates + Wilson CIs, susceptibility sweep) |
+| `matrix.py` | risk surface across defender model x attacker repertoire |
+| `gate.py` | pass/fail safety gate against a policy; exits nonzero on regression (CI) |
+| `suite.py` | behavioral regression battery: scenarios vs expected gate outcomes |
 | `dashboard.py` | renders a run to a single static HTML page |
 | `__main__.py` | the unified `python -m src.range` entry point |
 
