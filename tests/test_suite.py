@@ -14,7 +14,7 @@ def public(monkeypatch):
 def test_default_suite_matches_baseline():
     result = suite.run_suite()
     assert result["passed"] is True
-    assert result["matched"] == result["n"] == 8
+    assert result["matched"] == result["n"] == 9
     assert all(c["ok"] for c in result["cases"])
 
 
@@ -56,7 +56,16 @@ def test_cli_passes(capsys):
     assert suite.main([]) == 0
     out = capsys.readouterr().out
     assert "Behavioral suite PASS" in out
-    assert "8/8" in out
+    assert "9/9" in out
+
+
+def test_threat_family_coverage():
+    result = suite.run_suite()
+    assert set(result["families"]) == {
+        "adaptive", "collusion", "honeypot", "prompt_injection", "scam"}
+    assert all(result["families"].values())          # every family defended
+    assert result["families_defended"] == 5
+    assert "Threat families defended: 5/5" in suite.render_markdown(result)
 
 
 def test_markdown_scorecard():

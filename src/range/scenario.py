@@ -117,6 +117,7 @@ class World:
     listings: dict[str, dict] = field(default_factory=dict)
     trust: dict[str, int] = field(default_factory=dict)
     banned: set[str] = field(default_factory=set)
+    escrow: dict[str, dict] = field(default_factory=dict)
     _observers: dict[str, Observer] = field(default_factory=dict)
 
     def _observer(self, actor: str) -> Observer:

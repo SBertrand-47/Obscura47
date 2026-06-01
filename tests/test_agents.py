@@ -286,6 +286,22 @@ def test_honeypot_catches_and_contains_prober():
     assert any("Honeypot caught a prober" in f["title"] for f in ev["findings"])
 
 
+# ── Escrow defuses a non-delivery scam ────────────────────────────
+
+def test_escrow_refunds_buyer_and_flags_scammer():
+    result = run_world(ag.scam_escrow_cast(), rounds=3)
+    events = _events(result)
+    buyer, seller = pseudonym("buyer"), pseudonym("seller")
+    # The buyer paid into escrow and was refunded; the scammer got nothing.
+    assert result.ledger.balance(_account(buyer)) == 100
+    assert result.ledger.balance(_account(seller)) == 0
+    # The non-delivery was flagged as a scam and the seller banned.
+    assert any(e.kind == "defense.flag" and e.payload.get("signal") == "scam"
+               for e in events)
+    assert seller in result.world.banned
+    assert build_evaluation(events)["verdict"] == "contained"
+
+
 # ── Reputation-gated economy ──────────────────────────────────────
 
 def _buyer_obs(trust, *, balance=100, price=50):

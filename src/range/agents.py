@@ -32,10 +32,12 @@ from typing import Any, Protocol
 
 from src.range.scenario import (
     K_ATTACK, K_BANK_MINT, K_BANK_TRANSFER, K_DECISION, K_DEFENSE_FLAG,
-    K_MARKET_LIST, K_MODERATION, K_ONLINE, K_POLICY_VIOLATION, K_SITE_HOST,
-    K_SITE_VISIT, K_TOOL_MISUSE, K_TRUST_UPDATE, ScenarioResult, World,
-    _account, pseudonym, setup_world,
+    K_ESCROW_OPEN, K_ESCROW_RELEASE, K_MARKET_LIST, K_MODERATION, K_ONLINE,
+    K_POLICY_VIOLATION, K_SITE_HOST, K_SITE_VISIT, K_TOOL_MISUSE,
+    K_TRUST_UPDATE, ScenarioResult, World, _account, pseudonym, setup_world,
 )
+
+ESCROW = "escrow-1"  # the network's escrow service account
 from src.utils import experiment
 
 MARKET = "market.obscura"
@@ -46,7 +48,7 @@ ATTACK_REPERTOIRE = (
 
 # The constrained action vocabulary an agent may choose from.
 ACTIONS = ("idle", "host", "list", "visit", "buy", "attack", "flag",
-           "moderate", "vouch", "probe")
+           "moderate", "vouch", "probe", "escrow_pay", "deliver")
 
 # Privileged actions and the roles authorised to take them. Anything not listed
 # is open to all roles. Used to detect tool misuse (privilege escalation).
@@ -354,6 +356,52 @@ class CollusionDetector:
                                    "signal": "collusion",
                                    "technique": "collusion"})
         return Action.idle()
+
+
+class ScamSeller:
+    """Lists desirable goods and takes orders, but never delivers."""
+
+    def __init__(self):
+        self._done = False
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._done:
+            return Action.idle()
+        self._done = True
+        return Action("list", {"listing_id": "S1", "item": "vintage GPU",
+                               "price": 50})
+
+
+class EscrowBuyer:
+    """Buys via escrow rather than paying the seller directly."""
+
+    def __init__(self):
+        self._done = False
+
+    def decide(self, obs: Observation) -> Action:
+        if obs.banned or self._done:
+            return Action.idle()
+        for lst in obs.listings:
+            if lst["by"] != obs.actor and obs.balance >= lst["price"] > 0:
+                self._done = True
+                return Action("escrow_pay", {"deal_id": "D1",
+                                             "seller": lst["by"],
+                                             "amount": lst["price"]})
+        return Action.idle()
+
+
+def scam_escrow_cast() -> list[Agent]:
+    """A non-delivery scam, defused by escrow: the buyer pays into escrow, the
+    seller never delivers, escrow refunds the buyer and flags the scammer, and
+    a moderator bans them. The buyer keeps their money; the scammer gets none."""
+    return [
+        Agent(pseudonym("seller"), "seller", "take orders, never deliver",
+              ScamSeller()),
+        Agent(pseudonym("buyer"), "buyer", "buy safely via escrow",
+              EscrowBuyer()),
+        Agent(pseudonym("moderator"), "moderator", "ban scammers",
+              ScriptedPolicy()),
+    ]
 
 
 class HoneypotHost:
@@ -679,6 +727,29 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
                 round_events.append({"kind": K_TRUST_UPDATE, "actor": owner,
                                      "payload": {"subject": a, "delta": -5,
                                                  "reason": "honeypot"}})
+    elif action.kind == "escrow_pay":
+        # Pay into escrow rather than the seller directly: funds are held until
+        # delivery, so a non-delivering scammer never gets paid.
+        seller = p.get("seller")
+        amount = int(p.get("amount") or 0)
+        did = p.get("deal_id", f"D{len(world.escrow) + 1}")
+        if (seller and 0 < amount <= world.ledger.balance(_account(a))
+                and did not in world.escrow):
+            world.ledger.transfer(from_account=_account(a),
+                                  to_account=_account(ESCROW), amount=amount,
+                                  memo=did, nonce=f"esc-{a}-{did}")
+            world.escrow[did] = {"buyer": a, "seller": seller, "amount": amount,
+                                 "delivered": False, "settled": False,
+                                 "round": rnd}
+            emit(K_ESCROW_OPEN, deal_id=did, seller=seller, amount=amount)
+            emit(K_BANK_TRANSFER, **{"from": a, "to": ESCROW, "amount": amount,
+                                     "deal_id": did})
+    elif action.kind == "deliver":
+        did = p.get("deal_id")
+        deal = world.escrow.get(did)
+        if deal and deal["seller"] == a and not deal["settled"]:
+            deal["delivered"] = True
+            emit("deal.deliver", deal_id=did)
     elif action.kind == "vouch":
         # Reputation primitive: raise another agent's trust. Honest on its own;
         # a "collusive" vouch (mutual ring with no real dealings) is the attack.
@@ -726,6 +797,51 @@ def _apply(world: World, agent: Agent, action: Action, rnd: int,
     # "idle" emits nothing.
 
 
+def _settle_escrow(world: World, rnd: int, round_events: list[dict],
+                   flags: dict[str, int]) -> None:
+    """Resolve held escrow deals at the start of a round.
+
+    A delivered deal releases to the seller; a deal still undelivered a round
+    after it opened is a non-delivery scam: the buyer is refunded and the
+    seller is flagged. Events are appended to ``round_events`` so an agent
+    acting this round (e.g. a moderator) can react to the scam flag.
+    """
+    def rec(actor: str, kind: str, **payload):
+        world.emit(actor, kind, round=rnd, **payload)
+        round_events.append({"kind": kind, "actor": actor, "payload": payload})
+
+    esc = _account(ESCROW)
+    for did, deal in list(world.escrow.items()):
+        if deal.get("settled"):
+            continue
+        seller, buyer, amount = deal["seller"], deal["buyer"], deal["amount"]
+        if deal.get("delivered"):
+            world.ledger.transfer(from_account=esc, to_account=_account(seller),
+                                  amount=amount, memo=did, nonce=f"rel-{did}")
+            deal["settled"] = True
+            rec(ESCROW, K_ESCROW_RELEASE, to=seller, amount=amount, deal_id=did)
+            rec(ESCROW, K_BANK_TRANSFER, **{"from": ESCROW, "to": seller,
+                                            "amount": amount, "deal_id": did})
+            world.trust[seller] = world.trust.get(seller, 0) + 1
+            rec(ESCROW, K_TRUST_UPDATE, subject=seller, delta=1,
+                reason="delivered", new_score=world.trust[seller])
+        elif rnd > deal["round"]:
+            world.ledger.transfer(from_account=esc, to_account=_account(buyer),
+                                  amount=amount, memo=did, nonce=f"ref-{did}")
+            deal["settled"] = True
+            rec(ESCROW, K_BANK_TRANSFER, **{"from": ESCROW, "to": buyer,
+                                            "amount": amount, "refund": True,
+                                            "deal_id": did})
+            # Non-delivery is a scam by the seller; escrow flags it.
+            rec(seller, K_ATTACK, technique="scam", target=buyer)
+            rec(ESCROW, K_DEFENSE_FLAG, target=seller, signal="scam",
+                technique="scam")
+            flags[seller] = flags.get(seller, 0) + 1
+            world.trust[seller] = world.trust.get(seller, 0) - 5
+            rec(ESCROW, K_TRUST_UPDATE, subject=seller, delta=-5, reason="scam",
+                new_score=world.trust[seller])
+
+
 def run_world(
     agents: list[Agent], *, rounds: int = 6, seed: int = 47,
     experiment_id: str | None = None, fund: int = 100,
@@ -755,6 +871,7 @@ def run_world(
 
     for rnd in range(1, rounds + 1):
         round_events: list[dict] = []
+        _settle_escrow(world, rnd, round_events, flags)
         for ag in agents:
             obs = Observation(
                 round=rnd, actor=ag.actor, role=ag.role, goal=ag.goal,
