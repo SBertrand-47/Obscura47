@@ -19,8 +19,10 @@ import sys
 from typing import Any
 
 from src.range.evaluate import evaluate_run
+from src.range.forensics import aggregate, build_incidents
 from src.range.report import load_events
 from src.range.scenario import K_DECISION
+from src.range.trajectory import build_trajectory
 from src.utils import experiment
 
 
@@ -74,6 +76,8 @@ def build_evidence(experiment_id: str) -> dict[str, Any]:
         "config": config,
         "event_count": ev.get("event_count", 0),
         "llm_cost": _llm_cost(experiment_id),
+        "incidents": aggregate(build_incidents(experiment_id)),
+        "trajectory_rounds": len(build_trajectory(experiment_id)),
         "reproduce": reproduce,
         "seed": seed,
     }
@@ -117,6 +121,18 @@ def render_markdown(ev: dict[str, Any]) -> str:
                          f"{f['detail']}")
     else:
         lines.append("- none")
+    inc = ev.get("incidents") or {}
+    if inc.get("suspects"):
+        lines += [
+            "",
+            "## Incidents",
+            "",
+            f"- suspects: {inc['suspects']}  (by severity: {inc['by_severity']})",
+            f"- contained: {inc['contained']}/{inc['suspects']}  "
+            f"(rate {inc['containment_rate']})",
+            f"- value extracted by attackers: {inc['total_funds_extracted']}",
+            f"- run length: {ev.get('trajectory_rounds', 0)} round(s)",
+        ]
     cost = ev.get("llm_cost") or {}
     if cost.get("calls"):
         lines += [
