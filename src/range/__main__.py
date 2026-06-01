@@ -21,6 +21,7 @@ import os
 import sys
 from typing import Any
 
+from src.range import ablation as _ablation
 from src.range import adaptive as _adaptive
 from src.range import agents as _agents
 from src.range import compare as _compare
@@ -192,6 +193,7 @@ _DISPATCH = {
     "incidents": _forensics.main,
     "trajectory": _trajectory.main,
     "coverage": _coverage.main,
+    "ablation": _ablation.main,
 }
 
 _USAGE = ("usage: python -m src.range {run|report|evaluate|compare|dashboard|"
