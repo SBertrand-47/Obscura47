@@ -114,6 +114,19 @@ def test_campaign_portfolio(monkeypatch):
     assert len(result["scenarios"]) == 11
 
 
+def test_campaign_markdown_portfolio(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    md = fx.render_campaign_markdown(fx.campaign())
+    assert "# Obscura47 Range Portfolio" in md
+    assert "| suspect | scenario | severity |" in md
+    assert "prompt-injection" in md
+    # CLI writes the file.
+    out = str(tmp_path / "portfolio.md")
+    assert fx.main(["--campaign", "--md", out]) == 0
+    with open(out, encoding="utf-8") as f:
+        assert "Range Portfolio" in f.read()
+
+
 def test_cli_campaign_and_missing_arg(capsys, monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     assert fx.main(["--campaign"]) == 0
