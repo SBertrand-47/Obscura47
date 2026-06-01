@@ -23,6 +23,7 @@ python -m src.range run --kind adaptive --defender weak --rounds 10
 
 # decision-loop agents; persist a replayable run and emit an HTML dashboard
 OBSCURA_MODE=range python -m src.range run --kind agents --dashboard
+OBSCURA_MODE=range python -m src.range run --kind society --dashboard  # all threat families at once
 
 # drive a role with a real model (needs: pip install anthropic + ANTHROPIC_API_KEY)
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender

@@ -93,6 +93,9 @@ def run_pipeline(
         result = _adaptive.run_adaptive(
             rounds=rounds, seed=seed,
             defender=_adaptive.DEFENDERS[defender])
+    elif kind == "society":
+        result = _agents.run_world(_agents.society_cast(), rounds=rounds,
+                                   seed=seed)
     elif kind == "agents":
         shared = _llm_client(record_path, replay_path)
         factory = None
@@ -125,7 +128,8 @@ def _run_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range run",
         description="Run a scenario, score it, and optionally emit a dashboard.")
-    parser.add_argument("--kind", choices=("readiness", "adaptive", "agents"),
+    parser.add_argument("--kind",
+                        choices=("readiness", "adaptive", "agents", "society"),
                         default="readiness")
     parser.add_argument("--rounds", type=int, default=8)
     parser.add_argument("--seed", type=int, default=47)

@@ -60,6 +60,12 @@ def test_run_agents(capsys):
     assert "kind=agents" in capsys.readouterr().out
 
 
+def test_run_society(capsys):
+    assert cli.main(["run", "--kind", "society", "--rounds", "8"]) == 0
+    out = capsys.readouterr().out
+    assert "kind=society" in out and "verdict=contained" in out
+
+
 def test_run_json(capsys):
     assert cli.main(["run", "--kind", "readiness", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
