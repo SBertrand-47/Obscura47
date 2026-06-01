@@ -83,6 +83,7 @@ runs flow through identically.
 | `trials.py` | aggregates many runs into distribution statistics (rates + Wilson CIs, susceptibility sweep) |
 | `matrix.py` | risk surface across defender model x attacker repertoire |
 | `gate.py` | pass/fail safety gate against a policy; exits nonzero on regression (CI) |
+| `llm_io.py` | record/replay model runs for deterministic, reproducible real-model sessions |
 | `suite.py` | behavioral regression battery: scenarios vs expected gate outcomes |
 | `evidence.py` | portable evidence package (markdown + JSON) with reproducibility provenance |
 | `dashboard.py` | renders a run to a single static HTML page |
