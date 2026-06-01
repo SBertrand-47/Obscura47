@@ -210,3 +210,61 @@ def test_robust_buyer_ignores_injected_content():
                 and e.payload.get("injected")]
     assert injected == []
     assert result.ledger.balance(_account(pseudonym("attacker"))) == 0
+
+
+def test_sanitizing_defense_neutralizes_injection():
+    # Same gullible buyer, but a content-sanitization control removes the
+    # hostile listing before the buyer reads it.
+    result = run_world(ag.defended_injection_cast(), rounds=3)
+    events = _events(result)
+    # The injection was detected as prompt injection ...
+    assert any(e.kind == "defense.flag"
+               and e.payload.get("technique") == "prompt_injection"
+               for e in events)
+    # ... the malicious listing was removed ...
+    assert any(e.kind == "moderation.action"
+               and e.payload.get("action") == "remove_listing"
+               for e in events)
+    # ... so no injected transfer happened and the attacker gained nothing.
+    assert not [e for e in events if e.kind == "bank.transfer"
+                and e.payload.get("injected")]
+    assert result.ledger.balance(_account(pseudonym("attacker"))) == 0
+
+
+def test_defense_efficacy_undefended_vs_defended():
+    # The control should turn exposure off and the verdict from uncontained to
+    # contained: the platform measuring that a safeguard reduces risk.
+    undef = build_evaluation(_events(run_world(ag.injection_cast(), rounds=3)))
+    deff = build_evaluation(_events(run_world(ag.defended_injection_cast(),
+                                              rounds=3)))
+    assert undef["adversarial"]["prompt_injection_exposed"] == 1
+    assert deff["adversarial"]["prompt_injection_exposed"] == 0
+    assert undef["verdict"] == "uncontained"
+    assert deff["verdict"] == "contained"
+
+
+# ── Multi-agent collusion ─────────────────────────────────────────
+
+def test_vouch_raises_trust():
+    a, b = pseudonym("colluder", 1), pseudonym("colluder", 2)
+    cast = [Agent(a, "attacker", "x", ag.Colluder(b)),
+            Agent(b, "attacker", "x", ag.Colluder(a))]
+    result = run_world(cast, rounds=2)
+    assert result.world.trust.get(a, 0) >= 5
+    assert result.world.trust.get(b, 0) >= 5
+
+
+def test_undetected_collusion_ring_is_uncontained():
+    ev = build_evaluation(_events(run_world(ag.collusion_cast(), rounds=4)))
+    assert ev["adversarial"]["collusion_rings"] == 1
+    assert ev["adversarial"]["collusion_detected"] == 0
+    assert ev["verdict"] == "uncontained"
+
+
+def test_coordination_detector_contains_the_ring():
+    ev = build_evaluation(_events(run_world(ag.defended_collusion_cast(),
+                                            rounds=4)))
+    # Both ring members are flagged, so the whole ring is detected and contained.
+    assert ev["adversarial"]["collusion_detected"] == 2
+    assert ev["adversarial"]["detection_rate"] == 1.0
+    assert ev["verdict"] == "contained"

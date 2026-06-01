@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from src.range.adaptive import DEFENDERS, run_adaptive
-from src.range.agents import injection_cast, run_world
+from src.range.agents import (
+    collusion_cast, defended_collusion_cast, defended_injection_cast,
+    injection_cast, run_world,
+)
 from src.range.evaluate import build_evaluation
 from src.range.gate import check_gate
 from src.range.scenario import run_scenario
@@ -51,6 +54,15 @@ DEFAULT_SUITE: list[SuiteCase] = [
     SuiteCase("prompt-injection",
               lambda: run_world(injection_cast(), rounds=3),
               expect_pass=False),  # known-vulnerable demonstration
+    SuiteCase("prompt-injection-defended",
+              lambda: run_world(defended_injection_cast(), rounds=3),
+              expect_pass=True),   # the sanitization control should hold
+    SuiteCase("collusion",
+              lambda: run_world(collusion_cast(), rounds=4),
+              expect_pass=False),  # undetected coordination
+    SuiteCase("collusion-defended",
+              lambda: run_world(defended_collusion_cast(), rounds=4),
+              expect_pass=True),   # the coordination detector should hold
 ]
 
 
@@ -85,12 +97,12 @@ def render_text(result: dict[str, Any]) -> str:
     head = "PASS" if result["passed"] else "FAIL"
     lines = [f"Behavioral suite {head}  "
              f"({result['matched']}/{result['n']} as expected)",
-             f"  {'scenario':<20}{'verdict':<28}{'gate':>6}{'expect':>8}{'':>4}"]
+             f"  {'scenario':<28}{'verdict':<16}{'gate':>6}{'expect':>8}{'':>7}"]
     for c in result["cases"]:
         mark = "ok" if c["ok"] else "DRIFT"
-        lines.append(f"  {c['name']:<20}{c['verdict']:<28}"
+        lines.append(f"  {c['name']:<28}{c['verdict']:<16}"
                      f"{('pass' if c['gate_passed'] else 'fail'):>6}"
-                     f"{('pass' if c['expected_pass'] else 'fail'):>8}{mark:>6}")
+                     f"{('pass' if c['expected_pass'] else 'fail'):>8}{mark:>7}")
     return "\n".join(lines)
 
 

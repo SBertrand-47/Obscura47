@@ -77,6 +77,59 @@ log = get_logger(__name__)
 INTRO_POINT_COUNT = 3
 
 
+def _post_descriptor_delete(address: str, priv) -> bool:
+    """Sign ``hs-delete:{addr}:{ts}`` and ask the registry to drop the
+    descriptor for ``address``. Returns True on success. Best-effort."""
+    from src.core.encryptions import ecdsa_sign
+    timestamp = time.time()
+    message = f"hs-delete:{address}:{timestamp}".encode()
+    try:
+        signature = ecdsa_sign(priv, message)
+    except Exception as e:
+        log.warning("HS descriptor delete signature failed for %s: %s", address, e)
+        return False
+    body = json.dumps({
+        "addr": address,
+        "timestamp": timestamp,
+        "signature": signature,
+    }).encode()
+    try:
+        registry_request_json(
+            f"{REGISTRY_URL}/hs/descriptor/delete",
+            method='POST',
+            data=body,
+            extra_headers={'Content-Type': 'application/json'},
+            timeout=5,
+        )
+        log.info("Descriptor deleted from registry for %s", address)
+        diag.emit("desc_delete", addr=address, ok=True)
+        return True
+    except Exception as e:
+        log.warning("Failed to delete descriptor for %s: %s", address, e)
+        diag.emit("desc_delete", addr=address, ok=False, err=str(e))
+        return False
+
+
+def withdraw_descriptor_by_name(name: str) -> bool:
+    """Withdraw the registry descriptor for a locally-hosted site by name.
+
+    Loads the site's key, derives its address, and posts a signed delete so the
+    site stops appearing in discovery. Returns False if the site is unknown or
+    the request fails (best-effort; never raises)."""
+    try:
+        from src.utils.sites import list_sites
+        from src.core.encryptions import ecc_load_or_create_keypair
+        info = next((s for s in list_sites() if s.name == name), None)
+        if info is None or not info.key_path:
+            return False
+        priv, _ = ecc_load_or_create_keypair(info.key_path)
+    except Exception as e:
+        log.warning("withdraw_descriptor_by_name(%s) failed to load key: %s",
+                    name, e)
+        return False
+    return _post_descriptor_delete(info.address, priv)
+
+
 class HiddenServiceHost:
     def __init__(self, target_host: str, target_port: int, key_path: str):
         self.target_host = target_host
@@ -488,35 +541,7 @@ class HiddenServiceHost:
         with the service key; the registry verifies against the stored
         descriptor's pubkey before deleting.
         """
-        from src.core.encryptions import ecdsa_sign
-        timestamp = time.time()
-        message = f"hs-delete:{self.address}:{timestamp}".encode()
-        try:
-            signature = ecdsa_sign(self.priv, message)
-        except Exception as e:
-            log.warning("HS descriptor delete signature failed for %s: %s",
-                        self.address, e)
-            return False
-        body = json.dumps({
-            "addr": self.address,
-            "timestamp": timestamp,
-            "signature": signature,
-        }).encode()
-        try:
-            registry_request_json(
-                f"{REGISTRY_URL}/hs/descriptor/delete",
-                method='POST',
-                data=body,
-                extra_headers={'Content-Type': 'application/json'},
-                timeout=5,
-            )
-            log.info("Descriptor deleted from registry for %s", self.address)
-            diag.emit("desc_delete", addr=self.address, ok=True)
-            return True
-        except Exception as e:
-            log.warning("Failed to delete descriptor for %s: %s", self.address, e)
-            diag.emit("desc_delete", addr=self.address, ok=False, err=str(e))
-            return False
+        return _post_descriptor_delete(self.address, self.priv)
 
     def stop(self):
         """Trigger graceful shutdown: stop loops and purge descriptor.

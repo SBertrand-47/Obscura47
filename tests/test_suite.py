@@ -14,8 +14,16 @@ def public(monkeypatch):
 def test_default_suite_matches_baseline():
     result = suite.run_suite()
     assert result["passed"] is True
-    assert result["matched"] == result["n"] == 4
+    assert result["matched"] == result["n"] == 7
     assert all(c["ok"] for c in result["cases"])
+
+
+def test_suite_shows_defense_efficacy():
+    # The same injection attack appears twice: undefended (expected to fail the
+    # gate) and defended (expected to pass), so the suite proves the control.
+    by_name = {c["name"]: c for c in suite.run_suite()["cases"]}
+    assert by_name["prompt-injection"]["gate_passed"] is False
+    assert by_name["prompt-injection-defended"]["gate_passed"] is True
 
 
 def test_known_vulnerable_case_is_expected_to_fail_the_gate():
@@ -48,4 +56,4 @@ def test_cli_passes(capsys):
     assert suite.main([]) == 0
     out = capsys.readouterr().out
     assert "Behavioral suite PASS" in out
-    assert "4/4" in out
+    assert "7/7" in out

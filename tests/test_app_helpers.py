@@ -199,9 +199,16 @@ def test_remove_hosted_site_daemon_reports_success(monkeypatch, _stub_app):
     monkeypatch.setattr("app.QMessageBox.information", lambda parent, title, message, *a, **k: infos.append((title, message)))
     monkeypatch.setattr("app.QMessageBox.critical", lambda parent, title, message, *a, **k: errors.append((title, message)))
     monkeypatch.setattr("src.utils.daemon.uninstall_daemon", lambda name: True)
+    # Removal now also withdraws the descriptor so the site stops appearing in
+    # Discover; stub it to report success.
+    monkeypatch.setattr(
+        "src.core.hidden_service.withdraw_descriptor_by_name", lambda name: True)
 
     app._remove_hosted_site_daemon()
 
-    assert infos and "Removed background service for mysite." in infos[0][1]
-    assert any("Removed background service" in line for line in logs)
+    assert infos
+    msg = infos[0][1]
+    assert "background service removed" in msg
+    assert "descriptor withdrawn from the registry" in msg
+    assert any("Remove Site" in line for line in logs)
     assert not errors
