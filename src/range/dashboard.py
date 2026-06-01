@@ -107,6 +107,14 @@ def render_html(experiment_id: str) -> str:
                       [[c["actor"], c["kind"], c["what"]] for c in chain])
         investigations += (f'<h3>Investigation: {_esc(suspect)}</h3>{rows}')
 
+    decisions_section = ""
+    if report.get("decisions"):
+        rows = _table(
+            ["round", "actor", "chose", "why"],
+            [[d.get("round"), d.get("actor"), d.get("action"),
+              d.get("rationale") or ""] for d in report["decisions"]])
+        decisions_section = f'<section><h2>Decisions (why)</h2>{rows}</section>'
+
     cfg = ev.get("config") or {}
     body = f"""
     <div class="head">
@@ -135,6 +143,7 @@ def render_html(experiment_id: str) -> str:
       <section><h2>Timeline</h2>{timeline}</section>
     </div>
     <section><h2>Adversarial investigations</h2>{investigations or '<p class="empty">none</p>'}</section>
+    {decisions_section}
     """
     return _page(experiment_id, body)
 

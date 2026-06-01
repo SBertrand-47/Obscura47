@@ -49,3 +49,17 @@ def test_cli_writes_file(rng, tmp_path):
 
 def test_cli_unknown_experiment_exits_1(rng):
     assert dash.main(["does-not-exist"]) == 1
+
+
+def test_dashboard_shows_decisions_when_traced(rng):
+    from src.range.agents import default_cast, run_world
+    run_world(default_cast(), rounds=2, experiment_id="dash-why",
+              trace_decisions=True)
+    html = dash.render_html("dash-why")
+    assert "Decisions (why)" in html
+
+
+def test_dashboard_omits_decisions_when_untraced(rng):
+    run_scenario(seed=47, experiment_id="dash-plain")
+    html = dash.render_html("dash-plain")
+    assert "Decisions (why)" not in html

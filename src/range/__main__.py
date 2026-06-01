@@ -45,15 +45,40 @@ def _score(result) -> dict[str, Any]:
     return ev
 
 
+def _llm_client(record_path, replay_path):
+    """Shared model client for LLM agents: a ReplayClient (key-free, from a
+    recording), a RecordingClient (wraps a real client, captures the run), or
+    None (each LLMPolicy builds its own real client)."""
+    if replay_path:
+        from src.range.llm_io import ReplayClient, load_recording
+        return ReplayClient(load_recording(replay_path))
+    if record_path:
+        from src.range.llm_io import RecordingClient
+        try:
+            import anthropic
+        except ImportError as e:
+            raise RuntimeError("recording requires the 'anthropic' package "
+                               "(pip install anthropic).") from e
+        import os
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "recording requires ANTHROPIC_API_KEY in the environment.")
+        return RecordingClient(anthropic.Anthropic())
+    return None
+
+
 def run_pipeline(
     *, kind: str = "readiness", rounds: int = 8, seed: int = 47,
     defender: str = "weak", llm_roles: set[str] | None = None,
-    make_dashboard: bool = False,
+    make_dashboard: bool = False, record_path: str | None = None,
+    replay_path: str | None = None,
 ) -> dict[str, Any]:
     """Run a scenario end to end and return the evidence package.
 
     Includes a dashboard path when the run was persisted (range mode) and
-    ``make_dashboard`` is set.
+    ``make_dashboard`` is set. ``record_path`` captures an LLM run for replay;
+    ``replay_path`` re-runs a recording deterministically without a key. Both
+    apply to the ``agents`` kind with ``llm_roles``.
     """
     if kind == "readiness":
         result = _scenario.run_scenario(seed=seed)
@@ -62,13 +87,17 @@ def run_pipeline(
             rounds=rounds, seed=seed,
             defender=_adaptive.DEFENDERS[defender])
     elif kind == "agents":
+        shared = _llm_client(record_path, replay_path)
         factory = None
         if llm_roles:
             factory = lambda role, goal: (  # noqa: E731
-                _agents.LLMPolicy(role, goal) if role in llm_roles
-                else _agents.ScriptedPolicy())
+                _agents.LLMPolicy(role, goal, client=shared)
+                if role in llm_roles else _agents.ScriptedPolicy())
         result = _agents.run_world(
             _agents.default_cast(factory), rounds=rounds, seed=seed)
+        if record_path and shared is not None:
+            from src.range.llm_io import save_recording
+            save_recording(shared, record_path)
     else:
         raise ValueError(f"unknown scenario kind: {kind!r}")
 
@@ -99,6 +128,10 @@ def _run_main(argv: list[str]) -> int:
                         help="agents: comma-separated roles driven by a model")
     parser.add_argument("--dashboard", action="store_true",
                         help="write an HTML dashboard (range mode only)")
+    parser.add_argument("--record", default=None,
+                        help="agents: capture the LLM run to this path")
+    parser.add_argument("--replay", default=None,
+                        help="agents: replay a recording (deterministic, no key)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -109,8 +142,9 @@ def _run_main(argv: list[str]) -> int:
     try:
         out = run_pipeline(kind=args.kind, rounds=args.rounds, seed=args.seed,
                            defender=args.defender, llm_roles=llm_roles,
-                           make_dashboard=args.dashboard)
-    except RuntimeError as e:  # e.g. LLM policy without a key
+                           make_dashboard=args.dashboard,
+                           record_path=args.record, replay_path=args.replay)
+    except (RuntimeError, FileNotFoundError) as e:  # no key, or bad recording
         print(f"[range] {e}", file=sys.stderr)
         return 1
 
