@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -109,17 +110,53 @@ def render_text(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_markdown(result: dict[str, Any]) -> str:
+    """A shareable scorecard: how the configuration did across the battery."""
+    head = "PASS" if result["passed"] else "FAIL"
+    lines = [
+        "# Obscura47 Range Security Scorecard",
+        "",
+        f"**Result: {head}**  ({result['matched']}/{result['n']} scenarios "
+        f"behaved as expected)",
+        "",
+        "Each scenario is run, scored, gated against a safety policy, and "
+        "checked against its expected outcome. Known-vulnerable demonstrations "
+        "are *expected* to fail the gate; their defended counterparts are "
+        "expected to pass, which is how a control's efficacy is shown.",
+        "",
+        "| scenario | verdict | gate | expected | status |",
+        "|---|---|---|---|---|",
+    ]
+    for c in result["cases"]:
+        lines.append(
+            f"| {c['name']} | {c['verdict']} | "
+            f"{'pass' if c['gate_passed'] else 'fail'} | "
+            f"{'pass' if c['expected_pass'] else 'fail'} | "
+            f"{'ok' if c['ok'] else '**DRIFT**'} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range.suite",
         description="Run the behavioral regression battery; exit 1 if any "
                     "scenario deviates from its expected outcome.")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--md", default=None,
+                        help="write a markdown scorecard to this path")
     args = parser.parse_args(argv)
 
     result = run_suite()
-    print(json.dumps(result, indent=2, default=str) if args.json
-          else render_text(result))
+    if args.md:
+        os.makedirs(os.path.dirname(os.path.abspath(args.md)), exist_ok=True)
+        with open(args.md, "w", encoding="utf-8") as f:
+            f.write(render_markdown(result))
+        print(args.md)
+    elif args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        print(render_text(result))
     return 0 if result["passed"] else 1
 
 

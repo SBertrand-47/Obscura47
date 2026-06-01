@@ -60,6 +60,7 @@ K_DEFENSE_FLAG = "defense.flag"
 K_MODERATION = "moderation.action"
 K_NODE_UNSTABLE = "node.unstable"
 K_TOOL_MISUSE = "tool.misuse"  # acting outside one's authorization
+K_DECISION = "agent.decision"  # what an agent saw and chose, for the "why" trace
 
 
 @dataclass(frozen=True)

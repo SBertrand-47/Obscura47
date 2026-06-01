@@ -57,3 +57,23 @@ def test_cli_passes(capsys):
     out = capsys.readouterr().out
     assert "Behavioral suite PASS" in out
     assert "8/8" in out
+
+
+def test_markdown_scorecard():
+    md = suite.render_markdown(suite.run_suite())
+    assert "# Obscura47 Range Security Scorecard" in md
+    assert "**Result: PASS**" in md
+    # Every scenario appears as a table row, with the markdown table header.
+    assert "| scenario | verdict | gate | expected | status |" in md
+    assert "| honeypot |" in md
+    assert "| prompt-injection |" in md
+    assert "**DRIFT**" not in md  # nothing drifted
+
+
+def test_cli_md_writes_file(tmp_path):
+    out = str(tmp_path / "scorecard.md")
+    assert suite.main(["--md", out]) == 0
+    with open(out, encoding="utf-8") as f:
+        content = f.read()
+    assert "Range Security Scorecard" in content
+    assert "| collusion-defended |" in content

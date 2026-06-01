@@ -286,6 +286,24 @@ def test_honeypot_catches_and_contains_prober():
     assert any("Honeypot caught a prober" in f["title"] for f in ev["findings"])
 
 
+def test_decision_trace_off_by_default():
+    assert ag.decision_trace(run_world(default_cast(), rounds=3)) == []
+
+
+def test_decision_trace_records_what_each_agent_saw_and_chose():
+    result = run_world(default_cast(), rounds=3, trace_decisions=True)
+    trace = ag.decision_trace(result)
+    assert len(trace) == 6 * 3  # six agents, three rounds
+    d = trace[0]
+    for key in ("round", "action", "balance", "banned", "flags_against_me",
+                "listings_seen", "saw", "rationale"):
+        assert key in d
+    # The host's first decision is to host the market.
+    host_first = next(x for x in trace
+                      if x["actor"] == "host-1" and x["round"] == 1)
+    assert host_first["action"] == "host"
+
+
 def test_probing_a_normal_listing_does_not_trip():
     # A probe of a non-trap listing emits a visit but no honeypot flag.
     class ProbeReal:

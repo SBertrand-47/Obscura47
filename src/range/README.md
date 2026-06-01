@@ -49,6 +49,7 @@ python -m src.range dashboard <experiment_id> -o run.html
 python -m src.range compare                    # rank configs by residual risk
 python -m src.range gate <experiment_id>       # CI gate: exit 1 on a safety regression
 python -m src.range suite                       # behavioral battery vs expected outcomes
+python -m src.range suite --md scorecard.md     # shareable security scorecard
 python -m src.range evidence <id> --md report.md --json report.json
 ```
 
