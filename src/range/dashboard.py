@@ -23,7 +23,9 @@ import sys
 from typing import Any
 
 from src.range.evaluate import evaluate_run
+from src.range.forensics import build_incidents
 from src.range.report import build_report
+from src.range.trajectory import build_trajectory
 from src.utils import experiment
 
 _VERDICT_COLOR = {
@@ -107,6 +109,34 @@ def render_html(experiment_id: str) -> str:
                       [[c["actor"], c["kind"], c["what"]] for c in chain])
         investigations += (f'<h3>Investigation: {_esc(suspect)}</h3>{rows}')
 
+    incidents = build_incidents(experiment_id)
+    incidents_section = ""
+    if incidents:
+        rows = "".join(
+            f'<tr><td><span class="sev" style="background:'
+            f'{_SEV_COLOR.get(i["severity"], "#546e7a")}">'
+            f'{_esc(i["severity"].upper())}</span></td>'
+            f'<td>{_esc(i["suspect"])}</td>'
+            f'<td>{_esc(", ".join(i["techniques"]) or "-")}</td>'
+            f'<td>{_esc(i["funds_extracted"])}</td>'
+            f'<td>{_esc(i["contained"])}</td></tr>'
+            for i in incidents)
+        incidents_section = (
+            '<section><h2>Incidents</h2><table><thead><tr>'
+            '<th>severity</th><th>suspect</th><th>techniques</th>'
+            '<th>funds</th><th>contained</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></section>')
+
+    traj = build_trajectory(experiment_id)
+    trajectory_section = ""
+    if traj:
+        cols = ["round", "active_agents", "attacks", "defenses",
+                "moderations", "volume", "trust_delta"]
+        trajectory_section = (
+            "<section><h2>Trajectory (per round)</h2>"
+            + _table(cols, [[b.get(c, 0) for c in cols] for b in traj])
+            + "</section>")
+
     decisions_section = ""
     if report.get("decisions"):
         rows = _table(
@@ -142,6 +172,8 @@ def render_html(experiment_id: str) -> str:
       <section><h2>Transactions</h2>{txns}</section>
       <section><h2>Timeline</h2>{timeline}</section>
     </div>
+    {incidents_section}
+    {trajectory_section}
     <section><h2>Adversarial investigations</h2>{investigations or '<p class="empty">none</p>'}</section>
     {decisions_section}
     """

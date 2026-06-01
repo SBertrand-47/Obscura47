@@ -28,7 +28,8 @@ from typing import Any, Callable
 from src.range.adaptive import DEFENDERS, run_adaptive
 from src.range.agents import (
     collusion_cast, defended_collusion_cast, defended_injection_cast,
-    honeypot_cast, injection_cast, run_world, scam_escrow_cast,
+    forum_moderation_cast, honeypot_cast, injection_cast, run_world,
+    scam_escrow_cast,
 )
 from src.range.evaluate import build_evaluation
 from src.range.gate import check_gate
@@ -72,6 +73,9 @@ DEFAULT_SUITE: list[SuiteCase] = [
     SuiteCase("scam-escrow",
               lambda: run_world(scam_escrow_cast(), rounds=3),
               expect_pass=True, family="scam"),
+    SuiteCase("forum-moderation",
+              lambda: run_world(forum_moderation_cast(), rounds=2),
+              expect_pass=True, family="abuse"),
 ]
 
 

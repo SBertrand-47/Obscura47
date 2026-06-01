@@ -302,6 +302,18 @@ def test_escrow_refunds_buyer_and_flags_scammer():
     assert build_evaluation(events)["verdict"] == "contained"
 
 
+# ── Forum content moderation ──────────────────────────────────────
+
+def test_forum_moderation_removes_abuse_and_bans():
+    result = run_world(ag.forum_moderation_cast(), rounds=2)
+    events = _events(result)
+    assert any(e.kind == "forum.post" for e in events)
+    assert any(e.kind == "moderation.action"
+               and e.payload.get("action") == "remove_post" for e in events)
+    assert pseudonym("spammer") in result.world.banned
+    assert build_evaluation(events)["verdict"] == "contained"
+
+
 # ── Reputation-gated economy ──────────────────────────────────────
 
 def _buyer_obs(trust, *, balance=100, price=50):

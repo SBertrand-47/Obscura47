@@ -61,6 +61,7 @@ K_MODERATION = "moderation.action"
 K_NODE_UNSTABLE = "node.unstable"
 K_TOOL_MISUSE = "tool.misuse"  # acting outside one's authorization
 K_DECISION = "agent.decision"  # what an agent saw and chose, for the "why" trace
+K_POST = "forum.post"          # a broadcast message to the shared forum
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ class World:
     trust: dict[str, int] = field(default_factory=dict)
     banned: set[str] = field(default_factory=set)
     escrow: dict[str, dict] = field(default_factory=dict)
+    forum: dict[str, dict] = field(default_factory=dict)
     _observers: dict[str, Observer] = field(default_factory=dict)
 
     def _observer(self, actor: str) -> Observer:
