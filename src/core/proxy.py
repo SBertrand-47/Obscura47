@@ -553,12 +553,27 @@ def handle_new_client(client_socket):
         except Exception:
             pass
 
+def _connect_session_id(data: str) -> str | None:
+    """Extract an optional X-Obscura-Session header from a CONNECT request.
+
+    Agent clients send this on the (local) CONNECT so the proxy can tie a
+    logical agent session to the circuit it opens. Browsers do not send it.
+    """
+    for line in data.split("\r\n")[1:]:
+        if not line:
+            break
+        if line.lower().startswith("x-obscura-session:"):
+            return line.split(":", 1)[1].strip() or None
+    return None
+
+
 def handle_connect(client_socket):
     try:
         data = client_socket.recv(4096).decode(errors="ignore")
         request_line = data.split("\r\n", 1)[0]
         _, target, _ = request_line.split()
         host, port_str = target.split(":")
+        agent_session_id = _connect_session_id(data)
         port = int(port_str)
 
         # Hidden-service branch - dial a `.obscura` address via rendezvous
@@ -616,7 +631,7 @@ def handle_connect(client_socket):
             "request_id": request_id,
         }
 
-        route = start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route)
+        route = start_tunnel(destination, relay_peers, request_id, host, port, return_path, route=route, session_id=agent_session_id)
         if not route:
             log.warning("CONNECT refused: could not open tunnel to %s:%s", host, port)
             with pending_lock:

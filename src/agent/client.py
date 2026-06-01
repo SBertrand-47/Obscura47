@@ -61,6 +61,21 @@ class AgentResponse:
         return 200 <= self.status < 300
 
 
+def _connect_request(addr: str, port: int, session_id: str | None = None) -> bytes:
+    """Build the CONNECT request to the local proxy.
+
+    When a ``session_id`` is set we also send it as an ``X-Obscura-Session``
+    header on the CONNECT line itself (not just inside the tunnel). The proxy
+    is local (127.0.0.1), so this header never travels the overlay; it only
+    lets the proxy tie this logical agent session to the network circuit it
+    opens, for range-mode tracing.
+    """
+    lines = [f"CONNECT {addr}:{port} HTTP/1.1", f"Host: {addr}:{port}"]
+    if session_id:
+        lines.append(f"X-Obscura-Session: {session_id}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
 class AgentClient:
     """Synchronous HTTP/1.1 client targeting `.obscura` hosts.
 
@@ -139,12 +154,7 @@ class AgentClient:
         )
         try:
             sock.settimeout(self.timeout)
-            connect = (
-                f"CONNECT {addr}:{port} HTTP/1.1\r\n"
-                f"Host: {addr}:{port}\r\n"
-                f"\r\n"
-            ).encode("ascii")
-            sock.sendall(connect)
+            sock.sendall(_connect_request(addr, port, session_id))
 
             buf = _SocketBuffer(sock)
             ack_head = buf.read_until(b"\r\n\r\n")

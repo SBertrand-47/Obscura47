@@ -34,6 +34,17 @@ def getenv_int(name: str, default: int) -> int:
         return default
 
 
+# ── Deployment mode ───────────────────────────────────────────────
+# "public" (default) = the consumer anonymity network. The research
+#   telemetry plane is absent; nothing here changes for normal users.
+# "range"  = an operator-run, closed study network. Full operational +
+#   research instrumentation, experiment records and replay are allowed
+#   because the operator owns the whole world and nothing leaks back to
+#   the agents under study.
+# Read once here; see src/utils/experiment.py for what it gates.
+MODE = getenv_str("OBSCURA_MODE", "public").strip().lower()
+IS_RANGE_MODE = MODE == "range"
+
 # Network defaults (can be overridden by env)
 PROXY_HOST = getenv_str("OBSCURA_PROXY_HOST", "127.0.0.1")
 PROXY_PORT = getenv_int("OBSCURA_PROXY_PORT", 9047)
@@ -149,6 +160,14 @@ REQUIRE_WS_REACHABLE = getenv_str("OBSCURA_REQUIRE_WS_REACHABLE", "").strip().lo
 # Onion/observability
 ONION_ONLY = getenv_str("OBSCURA_ONION_ONLY", "false").lower() in ("1", "true", "yes")
 JSON_LOGS = getenv_str("OBSCURA_JSON_LOGS", "false").lower() in ("1", "true", "yes")
+
+# Research-plane out-of-band egress. When set, observatory events POST directly
+# to this operator collector instead of riding the overlay. This matters in
+# range mode: the overlay is under study, so research telemetry must not travel
+# the paths being studied (an on-path agent could observe or game it). Mirrors
+# how diag ships ops events to the registry /diag endpoint, out-of-band.
+RESEARCH_COLLECTOR_URL = getenv_str("OBSCURA_RESEARCH_COLLECTOR_URL", "").strip()
+RESEARCH_COLLECTOR_TOKEN = getenv_str("OBSCURA_RESEARCH_COLLECTOR_TOKEN", "").strip()
 
 # Minimal persistent audit logs. Keep these narrow to preserve anonymity:
 # registry admin actions and exit egress summaries only, no client-origin log.

@@ -36,6 +36,7 @@ from src.core.internet_discovery import (
 )
 from src.core import peer_health
 from src.core.router import build_hs_route, send_hs_frame
+from src.utils import trace
 from src.utils.config import HS_CIRCUIT_HOPS, REGISTRY_URL
 from src.utils.logger import get_logger
 from src.utils.onion_addr import verify_descriptor
@@ -254,6 +255,15 @@ def dial_hidden_service(
         'cookie': cookie,
         'pub': proxy_pub_pem,
     }
+    # Range-mode trace: stamp the rendezvous circuit so each hop of the HS dial
+    # can be reconstructed, mirroring the exit-tunnel path. None on public net.
+    tb = trace.start_trace(
+        rv_req_id, kind="hs_dial", addr=addr,
+        rv=f"{rv_point.get('host')}:{rv_point.get('port')}",
+        hops=len(rv_route),
+    )
+    if tb is not None:
+        rv_env[trace.TRACE_KEY] = tb
     if not send_hs_frame(rv_route, rv_env):
         pop_ready_event(rv_req_id)
         log.warning("rv_establish send failed for %s", addr)

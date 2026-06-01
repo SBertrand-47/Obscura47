@@ -6,6 +6,7 @@ import base64
 import threading
 from src.core.encryptions import onion_encrypt_for_peer
 from src.core import peer_health
+from src.utils import trace
 from src.utils.logger import get_logger
 from src.utils.config import (
     FRAME_RETRY_ATTEMPTS, FRAME_RETRY_BASE_DELAY_MS,
@@ -659,7 +660,7 @@ def channel_idle_sweeper():
             except Exception:
                 pass
 
-def start_tunnel(destination, peers, request_id: str, host: str, port: int, return_path: dict, route=None):
+def start_tunnel(destination, peers, request_id: str, host: str, port: int, return_path: dict, route=None, session_id: str | None = None):
     """Start a tunnel by sending a CONNECT_INIT frame along a fixed route.
 
     envelope.route holds the hops *after* the first hop - i.e. what the first
@@ -680,6 +681,20 @@ def start_tunnel(destination, peers, request_id: str, host: str, port: int, retu
         "return_path": return_path,
         "route": remaining,
     }
+    # Range-mode trace: stamp the circuit so each hop can be reconstructed.
+    # Returns None (and adds nothing) on the public network. ``session_id``,
+    # when the agent client supplied one, ties this circuit to the agent's
+    # logical session in the research plane (kept in the operator-only span,
+    # never in the in-band block that relays see).
+    trace_fields = {
+        "exit": f"{destination.get('host')}:{destination.get('port')}",
+        "route_len": len(remaining),
+    }
+    if session_id:
+        trace_fields["session_id"] = session_id
+    tb = trace.start_trace(request_id, **trace_fields)
+    if tb is not None:
+        envelope[trace.TRACE_KEY] = tb
     sent = _send_frame_via_route([route[0]], envelope)
     if not sent:
         return None
