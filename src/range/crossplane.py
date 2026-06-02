@@ -132,7 +132,8 @@ def correlate(experiment_id: str | None = None, *,
               events: list[Any] | None = None,
               spans: list[dict[str, Any]] | None = None,
               logs_dir: str | None = None,
-              hosts: dict[str, str] | None = None) -> dict[str, Any]:
+              hosts: dict[str, str] | None = None,
+              reputation_baseline: dict[str, int] | None = None) -> dict[str, Any]:
     """Join research events and ops spans by ``session_id`` for one run.
 
     Returns a per-session view (the agent's research events plus the network
@@ -194,6 +195,12 @@ def correlate(experiment_id: str | None = None, *,
     responses = _responses(events)
     economy = _economy(events)
     reputation = _reputation(events)
+    if reputation_baseline:
+        # Carry forward standing from prior runs: the society's long-term memory.
+        merged = dict(reputation_baseline)
+        for a, v in reputation.items():
+            merged[a] = merged.get(a, 0) + v
+        reputation = merged
     forum = _forum(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {

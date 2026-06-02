@@ -286,6 +286,36 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_reputation_ledger_carries_distrust_across_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range import crossplane as cp
+    from src.range.live import LiveReputationGate, ReputationLedger
+
+    path = str(tmp_path / "rep.json")
+    # Run 1: the escrow penalises seller-1 for a scam; the ledger persists it.
+    run1 = [_evt("escrow", "trust.update", subject="seller-1", delta=-2,
+                 reason="scam")]
+    ReputationLedger(path).record(run1)
+
+    # Run 2: a fresh process loads the persisted standing. seller-1 returns and
+    # commits no new crime, but its history makes it distrusted.
+    ledger2 = ReputationLedger(path)
+    assert ledger2.scores()["seller-1"] == -2
+    view = cp.correlate("run2", events=[], spans=[],
+                        reputation_baseline=ledger2.scores())
+    assert view["reputation"]["seller-1"] == -2
+    flagged = {x["agent"]: x for x in view["threats"]["flagged_agents"]}
+    assert "seller-1" in flagged
+    assert any("distrust" in r for r in flagged["seller-1"]["reasons"])
+
+    # The gate bans it on sight, on its prior reputation alone.
+    cap = _Capture()
+    gate = LiveReputationGate("reputation-gate",
+                              observer=Observer("reputation-gate", sink=cap),
+                              session_id="SG")
+    assert any(i["target"] == "seller-1" for i in gate.enforce(view))
+
+
 def test_live_regulator_issues_ship_verdict(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range.live import LiveRegulator

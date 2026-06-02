@@ -21,6 +21,8 @@ exit). It is inert/unused on the public consumer network.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from src.agent.client import AgentClient
@@ -559,6 +561,61 @@ class LiveModerator:
                 issued.append({"moderator": self.actor, "post_id": pid,
                                "author": author, "action": "remove"})
         return issued
+
+
+class ReputationLedger:
+    """Persistent reputation across runs - the society's long-term memory.
+
+    Stores cumulative reputation per agent on disk, so an offender carries its
+    distrust into future runs: a scammer penalised once is gated on sight the
+    next time it appears. Pass :meth:`scores` as crossplane.correlate's
+    ``reputation_baseline`` to seed a run with prior standing, and call
+    :meth:`record` after a run to fold its reputation changes back in.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._scores: dict[str, int] = self._load()
+
+    def _load(self) -> dict[str, int]:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return {k: int(v) for k, v in json.load(f).items()}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def scores(self) -> dict[str, int]:
+        return dict(self._scores)
+
+    def record(self, events: list[Any]) -> dict[str, int]:
+        """Fold a run's trust.update deltas into the persistent store."""
+        changed = False
+        for e in events or []:
+            if getattr(e, "kind", None) != "trust.update":
+                continue
+            p = getattr(e, "payload", {}) or {}
+            subject = p.get("subject")
+            if not subject:
+                continue
+            try:
+                self._scores[subject] = (self._scores.get(subject, 0)
+                                         + int(p.get("delta") or 0))
+                changed = True
+            except (TypeError, ValueError):
+                continue
+        if changed:
+            self._save()
+        return dict(self._scores)
+
+    def _save(self) -> None:
+        try:
+            d = os.path.dirname(os.path.abspath(self.path))
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self._scores, f)
+        except OSError:
+            pass
 
 
 class LiveRegulator:
