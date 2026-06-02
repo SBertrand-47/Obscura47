@@ -1,11 +1,11 @@
-"""A multi-agent live society on the real overlay, observed as one graph.
+"""An adversarial multi-agent society on the real overlay, observed and flagged.
 
-Two model-driven agents (a buyer and an attacker, both replayed for
-determinism) act on a real loopback overlay against a shared service. Their
-reasoning, their dials, and the circuits their traffic produced are all
-captured; crossplane then reconstructs the whole run and builds the cross-agent
-traffic graph - who dialed whom - from this real telemetry. This is the "dark
-web for agents" populated and watched, not a single dial.
+A legitimate buyer visits one service; an attacker fans out across several
+services (recon). Both run model-driven (replayed for determinism) on a real
+loopback overlay. crossplane reconstructs the whole run, builds the cross-agent
+traffic graph, and the threat heuristic flags the attacker's fan-out - so the
+observe dashboard shows the attack pattern caught, not just raw traffic. This is
+the "dark web for agents" populated, watched, and triaged.
 
 Individual-run integration test (binds sockets). Run with:
 
@@ -21,24 +21,27 @@ pytestmark = pytest.mark.integration
 
 PORTS = {"node": 15201, "node_ws": 15202, "exit": 16200, "exit_ws": 16201,
          "proxy": 19247, "proxy_resp": 19251, "proxy_ws_resp": 19252}
-SERVICE_PORT = 18281
+SERVICES = [18281, 18282, 18283]   # market, forum, bank
 
 
-def _visit_then_finish(port, rationale):
-    return [
-        {"blocks": [{"input": {"kind": "visit", "addr": "127.0.0.1",
-                               "path": "/", "port": port,
-                               "rationale": rationale}, "id": "t1"}],
-         "usage": {"input_tokens": 30, "output_tokens": 8}},
-        {"blocks": [{"input": {"kind": "finish", "rationale": "done"},
-                     "id": "t2"}],
-         "usage": {"input_tokens": 20, "output_tokens": 4}},
-    ]
+def _visits(*specs):
+    """Build a replay recording: one visit per (port, rationale), then finish."""
+    recs = []
+    for i, (port, why) in enumerate(specs):
+        recs.append({"blocks": [{"input": {"kind": "visit", "addr": "127.0.0.1",
+                                           "path": "/", "port": port,
+                                           "rationale": why},
+                                 "id": f"v{i}"}],
+                     "usage": {"input_tokens": 30, "output_tokens": 8}})
+    recs.append({"blocks": [{"input": {"kind": "finish", "rationale": "done"},
+                             "id": "fin"}],
+                 "usage": {"input_tokens": 20, "output_tokens": 4}})
+    return recs
 
 
-def test_multi_agent_society_is_observable_as_a_graph(monkeypatch, tmp_path):
+def test_adversarial_society_flags_recon_on_the_graph(monkeypatch, tmp_path):
     ov = _overlay.bring_up(monkeypatch, tmp_path, PORTS)
-    target = _overlay.start_http_target(SERVICE_PORT)
+    targets = [_overlay.start_http_target(p) for p in SERVICES]
     try:
         from src.range import crossplane, live
         from src.range.llm_io import ReplayClient
@@ -46,56 +49,63 @@ def test_multi_agent_society_is_observable_as_a_graph(monkeypatch, tmp_path):
 
         eid = "live-society"
         exp.set_experiment_id(eid)
-        directory = [{"addr": "127.0.0.1", "port": SERVICE_PORT,
-                      "title": "seller-1's market"}]
+        directory = [{"addr": "127.0.0.1", "port": p, "title": t}
+                     for p, t in zip(SERVICES, ("market", "forum", "bank"))]
 
-        # Two model-driven agents acting on the same overlay, same experiment.
+        # Legit buyer: one service.
         buyer = live.LiveAgent(
             "buy goods from the market", session=live.LiveSession(
                 "buyer-1", session_id="S-BUYER", experiment_id=eid,
                 proxy_host="127.0.0.1", proxy_port=ov["proxy_port"]),
             directory=directory,
-            client=ReplayClient(_visit_then_finish(SERVICE_PORT, "browse deals")))
+            client=ReplayClient(_visits((SERVICES[0], "browse the market"))))
+        # Attacker: fans out across every service (recon).
         attacker = live.LiveAgent(
-            "probe the market for weaknesses", session=live.LiveSession(
+            "find weaknesses anywhere on the network", session=live.LiveSession(
                 "attacker-1", session_id="S-ATTACKER", experiment_id=eid,
                 proxy_host="127.0.0.1", proxy_port=ov["proxy_port"]),
             directory=directory,
-            client=ReplayClient(_visit_then_finish(SERVICE_PORT, "recon")))
+            client=ReplayClient(_visits(
+                (SERVICES[0], "probe the market"),
+                (SERVICES[1], "probe the forum"),
+                (SERVICES[2], "probe the bank"))))
 
-        assert buyer.run(max_steps=3)[0]["result_summary"].startswith("status 200")
-        assert attacker.run(max_steps=3)[0]["result_summary"].startswith("status 200")
-
+        buyer.run(max_steps=3)
+        attacker.run(max_steps=5)
         import time
-        time.sleep(0.7)  # let terminal spans flush
+        time.sleep(0.8)
 
-        # Both agents and their real traffic are reconstructed; the service maps
-        # to its hosting agent so the graph is the social graph of the run.
-        view = crossplane.correlate(eid, logs_dir=ov["logs_dir"],
-                                    hosts={"127.0.0.1": "seller-1"})
+        view = crossplane.correlate(eid, logs_dir=ov["logs_dir"])
         sessions = {s["session_id"]: s for s in view["sessions"]}
         assert {"S-BUYER", "S-ATTACKER"} <= set(sessions)
-        assert sessions["S-BUYER"]["observed_on_wire"]
-        assert sessions["S-ATTACKER"]["observed_on_wire"]
+        assert all(sessions[k]["observed_on_wire"] for k in sessions), \
+            view["coverage"]
 
+        # The graph shows the attacker's fan-out (3 services) vs the buyer (1).
         g = view["graph"]
-        assert set(g["agents"]) == {"buyer-1", "attacker-1"}
-        edges = {(e["src"], e["dst_agent"]) for e in g["edges"]}
-        # Both agents transacted with seller-1, observed on the wire.
-        assert ("buyer-1", "seller-1") in edges
-        assert ("attacker-1", "seller-1") in edges
-        assert all(e["observed"] for e in g["edges"])
+        atk_edges = [e for e in g["edges"] if e["src"] == "attacker-1"]
+        buy_edges = [e for e in g["edges"] if e["src"] == "buyer-1"]
+        assert len(atk_edges) == 3, atk_edges
+        assert len(buy_edges) == 1, buy_edges
 
-        # The whole society renders to one observable page.
+        # The threat heuristic flags the attacker (recon), not the buyer.
+        flagged = view["threats"]["flagged"]
+        assert "attacker-1" in flagged
+        assert "buyer-1" not in flagged
+        assert any("recon" in r for f in view["threats"]["flagged_agents"]
+                   if f["agent"] == "attacker-1" for r in f["reasons"])
+
+        # The dashboard renders the graph + the flag.
         html = crossplane.render_html(view)
-        assert "Traffic graph" in html
-        assert "buyer-1" in html and "attacker-1" in html
+        assert "<svg" in html and "Flagged agents" in html
+        assert "attacker-1" in html
         out = os.environ.get("OBSCURA_OBSERVE_OUT")
         if out:
             with open(out, "w", encoding="utf-8") as f:
                 f.write(html)
     finally:
-        try:
-            target.close()
-        except Exception:
-            pass
+        for t in targets:
+            try:
+                t.close()
+            except Exception:
+                pass

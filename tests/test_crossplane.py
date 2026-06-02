@@ -184,6 +184,38 @@ def test_traffic_graph_maps_who_dialed_whom_across_agents(tmp_path):
     assert edges[("buyer-1", "shadow.bazaar")]["dst_agent"] == "seller-1"
 
 
+def test_threats_flag_recon_fanout_not_normal_agents(tmp_path):
+    # An agent dialing 3+ distinct services (host:port) is flagged for recon;
+    # an agent dialing one is not.
+    d = str(tmp_path)
+    _three_hop_logs(d, trace_id="T1", session_id="S1")
+    events = [
+        _ev_actor("buyer-1", "dial.out", "S1", 1.0, addr="market", port=80),
+        _ev_actor("scanner-1", "dial.out", "S2", 2.0, addr="a", port=8001),
+        _ev_actor("scanner-1", "dial.out", "S2", 2.1, addr="a", port=8002),
+        _ev_actor("scanner-1", "dial.out", "S2", 2.2, addr="a", port=8003),
+    ]
+    view = cp.correlate("exp1", events=events, logs_dir=d)
+    flagged = view["threats"]["flagged"]
+    assert "scanner-1" in flagged and "buyer-1" not in flagged
+    # The service nodes are distinguished by port (fan-out is visible).
+    assert {"a:8001", "a:8002", "a:8003"} <= set(view["graph"]["services"])
+    reasons = [r for f in view["threats"]["flagged_agents"]
+               if f["agent"] == "scanner-1" for r in f["reasons"]]
+    assert any("recon" in r for r in reasons)
+    html = cp.render_html(view)
+    assert "Flagged agents" in html and "scanner-1" in html
+
+
+def test_threats_flag_unobserved_traffic_as_evasion():
+    # A research dial that never produced a circuit is flagged as evasion.
+    events = [_ev_actor("ghost-1", "dial.out", "S9", 1.0, addr="x")]
+    view = cp.correlate("exp1", events=events, spans=[])
+    assert "ghost-1" in view["threats"]["flagged"]
+    reasons = [r for f in view["threats"]["flagged_agents"] for r in f["reasons"]]
+    assert any("evasion" in r for r in reasons)
+
+
 def test_graph_renders_in_text_and_html(tmp_path):
     d = str(tmp_path)
     _three_hop_logs(d, trace_id="T1", session_id="S1")

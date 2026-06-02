@@ -191,13 +191,45 @@ def correlate(experiment_id: str | None = None, *,
         "fully_observable": (not unobserved and not unattributed
                              and bool(circuits)),
     }
+    graph = traffic_graph(sessions, hosts=hosts)
     return {
         "experiment_id": experiment_id,
         "sessions": sessions,
         "circuits": circuits,
         "coverage": coverage,
-        "graph": traffic_graph(sessions, hosts=hosts),
+        "graph": graph,
+        "threats": _detect_threats(sessions),
     }
+
+
+def _detect_threats(sessions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Flag suspicious agents from the joined planes, so the graph tells a
+    security story: fanning out across many services (recon), and traffic that
+    never showed up on the wire (evasion / unobserved)."""
+    per: dict[str, dict[str, Any]] = {}
+    for s in sessions:
+        actor = _session_actor(s) or s["session_id"]
+        p = per.setdefault(actor, {"services": set(), "unobserved": 0})
+        for e in s["research_events"]:
+            if getattr(e, "kind", None) == "dial.out":
+                dst = _dial_target(e)
+                if dst:
+                    p["services"].add(dst)
+        if s["made_research_dials"] and not s["observed_on_wire"]:
+            p["unobserved"] += 1
+    flagged = []
+    for actor, p in sorted(per.items()):
+        reasons = []
+        if len(p["services"]) >= 3:
+            reasons.append(
+                f"fanned out across {len(p['services'])} services (recon)")
+        if p["unobserved"]:
+            reasons.append("traffic never observed on the wire (evasion)")
+        if reasons:
+            flagged.append({"agent": actor, "reasons": reasons,
+                            "services": sorted(p["services"])})
+    return {"flagged_agents": flagged,
+            "flagged": sorted(f["agent"] for f in flagged)}
 
 
 def _session_actor(session: dict[str, Any]) -> str | None:
@@ -207,6 +239,23 @@ def _session_actor(session: dict[str, Any]) -> str | None:
         if actor:
             return actor
     return None
+
+
+def _dial_target(event: Any) -> str | None:
+    """The service a dial.out reached, as host or host:port. Including the port
+    distinguishes services that share a host (e.g. loopback) so fan-out is
+    visible."""
+    payload = getattr(event, "payload", {}) or {}
+    addr = payload.get("addr")
+    if not addr:
+        return None
+    port = payload.get("port")
+    try:
+        if port and int(port) != 80:
+            return f"{addr}:{int(port)}"
+    except (TypeError, ValueError):
+        pass
+    return str(addr)
 
 
 def traffic_graph(sessions: list[dict[str, Any]],
@@ -229,7 +278,7 @@ def traffic_graph(sessions: list[dict[str, Any]],
         for e in s["research_events"]:
             if getattr(e, "kind", None) != "dial.out":
                 continue
-            dst = (getattr(e, "payload", {}) or {}).get("addr")
+            dst = _dial_target(e)
             if not dst:
                 continue
             services.add(dst)
@@ -374,27 +423,121 @@ def _timeline_html(timeline: list[dict]) -> str:
             f'</tbody></table>')
 
 
+def _svg_graph(graph: dict, flagged: set[str]) -> str:
+    """A bipartite node-link diagram: agents (left) dialing services (right).
+    Edge colour: green observed, red unobserved, orange-dashed from a flagged
+    agent. Flagged agents are drawn red with a ring."""
+    agents, services = graph["agents"], graph["services"]
+    if not agents and not services:
+        return '<p class="empty">no traffic to graph</p>'
+    W, ax, sx = 720, 165, 555
+    rows = max(len(agents), len(services), 1)
+    H = rows * 76 + 30
+
+    def col_y(i: int, n: int) -> int:
+        return int(H * (i + 1) / (n + 1))
+    ay = {a: col_y(i, len(agents)) for i, a in enumerate(agents)}
+    sy = {s: col_y(i, len(services)) for i, s in enumerate(services)}
+
+    parts = [f'<svg viewBox="0 0 {W} {H}" width="100%" '
+             f'preserveAspectRatio="xMidYMid meet" class="graph">']
+    for e in graph["edges"]:
+        if e["src"] not in ay or e["dst"] not in sy:
+            continue
+        x1, y1, x2, y2 = ax, ay[e["src"]], sx, sy[e["dst"]]
+        if e["src"] in flagged:
+            stroke, dash, w = "#ef6c00", ' stroke-dasharray="7 4"', "2.5"
+        elif e["observed"]:
+            stroke, dash, w = "#3fae5a", "", "2"
+        else:
+            stroke, dash, w = "#e0566a", ' stroke-dasharray="3 4"', "2"
+        parts.append(f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" '
+                     f'stroke="{stroke}" stroke-width="{w}"{dash}/>')
+        mx, my = (x1 + x2) // 2, (y1 + y2) // 2
+        parts.append(f'<text x="{mx}" y="{my - 4}" class="elabel">'
+                     f'{_esc(e["dials"])}&times;</text>')
+    for s in services:
+        y = sy[s]
+        parts.append(f'<circle cx="{sx}" cy="{y}" r="9" fill="#1565c0" '
+                     f'stroke="#7aa2f7" stroke-width="2"/>')
+        parts.append(f'<text x="{sx + 16}" y="{y + 4}" class="nlabel svc">'
+                     f'{_esc(s)}</text>')
+    for a in agents:
+        y = ay[a]
+        flag = a in flagged
+        fill = "#c62828" if flag else "#2e7d32"
+        ring = '#ff8a80" stroke-width="3' if flag else '#9ece6a" stroke-width="2'
+        parts.append(f'<circle cx="{ax}" cy="{y}" r="11" fill="{fill}" '
+                     f'stroke="{ring}"/>')
+        label = _esc(a) + (" ⚠" if flag else "")
+        parts.append(f'<text x="{ax - 16}" y="{y + 4}" text-anchor="end" '
+                     f'class="nlabel{" flag" if flag else ""}">{label}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def render_html(view: dict[str, Any]) -> str:
-    """Render the correlated cross-plane view as a self-contained HTML page."""
+    """Render the correlated cross-plane view as a polished, self-contained
+    dashboard: a node-link traffic graph, a threat panel, and per-session
+    cross-plane detail."""
     cov = view["coverage"]
-    obs_color = "#2e7d32" if cov["fully_observable"] else "#ef6c00"
+    graph = view.get("graph") or {}
+    threats = view.get("threats") or {}
+    flagged = set(threats.get("flagged", []))
+    fully = cov["fully_observable"]
+    posture = ("fully observable", "#2e7d32") if fully else \
+        ("observability gaps", "#ef6c00")
+
+    chips = "".join(
+        f'<div class="chip"><span class="cv">{v}</span>'
+        f'<span class="ck">{k}</span></div>'
+        for k, v in [("research sessions", cov["research_sessions"]),
+                     ("ops circuits", cov["ops_circuits"]),
+                     ("observed on wire", cov["sessions_observed_on_wire"]),
+                     ("flagged agents", len(flagged))])
+
+    graph_html = ""
+    if graph.get("agents") or graph.get("services"):
+        legend = ('<div class="legend">'
+                  '<span><i class="ln obs"></i>observed</span>'
+                  '<span><i class="ln un"></i>unobserved</span>'
+                  '<span><i class="ln sus"></i>flagged agent</span>'
+                  '<span><i class="dot ag"></i>agent</span>'
+                  '<span><i class="dot sv"></i>service</span></div>')
+        graph_html = (
+            f'<section><h2>Traffic graph &middot; who dialed whom</h2>'
+            f'<p class="sub">{len(graph["agents"])} agent(s) dialing '
+            f'{len(graph["services"])} service(s) on Obscura</p>'
+            f'{legend}{_svg_graph(graph, flagged)}</section>')
+
+    threat_html = ""
+    if threats.get("flagged_agents"):
+        items = "".join(
+            f'<li><span class="badge bad">{_esc(f["agent"])}</span> '
+            f'{_esc("; ".join(f["reasons"]))}</li>'
+            for f in threats["flagged_agents"])
+        threat_html = (f'<section class="alert"><h2>&#9888; Flagged agents</h2>'
+                       f'<ul class="threats">{items}</ul></section>')
+
     sessions_html = ""
     for s in view["sessions"]:
+        flag = s["session_id"] in flagged or _session_actor(s) in flagged
         on_wire = s["observed_on_wire"]
-        badge = ("#2e7d32", "observed on wire") if on_wire else \
-            ("#c62828", "NOT traced on wire")
+        bcol, btxt = (("#2e7d32", "observed on wire") if on_wire
+                      else ("#c62828", "NOT traced on wire"))
         circuits = "".join(
             f'<div class="cwrap"><div class="ctitle">circuit '
             f'{_esc(c["trace_id"])} &middot; {c["length"]} hops</div>'
             f'{_circuit_path_html(c)}</div>' for c in s["circuits"]) \
             or '<p class="empty">no ops trace for this session</p>'
+        actor = _esc(_session_actor(s) or "")
         sessions_html += (
-            f'<section><div class="shead"><h2>session {_esc(s["session_id"])}</h2>'
-            f'<span class="badge" style="background:{badge[0]}">{badge[1]}</span>'
-            f'</div>{circuits}<h3>timeline (both planes)</h3>'
+            f'<section><div class="shead"><h2>session '
+            f'{_esc(s["session_id"])} <small>{actor}</small></h2>'
+            f'<span class="badge" style="background:{bcol}">{btxt}</span></div>'
+            f'{circuits}<h3>timeline (both planes)</h3>'
             f'{_timeline_html(s["timeline"])}</section>')
 
-    # Traffic on the wire we cannot attribute to any agent session.
     unattributed = [c for c in view["circuits"]
                     if not c["session_id"]
                     or c["session_id"] not in {s["session_id"]
@@ -409,66 +552,80 @@ def render_html(view: dict[str, Any]) -> str:
                        f'<p class="sub">Circuits seen on the wire with no '
                        f'matching agent decision.</p>{items}</section>')
 
-    # Cross-agent traffic graph: who dialed whom across the whole run.
-    graph = view.get("graph") or {}
-    graph_html = ""
-    if graph.get("edges"):
-        grows = ""
-        for e in graph["edges"]:
-            dst = _esc(e["dst"])
-            if e.get("dst_agent"):
-                dst += f' <small>[{_esc(e["dst_agent"])}]</small>'
-            ocol = "#2e7d32" if e["observed"] else "#c62828"
-            otext = "observed" if e["observed"] else "unobserved"
-            grows += (f'<tr><td><b>{_esc(e["src"])}</b></td>'
-                      f'<td class="arrow">&rarr;</td><td>{dst}</td>'
-                      f'<td>{_esc(e["dials"])}</td>'
-                      f'<td><span class="badge" style="background:{ocol}">'
-                      f'{otext}</span></td></tr>')
-        graph_html = (
-            f'<section><h2>Traffic graph &middot; who dialed whom</h2>'
-            f'<p class="sub">{len(graph["agents"])} agent(s), '
-            f'{len(graph["services"])} service(s)</p>'
-            f'<table class="tl"><thead><tr><th>agent</th><th></th>'
-            f'<th>service</th><th>dials</th><th>wire</th></tr></thead>'
-            f'<tbody>{grows}</tbody></table></section>')
-
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Obscura observe &middot; {_esc(view.get('experiment_id') or '')}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obscura Observatory &middot; {_esc(view.get('experiment_id') or '')}</title>
 <style>
- body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;
-   background:#0f1115;color:#e6e6e6;padding:28px;max-width:1000px}}
- h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0}}
- h3{{font-size:13px;color:#8b95a5;margin:14px 0 4px}}
- .sub{{color:#8b95a5;margin:4px 0 14px}}
- .badge{{color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;
+ :root{{color-scheme:dark}}
+ *{{box-sizing:border-box}}
+ body{{font:14px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,sans-serif;
+   margin:0;background:#0b0d12;color:#e6e9ef;padding:0 0 48px}}
+ .hero{{padding:32px 32px 22px;background:
+   linear-gradient(135deg,#1b1033 0%,#0e1a3a 55%,#0b0d12 100%);
+   border-bottom:1px solid #232734}}
+ .wrap{{max-width:1000px;margin:0 auto;padding:0 32px}}
+ .hero .wrap{{padding:0}}
+ h1{{font-size:25px;margin:0;letter-spacing:.2px}}
+ .tag{{color:#9aa6b8;margin:6px 0 18px;font-size:13px}}
+ .tag code{{color:#c7d2e6}}
+ .pill{{display:inline-block;color:#fff;border-radius:999px;padding:5px 14px;
+   font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}}
+ .chips{{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px}}
+ .chip{{background:#0d1422cc;border:1px solid #243049;border-radius:10px;
+   padding:10px 16px;min-width:96px;backdrop-filter:blur(4px)}}
+ .chip .cv{{display:block;font-size:22px;font-weight:700;color:#fff}}
+ .chip .ck{{display:block;font-size:11px;color:#9aa6b8;text-transform:uppercase;
+   letter-spacing:.04em}}
+ h2{{font-size:15px;margin:0 0 2px}} h2 small{{color:#8b95a5;font-weight:500}}
+ h3{{font-size:12px;color:#8b95a5;margin:14px 0 4px;text-transform:uppercase;
+   letter-spacing:.05em}}
+ .sub{{color:#8b95a5;margin:4px 0 12px;font-size:13px}}
+ .badge{{color:#fff;border-radius:4px;padding:2px 8px;font-size:11px;
    font-weight:600;text-transform:uppercase;letter-spacing:.03em}}
- section{{background:#161922;border:1px solid #232734;border-radius:8px;
-   padding:16px;margin:14px 0}}
+ .badge.bad{{background:#c62828}}
+ section{{background:#12151d;border:1px solid #222838;border-radius:12px;
+   padding:18px 20px;margin:18px auto;max-width:1000px}}
+ section.alert{{border-color:#7a3b1a;background:#1c130c}}
  .shead{{display:flex;align-items:center;justify-content:space-between;gap:12px}}
+ .legend{{display:flex;gap:16px;flex-wrap:wrap;color:#9aa6b8;font-size:12px;
+   margin:6px 0 10px;align-items:center}}
+ .legend i{{display:inline-block;vertical-align:middle;margin-right:5px}}
+ .legend .ln{{width:18px;height:0;border-top:3px solid}}
+ .ln.obs{{border-color:#3fae5a}} .ln.un{{border-color:#e0566a;
+   border-top-style:dashed}} .ln.sus{{border-color:#ef6c00;
+   border-top-style:dashed}}
+ .legend .dot{{width:11px;height:11px;border-radius:50%}}
+ .dot.ag{{background:#2e7d32}} .dot.sv{{background:#1565c0}}
+ svg.graph{{display:block;max-height:520px}}
+ svg .nlabel{{fill:#cdd6e6;font:600 13px ui-monospace,Menlo,monospace}}
+ svg .nlabel.flag{{fill:#ff8a80}} svg .nlabel.svc{{fill:#9ec1ff;font-weight:500}}
+ svg .elabel{{fill:#7e8aa0;font:11px ui-monospace,monospace;text-anchor:middle}}
+ .threats{{list-style:none;padding:0;margin:0}}
+ .threats li{{margin:8px 0;color:#f0c9b0}}
  .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}
- .hop{{display:inline-flex;flex-direction:column;background:#1d2230;
-   border:1px solid #2c3344;border-radius:6px;padding:6px 10px;min-width:60px}}
- .hop b{{font-size:12px;text-transform:uppercase;letter-spacing:.03em;
+ .hop{{display:inline-flex;flex-direction:column;background:#161c2b;
+   border:1px solid #2c3344;border-radius:8px;padding:6px 11px;min-width:64px}}
+ .hop b{{font-size:11px;text-transform:uppercase;letter-spacing:.03em;
    color:#7aa2f7}} .hop small{{color:#8b95a5;font-size:11px}}
- .hop.dest b{{color:#9ece6a}} .arrow{{color:#5a6473;padding:0 2px}}
- .ctitle{{color:#8b95a5;font-size:12px;margin-top:8px}}
+ .hop.dest b{{color:#9ece6a}} .arrow{{color:#5a6473;padding:0 3px;font-size:16px}}
+ .ctitle{{color:#8b95a5;font-size:12px;margin-top:10px}}
  table.tl{{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}}
- .tl th,.tl td{{text-align:left;padding:4px 8px;border-bottom:1px solid #232734}}
- .tl th{{color:#8b95a5}} .tl td.pl{{font-weight:600;width:80px}}
+ .tl th,.tl td{{text-align:left;padding:5px 8px;border-bottom:1px solid #222838}}
+ .tl th{{color:#8b95a5}} .tl td.pl{{font-weight:700;width:84px}}
  .tl tr.r td.pl{{color:#7aa2f7}} .tl tr.o td.pl{{color:#9ece6a}}
  .empty{{color:#5a6473;font-style:italic}}
 </style></head><body>
+<div class="hero"><div class="wrap">
 <h1>What the agents did on Obscura</h1>
-<p class="sub">experiment {_esc(view.get('experiment_id') or '-')} &middot;
- <span class="badge" style="background:{obs_color}">
- {'fully observable' if cov['fully_observable'] else 'observability gaps'}</span>
- &middot; {cov['research_sessions']} research sessions &middot;
- {cov['ops_circuits']} ops circuits &middot;
- {cov['sessions_observed_on_wire']} observed on wire</p>
+<p class="tag">experiment <code>{_esc(view.get('experiment_id') or '-')}</code>
+ &middot; observability-first agent network</p>
+<span class="pill" style="background:{posture[1]}">{posture[0]}</span>
+<div class="chips">{chips}</div>
+</div></div>
 {graph_html}
-{sessions_html or '<p class="empty">no correlated sessions</p>'}
+{threat_html}
+{sessions_html or '<section><p class="empty">no correlated sessions</p></section>'}
 {unattr_html}
 </body></html>"""
 
