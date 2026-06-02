@@ -331,6 +331,16 @@ def test_compliance_verdict_pass_and_fail():
     assert "Compliance verdict" in html
 
 
+def test_hosted_hidden_services_surfaced():
+    events = [_ev_actor("seller-1", "site.host", "SH", 1.0,
+                        address="abc123.obscura", target="127.0.0.1:80")]
+    view = cp.correlate("e", events=events, spans=[])
+    assert view["hosted_services"] == [{"host": "seller-1",
+                                        "address": "abc123.obscura",
+                                        "target": "127.0.0.1:80"}]
+    assert "hidden service" in " ".join(view["narrative"])
+
+
 def test_investigator_builds_case_files():
     # A scam produces a forensic case file: charges, who caught them, evidence.
     events = [

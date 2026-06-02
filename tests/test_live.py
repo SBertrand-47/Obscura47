@@ -588,6 +588,32 @@ def test_run_society_interleaves_and_blocks_banned_agents():
     assert all(e[1].get("rule") == "acted_while_banned" for e in pv)
 
 
+def test_live_session_hosts_a_hidden_service(monkeypatch, tmp_path):
+    # An agent publishes a real hidden-service descriptor, gets a .obscura
+    # address, and the hosting is observable (a site.host event). The wire
+    # round-trip is a multi-process feature (see test_hs_smoke).
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.core.hidden_service import HiddenServiceHost
+    from src.utils.onion_addr import is_obscura_address
+
+    store: dict = {}
+    monkeypatch.setattr(HiddenServiceHost, "establish",
+                        lambda self, *a, **k: True)
+    monkeypatch.setattr(HiddenServiceHost, "publish_descriptor",
+                        lambda self: store.setdefault(self.address, True))
+
+    cap = _Capture()
+    sess = LiveSession("seller-1", session_id="S-SELL",
+                       observer=Observer("seller-1", sink=cap),
+                       client=AgentClient(proxy_host="127.0.0.1", proxy_port=1))
+    svc = sess.host("127.0.0.1", 9999, str(tmp_path / "hs.pem"))
+
+    assert is_obscura_address(svc.address)   # a real .obscura address
+    assert svc.address in store              # descriptor published
+    hosted = [e for e in cap.events if e.kind == "site.host"]
+    assert hosted and hosted[0].payload.get("address") == svc.address
+
+
 def test_live_agent_can_pay_for_goods(monkeypatch):
     # A model buyer makes an autonomous purchase: a "pay" decision records an
     # escrow payment to the chosen seller.

@@ -118,14 +118,25 @@ class LiveSession:
              peers: list[dict] | None = None):
         """Publish a real hidden service fronting ``target_host:target_port``.
 
-        Establishes intro circuits and publishes the descriptor. Returns the
-        live :class:`~src.core.hidden_service.HiddenServiceHost` handle (call
-        ``delete_descriptor()`` to withdraw). Needs a running overlay + registry.
+        Establishes intro circuits and publishes the descriptor, and records a
+        ``site.host`` research event - so the agent's hidden service is part of
+        the observed society and can be referenced as a ``.obscura`` address.
+        Returns the live :class:`~src.core.hidden_service.HiddenServiceHost`
+        handle (call ``delete_descriptor()`` to withdraw).
+
+        Needs a running overlay + registry. NOTE: dialing a hosted service
+        (``visit('<addr>.obscura')`` through the proxy) is a MULTI-PROCESS
+        deployment feature - host and proxy cannot share one process's reverse
+        frame channel; ``tests/integration/test_hs_smoke.py`` proves the wire
+        round-trip at the protocol level.
         """
         from src.core.hidden_service import HiddenServiceHost
         svc = HiddenServiceHost(target_host, target_port, key_path)
         svc.establish(peers=peers)
         svc.publish_descriptor()
+        self.observer.emit("site.host", session_id=self.session_id,
+                           address=svc.address,
+                           target=f"{target_host}:{target_port}")
         return svc
 
     def run_actions(self, actions: list[dict[str, Any]]) -> list[Any]:

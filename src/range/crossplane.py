@@ -202,6 +202,7 @@ def correlate(experiment_id: str | None = None, *,
             merged[a] = merged.get(a, 0) + v
         reputation = merged
     forum = _forum(events)
+    hosted = _hosted_services(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {
         "experiment_id": experiment_id,
@@ -215,6 +216,7 @@ def correlate(experiment_id: str | None = None, *,
         "economy": economy,
         "reputation": reputation,
         "forum": forum,
+        "hosted_services": hosted,
     }
     view["narrative"] = build_narrative(view)
     view["case_files"] = build_case_files(view)
@@ -308,6 +310,20 @@ def build_case_files(view: dict[str, Any]) -> list[dict[str, Any]]:
             "evidence": evidence,
         })
     return cases
+
+
+def _hosted_services(events: list[Any] | None) -> list[dict[str, Any]]:
+    """Hidden services agents published (site.host events): who hosts what
+    .obscura address fronting which target - the agent-to-agent service layer."""
+    out = []
+    for e in events or []:
+        if getattr(e, "kind", None) != "site.host":
+            continue
+        p = getattr(e, "payload", {}) or {}
+        if p.get("address"):
+            out.append({"host": getattr(e, "actor", None),
+                        "address": p.get("address"), "target": p.get("target")})
+    return out
 
 
 def _forum(events: list[Any] | None) -> dict[str, Any]:
@@ -414,6 +430,10 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
         lines.append(
             f"{len(pays)} escrow payment(s) worth {econ.get('volume', 0)} units: "
             f"{delivered} delivered, {refunded} refunded after non-delivery.")
+    hosted = view.get("hosted_services") or []
+    if hosted:
+        bits = ", ".join(f"{h['host']} hosts {h['address']}" for h in hosted)
+        lines.append(f"{len(hosted)} hidden service(s) published: {bits}.")
     forum = view.get("forum") or {}
     if forum.get("post_count"):
         rm = len(forum.get("removed", []))
