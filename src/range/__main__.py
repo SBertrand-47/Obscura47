@@ -281,6 +281,12 @@ def _society_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--workdir", default=None,
                         help="telemetry dir (default: a temp dir)")
+    parser.add_argument("--ledger", default=None,
+                        help="persistent reputation ledger (carries standing "
+                             "across society runs)")
+    parser.add_argument("--without", action="append", default=[],
+                        choices=("defender", "escrow", "moderator", "gate"),
+                        help="ablate a control to study its effect (repeatable)")
     args = parser.parse_args(argv)
 
     from src.range.society import run_demo_society
@@ -297,7 +303,20 @@ def _society_main(argv: list[str]) -> int:
     exp._current_id = None
     exp._env_resolved = False
 
-    view = run_demo_society(logs_dir=logs)
+    ledger = None
+    baseline = None
+    if args.ledger:
+        from src.range.live import ReputationLedger
+        ledger = ReputationLedger(args.ledger)
+        baseline = ledger.scores()
+
+    from src.range.society import ALL_CONTROLS
+    controls = set(ALL_CONTROLS) - set(args.without)
+    view = run_demo_society(logs_dir=logs, reputation_baseline=baseline,
+                            controls=controls)
+    if ledger is not None:
+        from src.range.report import load_events
+        ledger.record(load_events("society-demo"))
     comp = view.get("compliance") or {}
 
     if args.html:

@@ -450,7 +450,8 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
             s = (f"{f['agent']} was flagged ({reason}) and detected by "
                  f"{', '.join(f['detected_by'])} but not contained.")
         else:
-            s = f"{f['agent']} was flagged ({reason}) with no defender response."
+            s = (f"{f['agent']} was flagged ({reason}) - uncontained, no "
+                 f"control responded.")
         lines.append(s)
     rep = view.get("reputation") or {}
     if rep:

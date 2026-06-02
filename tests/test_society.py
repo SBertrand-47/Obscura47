@@ -50,6 +50,74 @@ def test_run_demo_society_exercises_every_dimension(monkeypatch, tmp_path):
         assert token in html
 
 
+def test_society_reputation_persists_across_runs(monkeypatch, tmp_path):
+    from src.range.live import ReputationLedger
+    from src.range.report import load_events
+    from src.range.society import run_demo_society
+    from src.utils import diag
+    from src.utils import experiment as exp
+
+    ledger = ReputationLedger(str(tmp_path / "led.json"))
+
+    def one_run(sub):
+        d = tmp_path / sub
+        logs = str(d / "logs")
+        os.makedirs(logs, exist_ok=True)
+        monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+        monkeypatch.setenv("OBSCURA_DIAG", "1")
+        monkeypatch.setattr(diag, "DIAG_DIR", logs)
+        monkeypatch.setattr(exp, "EXPERIMENTS_DIR", str(d / "exp"))
+        monkeypatch.setattr(exp, "_current_id", None)
+        monkeypatch.setattr(exp, "_env_resolved", False)
+        view = run_demo_society(logs_dir=logs,
+                                reputation_baseline=ledger.scores())
+        ledger.record(load_events("society-demo"))
+        return view
+
+    v1 = one_run("r1")
+    assert v1["reputation"]["seller-1"] == -2
+
+    # Second run: the scammer carries its standing forward and worsens it.
+    v2 = one_run("r2")
+    assert v2["reputation"]["seller-1"] == -4
+    assert ledger.scores()["seller-1"] == -4
+    # It is distrusted on its accumulated history.
+    flagged = {f["agent"]: f for f in v2["threats"]["flagged_agents"]}
+    assert any("distrust" in r for r in flagged["seller-1"]["reasons"])
+
+
+def test_control_ablation_flips_the_verdict(monkeypatch, tmp_path):
+    from src.range.society import ALL_CONTROLS, run_demo_society
+    from src.utils import diag
+    from src.utils import experiment as exp
+
+    def run(sub, controls):
+        d = tmp_path / sub
+        logs = str(d / "logs")
+        os.makedirs(logs, exist_ok=True)
+        monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+        monkeypatch.setenv("OBSCURA_DIAG", "1")
+        monkeypatch.setattr(diag, "DIAG_DIR", logs)
+        monkeypatch.setattr(exp, "EXPERIMENTS_DIR", str(d / "exp"))
+        monkeypatch.setattr(exp, "_current_id", None)
+        monkeypatch.setattr(exp, "_env_resolved", False)
+        return run_demo_society(logs_dir=logs, controls=controls)
+
+    # With every control, the regulator passes the run.
+    assert run("full", set(ALL_CONTROLS))["compliance"]["verdict"] == "PASS"
+
+    # Remove the defender: the attacker's recon goes uncontained -> FAIL.
+    no_def = run("nodef", set(ALL_CONTROLS) - {"defender"})
+    assert no_def["compliance"]["verdict"] == "FAIL"
+    flagged = {x["agent"]: x for x in no_def["threats"]["flagged_agents"]}
+    assert flagged["attacker-1"]["status"] == "open"
+
+    # Remove the escrow: the scam goes uncontained and funds are lost -> FAIL.
+    no_esc = run("noesc", set(ALL_CONTROLS) - {"escrow"})
+    assert no_esc["compliance"]["verdict"] == "FAIL"
+    assert "no funds lost to fraud" in no_esc["compliance"]["failed"]
+
+
 def test_society_cli_runs_and_reports_verdict(monkeypatch, tmp_path, capsys):
     # The subcommand sets range/diag/dirs itself; monkeypatch the globals first
     # so they are restored after the test.

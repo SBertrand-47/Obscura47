@@ -39,15 +39,30 @@ def _emit_circuit(request_id: str, session_id: str, exit_target: str) -> None:
     trace.terminal_span(block, request_id=request_id, role="exit")
 
 
+ALL_CONTROLS = ("defender", "escrow", "moderator", "gate")
+
+
 def run_demo_society(experiment_id: str = "society-demo",
-                     logs_dir: str | None = None) -> dict[str, Any]:
+                     logs_dir: str | None = None,
+                     reputation_baseline: dict | None = None,
+                     controls: set[str] | None = None) -> dict[str, Any]:
     """Run the scripted society and return the correlated cross-plane view.
 
     Requires range mode + diag to be active (so telemetry is emitted);
     ``logs_dir`` is where the ops spans were written (defaults to the diag dir).
+    ``reputation_baseline`` seeds the run with prior standing (longitudinal
+    memory across runs), so a returning offender is distrusted on sight.
+    ``controls`` is the set of controls to run (default all); ablate one to
+    study its effect - removing it leaves its offender uncontained, which the
+    regulator's verdict then fails.
     """
+    controls = controls if controls is not None else set(ALL_CONTROLS)
     logs_dir = logs_dir if logs_dir is not None else diag.DIAG_DIR
     eid = experiment_id
+
+    def view_now():
+        return crossplane.correlate(eid, logs_dir=logs_dir,
+                                    reputation_baseline=reputation_baseline)
 
     buyer = live.LiveSession("buyer-1", session_id="S-BUYER", experiment_id=eid)
     seller2 = live.LiveSession("seller-2", session_id="S-S2", experiment_id=eid)
@@ -71,21 +86,22 @@ def run_demo_society(experiment_id: str = "society-demo",
                                port=port)
         _emit_circuit(f"atk-{i}", "S-ATK", f"{addr}:{port}")
 
-    # Controls each own their domain.
-    defender = live.LiveDefender("defender-1", experiment_id=eid)
-    escrow = live.LiveEscrow("escrow", experiment_id=eid, grace=1)
-    moderator = live.LiveModerator("moderator", experiment_id=eid)
-    gate = live.LiveReputationGate("reputation-gate", experiment_id=eid,
-                                   threshold=0)
-
-    defender.assess(crossplane.correlate(eid, logs_dir=logs_dir))
-    moderator.moderate(load_events(eid))
-    escrow.settle(load_events(eid))
-    escrow.settle(load_events(eid))
-    gate.enforce(crossplane.correlate(eid, logs_dir=logs_dir))
+    # Controls each own their domain; any can be ablated to study its effect.
+    if "defender" in controls:
+        live.LiveDefender("defender-1", experiment_id=eid).assess(view_now())
+    if "moderator" in controls:
+        live.LiveModerator("moderator", experiment_id=eid).moderate(
+            load_events(eid))
+    if "escrow" in controls:
+        escrow = live.LiveEscrow("escrow", experiment_id=eid, grace=1)
+        escrow.settle(load_events(eid))
+        escrow.settle(load_events(eid))
+    if "gate" in controls:
+        live.LiveReputationGate("reputation-gate", experiment_id=eid,
+                                threshold=0).enforce(view_now())
 
     # The investigator files cases; the regulator issues the verdict.
-    view = crossplane.correlate(eid, logs_dir=logs_dir)
+    view = view_now()
     live.LiveInvestigator("investigator", experiment_id=eid).investigate(view)
     live.LiveRegulator("regulator", experiment_id=eid).rule(view)
-    return crossplane.correlate(eid, logs_dir=logs_dir)
+    return view_now()
