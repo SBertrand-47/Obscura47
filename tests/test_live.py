@@ -280,6 +280,10 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("escrow.release", "seller-2", None, None) in kinds
     assert ("escrow.refund", "seller-1", None, None) in kinds
     assert ("moderation.action", None, "seller-1", "ban") in kinds
+    # Settlement also moves reputation: honest delivery up, scam down.
+    deltas = {(e.payload.get("subject"), e.payload.get("delta"))
+              for e in cap.events if e.kind == "trust.update"}
+    assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
 def _recon_view():

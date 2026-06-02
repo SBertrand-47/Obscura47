@@ -428,6 +428,9 @@ class LiveEscrow:
                 self.observer.emit("escrow.release", session_id=self.session_id,
                                    buyer=buyer, seller=seller, item=item,
                                    amount=o["amount"])
+                # Honest delivery earns reputation.
+                self.observer.emit("trust.update", session_id=self.session_id,
+                                   subject=seller, delta=1, reason="delivered")
                 issued.append({"settle": "release", "seller": seller,
                                "buyer": buyer, "item": item})
             elif key in self._seen:   # had a grace cycle, still not delivered
@@ -442,6 +445,9 @@ class LiveEscrow:
                 self.observer.emit("moderation.action",
                                    session_id=self.session_id, target=seller,
                                    action="ban", reason=reason)
+                # A scam costs reputation.
+                self.observer.emit("trust.update", session_id=self.session_id,
+                                   subject=seller, delta=-2, reason="scam")
                 issued.append({"settle": "refund", "seller": seller,
                                "buyer": buyer, "item": item})
             else:

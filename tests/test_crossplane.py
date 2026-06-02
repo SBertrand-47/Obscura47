@@ -280,6 +280,26 @@ def test_scam_seller_flagged_and_contained_by_escrow():
     assert "seller-1 was flagged" in story
 
 
+def test_reputation_accumulates_and_renders():
+    # Reputation is the running sum of trust.update deltas the escrow issues.
+    events = [
+        _ev_actor("escrow", "trust.update", "SE", 1.0, subject="seller-2",
+                  delta=1, reason="delivered"),
+        _ev_actor("escrow", "trust.update", "SE", 1.5, subject="seller-2",
+                  delta=1, reason="delivered"),
+        _ev_actor("escrow", "trust.update", "SE", 2.0, subject="seller-1",
+                  delta=-2, reason="scam"),
+    ]
+    view = cp.correlate("exp1", events=events, spans=[])
+    assert view["reputation"] == {"seller-2": 2, "seller-1": -2}
+    story = " ".join(view["narrative"])
+    assert "Reputation after settlement" in story
+    assert "seller-1 -2" in story
+    html = cp.render_html(view)
+    assert "Reputation" in html and "seller-1" in html
+    assert "-2" in html
+
+
 def test_build_narrative_tells_the_story():
     view = {
         "coverage": {"research_sessions": 3, "fully_observable": True,

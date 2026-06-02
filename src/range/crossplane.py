@@ -193,6 +193,7 @@ def correlate(experiment_id: str | None = None, *,
     }
     responses = _responses(events)
     economy = _economy(events)
+    reputation = _reputation(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {
         "experiment_id": experiment_id,
@@ -203,9 +204,30 @@ def correlate(experiment_id: str | None = None, *,
         "threats": _detect_threats(sessions, responses, economy),
         "responses": responses,
         "economy": economy,
+        "reputation": reputation,
     }
     view["narrative"] = build_narrative(view)
     return view
+
+
+def _reputation(events: list[Any] | None) -> dict[str, int]:
+    """Reconstruct each agent's reputation from trust.update events (issued by
+    the escrow / settlement authority): the running sum of reputation deltas.
+    Reputation is the society's memory - honest delivery earns it, scams cost
+    it - so repeat offenders carry a visible, accumulating distrust."""
+    rep: dict[str, int] = {}
+    for e in events or []:
+        if getattr(e, "kind", None) != "trust.update":
+            continue
+        p = getattr(e, "payload", {}) or {}
+        subject = p.get("subject")
+        if subject is None:
+            continue
+        try:
+            rep[subject] = rep.get(subject, 0) + int(p.get("delta") or 0)
+        except (TypeError, ValueError):
+            continue
+    return rep
 
 
 def _economy(events: list[Any] | None) -> dict[str, Any]:
@@ -283,6 +305,11 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
         else:
             s = f"{f['agent']} was flagged ({reason}) with no defender response."
         lines.append(s)
+    rep = view.get("reputation") or {}
+    if rep:
+        parts = ", ".join(f"{a} {v:+d}" for a, v in
+                          sorted(rep.items(), key=lambda kv: kv[1]))
+        lines.append(f"Reputation after settlement: {parts}.")
     clean = [a for a in g.get("agents", [])
              if a not in set(threats.get("flagged", [])) and a not in responder]
     if clean:
@@ -591,7 +618,8 @@ def _timeline_html(timeline: list[dict]) -> str:
             f'</tbody></table>')
 
 
-def _svg_graph(graph: dict, flagged: set[str]) -> str:
+def _svg_graph(graph: dict, flagged: set[str],
+               reputation: dict[str, int] | None = None) -> str:
     """A bipartite node-link diagram: agents (left) dialing services (right).
     Edge colour: green observed, red unobserved, orange-dashed from a flagged
     agent. Flagged agents are drawn red with a ring."""
@@ -659,9 +687,11 @@ def _svg_graph(graph: dict, flagged: set[str]) -> str:
                      f'stroke="{ring}"/>')
         mark = " ⛔" if a in banned else (" ⚠" if flag else
                                               (" \U0001f6e1" if is_def else ""))
+        rep = (reputation or {}).get(a)
+        rep_txt = f" ({rep:+d})" if rep is not None else ""
         cls = "flag" if (flag and not is_def) else ("def" if is_def else "")
         parts.append(f'<text x="{ax - 16}" y="{y + 4}" text-anchor="end" '
-                     f'class="nlabel {cls}">{_esc(a)}{mark}</text>')
+                     f'class="nlabel {cls}">{_esc(a)}{mark}{_esc(rep_txt)}</text>')
     parts.append("</svg>")
     return "".join(parts)
 
@@ -706,7 +736,22 @@ def render_html(view: dict[str, Any]) -> str:
             f'<section><h2>Traffic graph &middot; who dialed whom</h2>'
             f'<p class="sub">{len(graph["agents"])} agent(s) dialing '
             f'{len(graph["services"])} service(s) on Obscura</p>'
-            f'{legend}{_svg_graph(graph, flagged)}</section>')
+            f'{legend}{_svg_graph(graph, flagged, view.get("reputation"))}'
+            f'</section>')
+
+    reputation = view.get("reputation") or {}
+    rep_html = ""
+    if reputation:
+        rows = ""
+        for a, v in sorted(reputation.items(), key=lambda kv: kv[1]):
+            col = "#2e7d32" if v > 0 else "#c62828" if v < 0 else "#8b95a5"
+            rows += (f'<tr><td>{_esc(a)}</td>'
+                     f'<td style="color:{col};font-weight:700">{v:+d}</td></tr>')
+        rep_html = (f'<section><h2>Reputation &middot; the society\'s memory</h2>'
+                    f'<p class="sub">Honest delivery earns trust; scams cost it.'
+                    f'</p><table class="tl"><thead><tr><th>agent</th>'
+                    f'<th>reputation</th></tr></thead><tbody>{rows}</tbody>'
+                    f'</table></section>')
 
     threat_html = ""
     if threats.get("flagged_agents"):
@@ -842,6 +887,7 @@ def render_html(view: dict[str, Any]) -> str:
 {summary_html}
 {graph_html}
 {threat_html}
+{rep_html}
 {sessions_html or '<section><p class="empty">no correlated sessions</p></section>'}
 {unattr_html}
 </body></html>"""
