@@ -130,3 +130,28 @@ def test_render_text_tells_the_two_plane_story(tmp_path):
     assert "session S1" in out
     assert "circuit T1" in out
     assert "[R]" in out and "[O]" in out          # both planes on the timeline
+
+
+def test_render_html_visualizes_the_session_and_circuit(tmp_path):
+    d = str(tmp_path)
+    _three_hop_logs(d)
+    events = [_ev("dial.out", "S1", 0.9, site="shadow.bazaar", method="GET"),
+              _ev("dial.result", "S1", 1.5, status=200)]
+    html = cp.render_html(cp.correlate("exp1", events=events, logs_dir=d))
+    assert "<!DOCTYPE html>" in html and "</html>" in html
+    assert "What the agents did on Obscura" in html
+    assert "session S1" in html
+    assert "circuit T1" in html
+    # The hop chain through the overlay is visualized (origin -> relay -> exit).
+    assert "origin" in html and "relay" in html and "exit" in html
+    assert "fully observable" in html
+    # Both planes are tagged on the timeline.
+    assert "RESEARCH" in html and "OPS" in html
+
+
+def test_render_html_surfaces_unattributed_traffic(tmp_path):
+    # A circuit with no matching agent decision must be shown as unattributed.
+    d = str(tmp_path)
+    _three_hop_logs(d, trace_id="T1", session_id="S1")
+    html = cp.render_html(cp.correlate("exp1", events=[], logs_dir=d))
+    assert "Unattributed traffic" in html

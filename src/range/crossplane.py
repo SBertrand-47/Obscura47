@@ -150,14 +150,15 @@ def correlate(experiment_id: str | None = None, *,
     for c in circuits:
         circuits_by_session.setdefault(c["session_id"], []).append(c)
 
-    # Every session id seen in either plane.
+    # Sessions are agent-decision-centric: built from research events (what the
+    # agent did). Circuits that match no research session are "unattributed"
+    # traffic - seen on the wire but not tied to any decision.
     research_sessions = {getattr(e, "session_id", None) for e in events
                          if getattr(e, "session_id", None)}
     span_sessions = {c["session_id"] for c in circuits if c["session_id"]}
-    all_sessions = sorted(research_sessions | span_sessions)
 
     sessions = []
-    for sid in all_sessions:
+    for sid in sorted(research_sessions):
         s_events = [e for e in events if getattr(e, "session_id", None) == sid]
         s_circuits = circuits_by_session.get(sid, [])
         sessions.append({
@@ -273,6 +274,121 @@ def render_text(view: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _esc(x: Any) -> str:
+    import html
+    return html.escape(str(x), quote=True)
+
+
+def _circuit_path_html(circuit: dict) -> str:
+    """Render a circuit as a visual hop chain: origin -> relays -> exit."""
+    nodes = []
+    for span in circuit["hops"]:
+        f = span.get("fields", {})
+        if span["event"] == _TRACE_START:
+            label, sub = "origin", span.get("role") or "proxy"
+        elif span["event"] == _HOP_FORWARD:
+            label = "relay"
+            sub = f"{span.get('role') or 'node'} -> {f.get('next_host')}:{f.get('next_port')}"
+        else:
+            label, sub = "exit", span.get("role") or "exit"
+        nodes.append(
+            f'<span class="hop"><b>{_esc(label)}</b>'
+            f'<small>{_esc(sub)}</small></span>')
+    chain = '<span class="arrow">&rarr;</span>'.join(nodes)
+    exit_t = circuit.get("exit")
+    tail = f' <span class="hop dest"><b>service</b><small>{_esc(exit_t)}</small></span>' \
+        if exit_t else ""
+    return f'<div class="circuit">{chain}{tail}</div>'
+
+
+def _timeline_html(timeline: list[dict]) -> str:
+    rows = ""
+    for it in timeline:
+        cls = "r" if it["plane"] == "research" else "o"
+        tag = "RESEARCH" if it["plane"] == "research" else "OPS"
+        rows += (f'<tr class="{cls}"><td class="pl">{tag}</td>'
+                 f'<td>{_esc(it["kind"])}</td>'
+                 f'<td>{_esc(it["actor"] or "")}</td>'
+                 f'<td>{_esc(it["detail"])}</td></tr>')
+    return (f'<table class="tl"><thead><tr><th>plane</th><th>event</th>'
+            f'<th>actor</th><th>detail</th></tr></thead><tbody>{rows}'
+            f'</tbody></table>')
+
+
+def render_html(view: dict[str, Any]) -> str:
+    """Render the correlated cross-plane view as a self-contained HTML page."""
+    cov = view["coverage"]
+    obs_color = "#2e7d32" if cov["fully_observable"] else "#ef6c00"
+    sessions_html = ""
+    for s in view["sessions"]:
+        on_wire = s["observed_on_wire"]
+        badge = ("#2e7d32", "observed on wire") if on_wire else \
+            ("#c62828", "NOT traced on wire")
+        circuits = "".join(
+            f'<div class="cwrap"><div class="ctitle">circuit '
+            f'{_esc(c["trace_id"])} &middot; {c["length"]} hops</div>'
+            f'{_circuit_path_html(c)}</div>' for c in s["circuits"]) \
+            or '<p class="empty">no ops trace for this session</p>'
+        sessions_html += (
+            f'<section><div class="shead"><h2>session {_esc(s["session_id"])}</h2>'
+            f'<span class="badge" style="background:{badge[0]}">{badge[1]}</span>'
+            f'</div>{circuits}<h3>timeline (both planes)</h3>'
+            f'{_timeline_html(s["timeline"])}</section>')
+
+    # Traffic on the wire we cannot attribute to any agent session.
+    unattributed = [c for c in view["circuits"]
+                    if not c["session_id"]
+                    or c["session_id"] not in {s["session_id"]
+                                               for s in view["sessions"]}]
+    unattr_html = ""
+    if unattributed:
+        items = "".join(f'<div class="cwrap"><div class="ctitle">circuit '
+                        f'{_esc(c["trace_id"])} (session={_esc(c["session_id"])})'
+                        f'</div>{_circuit_path_html(c)}</div>'
+                        for c in unattributed)
+        unattr_html = (f'<section><h2>Unattributed traffic</h2>'
+                       f'<p class="sub">Circuits seen on the wire with no '
+                       f'matching agent decision.</p>{items}</section>')
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Obscura observe &middot; {_esc(view.get('experiment_id') or '')}</title>
+<style>
+ body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;
+   background:#0f1115;color:#e6e6e6;padding:28px;max-width:1000px}}
+ h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0}}
+ h3{{font-size:13px;color:#8b95a5;margin:14px 0 4px}}
+ .sub{{color:#8b95a5;margin:4px 0 14px}}
+ .badge{{color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;
+   font-weight:600;text-transform:uppercase;letter-spacing:.03em}}
+ section{{background:#161922;border:1px solid #232734;border-radius:8px;
+   padding:16px;margin:14px 0}}
+ .shead{{display:flex;align-items:center;justify-content:space-between;gap:12px}}
+ .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}
+ .hop{{display:inline-flex;flex-direction:column;background:#1d2230;
+   border:1px solid #2c3344;border-radius:6px;padding:6px 10px;min-width:60px}}
+ .hop b{{font-size:12px;text-transform:uppercase;letter-spacing:.03em;
+   color:#7aa2f7}} .hop small{{color:#8b95a5;font-size:11px}}
+ .hop.dest b{{color:#9ece6a}} .arrow{{color:#5a6473;padding:0 2px}}
+ .ctitle{{color:#8b95a5;font-size:12px;margin-top:8px}}
+ table.tl{{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}}
+ .tl th,.tl td{{text-align:left;padding:4px 8px;border-bottom:1px solid #232734}}
+ .tl th{{color:#8b95a5}} .tl td.pl{{font-weight:600;width:80px}}
+ .tl tr.r td.pl{{color:#7aa2f7}} .tl tr.o td.pl{{color:#9ece6a}}
+ .empty{{color:#5a6473;font-style:italic}}
+</style></head><body>
+<h1>What the agents did on Obscura</h1>
+<p class="sub">experiment {_esc(view.get('experiment_id') or '-')} &middot;
+ <span class="badge" style="background:{obs_color}">
+ {'fully observable' if cov['fully_observable'] else 'observability gaps'}</span>
+ &middot; {cov['research_sessions']} research sessions &middot;
+ {cov['ops_circuits']} ops circuits &middot;
+ {cov['sessions_observed_on_wire']} observed on wire</p>
+{sessions_html or '<p class="empty">no correlated sessions</p>'}
+{unattr_html}
+</body></html>"""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range observe",
@@ -280,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
                     "correlated cross-plane view of a run.")
     parser.add_argument("experiment_id")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--html", default=None,
+                        help="write a visual HTML view to this path")
     args = parser.parse_args(argv)
 
     view = correlate(args.experiment_id)
@@ -288,9 +406,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[observe] no record, events, or spans for "
               f"{args.experiment_id!r}.", file=sys.stderr)
         return 1
+    if args.html:
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(args.html)), exist_ok=True)
+        with open(args.html, "w", encoding="utf-8") as f:
+            f.write(render_html(view))
+        print(args.html)
     if args.json:
         print(json.dumps(view, indent=2, default=str))
-    else:
+    elif not args.html:
         print(render_text(view))
     return 0
 
