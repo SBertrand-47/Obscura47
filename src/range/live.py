@@ -756,6 +756,125 @@ class LiveReputationGate:
         return issued
 
 
+_MODERATOR_TOOL = {
+    "name": "moderate",
+    "description": "Decide whether a forum post should be removed.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["remove", "keep"],
+                       "description": "remove abusive content, or keep it"},
+            "rationale": {"type": "string",
+                          "description": "why you reached this decision"},
+        },
+        "required": ["action"],
+    },
+}
+
+
+class LiveModelModerator:
+    """A real model moderating the forum: it reads each post and decides whether
+    to remove it for abuse, with its reasoning recorded.
+
+    Same ``moderate(events)`` interface as the heuristic LiveModerator, so it is
+    a drop-in - but the call is judgement, not a keyword rule. Its removal + flag
+    (and reasoning) are research events, so a model policing the social layer is
+    observable next to the traffic and the economy - real model judgement on both
+    security (the model defender) and the social layer.
+    """
+
+    def __init__(self, actor: str = "moderator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None, client: Any = None,
+                 model: str = DEFAULT_MODEL, max_tokens: int = 200):
+        self.actor = actor
+        self.model = model
+        self.max_tokens = max_tokens
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_moderator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._handled: set[str] = set()
+
+        if client is None:
+            try:
+                import anthropic
+            except ImportError as e:
+                raise RuntimeError("LiveModelModerator requires the 'anthropic' "
+                                   "package (pip install anthropic).") from e
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError("LiveModelModerator requires "
+                                   "ANTHROPIC_API_KEY in the environment.")
+            client = anthropic.Anthropic()
+        self._client = client
+        self._system = [{
+            "type": "text",
+            "text": ("You are a forum moderator for Obscura. Remove posts that "
+                     "are abusive - spam, scams, fraud, harassment, or hateful "
+                     "content - and keep legitimate posts. Decide one post at a "
+                     "time with the moderate tool."),
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def _judge(self, text: str | None) -> dict[str, Any]:
+        try:
+            resp = self._client.messages.create(
+                model=self.model, max_tokens=self.max_tokens,
+                system=self._system, tools=[_MODERATOR_TOOL],
+                tool_choice={"type": "tool", "name": "moderate",
+                             "disable_parallel_tool_use": True},
+                messages=[{"role": "user", "content":
+                           f"Review this forum post and decide:\n\n{text}"}])
+        except Exception as e:  # noqa: BLE001
+            if type(e).__module__.split(".")[0] == "anthropic":
+                raise RuntimeError(
+                    f"model call failed ({type(e).__name__}): {e}") from e
+            raise
+        self.usage["calls"] += 1
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            self.usage["input_tokens"] += int(getattr(u, "input_tokens", 0) or 0)
+            self.usage["output_tokens"] += int(getattr(u, "output_tokens", 0) or 0)
+        action = next((b.input or {} for b in resp.content
+                       if getattr(b, "type", None) == "tool_use"),
+                      {"action": "keep"})
+        return {"action": str(action.get("action", "keep")),
+                "rationale": action.get("rationale")}
+
+    def moderate(self, events: list[Any]) -> list[dict[str, Any]]:
+        """Judge each new post with the model; remove + flag abusive ones."""
+        issued: list[dict[str, Any]] = []
+        for e in events:
+            if getattr(e, "kind", None) != "forum.post":
+                continue
+            p = getattr(e, "payload", {}) or {}
+            pid, author = p.get("post_id"), getattr(e, "actor", None)
+            if not pid or pid in self._handled:
+                continue
+            self._handled.add(pid)
+            decision = self._judge(p.get("text"))
+            if decision["action"] == "remove":
+                reason = str(decision["rationale"] or "abusive content")
+                self.observer.emit("moderation.action",
+                                   session_id=self.session_id, post_id=pid,
+                                   target=author, action="remove", reason=reason)
+                self.observer.emit("defense.flag", session_id=self.session_id,
+                                   target=author, signal="abuse", reason=reason)
+                issued.append({"moderator": self.actor, "post_id": pid,
+                               "author": author, "action": "remove"})
+        return issued
+
+
 _DEFENDER_TOOL = {
     "name": "defender_action",
     "description": "Decide whether to ban an agent on the network this round.",

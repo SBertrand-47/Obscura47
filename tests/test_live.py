@@ -359,6 +359,66 @@ def test_live_investigator_files_cases(monkeypatch):
     assert inv.investigate(view) == []
 
 
+def test_live_model_moderator_judges_each_post(monkeypatch):
+    # A real model (replayed) judges each post: it keeps the benign one and
+    # removes the abusive one, with its reasoning.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelModerator
+    from src.range.llm_io import ReplayClient
+
+    cap = _Capture()
+    recs = [
+        {"blocks": [{"input": {"action": "keep",
+                               "rationale": "benign greeting"}, "id": "m1"}],
+         "usage": None},
+        {"blocks": [{"input": {"action": "remove",
+                               "rationale": "scam / spam"}, "id": "m2"}],
+         "usage": None},
+    ]
+    mod = LiveModelModerator("moderator",
+                             observer=Observer("moderator", sink=cap),
+                             session_id="SM", client=ReplayClient(recs))
+    events = [_evt("user-1", "forum.post", forum="g", post_id="p1",
+                   text="hello all, glad to be here"),
+              _evt("troll-1", "forum.post", forum="g", post_id="p2",
+                   text="SCAM click here for free money")]
+    issued = mod.moderate(events)
+
+    assert any(i["post_id"] == "p2" and i["author"] == "troll-1"
+               for i in issued)
+    assert not any(i["post_id"] == "p1" for i in issued)
+    kinds = {(e.kind, e.payload.get("post_id"), e.payload.get("action"))
+             for e in cap.events}
+    assert ("moderation.action", "p2", "remove") in kinds
+    rm = next(e for e in cap.events if e.kind == "moderation.action")
+    assert "scam" in (rm.payload.get("reason") or "").lower()
+
+
+def test_real_model_moderator_replay(monkeypatch):
+    # A real claude-sonnet-4-6 moderator's judgements, replayed: it keeps the
+    # benign post and removes the scam, with its real reasoning preserved.
+    import os as _os
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelModerator
+    from src.range.llm_io import ReplayClient, load_recording
+
+    fix = _os.path.join(_os.path.dirname(__file__), "fixtures", "real_runs",
+                        "live_moderator_sonnet.json")
+    cap = _Capture()
+    mod = LiveModelModerator("moderator",
+                             observer=Observer("moderator", sink=cap),
+                             session_id="SM", client=ReplayClient(
+                                 load_recording(fix)))
+    events = [_evt("user-1", "forum.post", forum="g", post_id="p1",
+                   text="benign"),
+              _evt("troll-1", "forum.post", forum="g", post_id="p2",
+                   text="abusive")]
+    issued = mod.moderate(events)
+    assert [i["post_id"] for i in issued] == ["p2"]   # only the scam removed
+    rm = next(e for e in cap.events if e.kind == "moderation.action")
+    assert "scam" in (rm.payload.get("reason") or "").lower()
+
+
 def test_live_moderator_removes_abusive_posts(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range.live import LiveModerator
