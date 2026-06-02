@@ -245,6 +245,69 @@ def test_live_defender_flags_and_bans_flagged_agents(monkeypatch):
     assert ("moderation.action", "attacker-1", "ban") in events
 
 
+class _StubObserver:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, kind, **payload):
+        self.events.append((kind, payload))
+
+
+class _StubSession:
+    def __init__(self):
+        self.session_id = "stub"
+        self.observer = _StubObserver()
+
+
+class _StubAgent:
+    def __init__(self, kinds):
+        self.kinds, self.i, self.steps = list(kinds), 0, 0
+        self.session = _StubSession()
+
+    def step(self, last=None):
+        self.steps += 1
+        k = self.kinds[self.i] if self.i < len(self.kinds) else "visit"
+        self.i += 1
+        return {"kind": k, "result_summary": f"r{self.steps}"}
+
+
+class _StubDefender:
+    def __init__(self, ban_round, target):
+        self.actor, self.ban_round, self.target = "defender-1", ban_round, target
+        self.round, self._done = 0, False
+
+    def assess(self, view):
+        self.round += 1
+        if self.round >= self.ban_round and not self._done:
+            self._done = True
+            return [{"defender": self.actor, "target": self.target,
+                     "action": "ban"}]
+        return []
+
+
+def test_run_society_interleaves_and_blocks_banned_agents():
+    from src.range.live import run_society
+    buyer = _StubAgent(["visit", "finish"])
+    attacker = _StubAgent(["visit", "visit", "visit", "visit"])
+    defender = _StubDefender(ban_round=3, target="attacker-1")
+
+    transcript = run_society([("buyer-1", buyer), ("attacker-1", attacker)],
+                             defender=defender, correlate=lambda: {}, rounds=5)
+
+    # The attacker acts until banned after round 3, then is blocked.
+    assert attacker.steps == 3
+    bans = [t for t in transcript if t.get("banned") == "attacker-1"]
+    assert len(bans) == 1 and bans[0]["round"] == 3
+    blocked = [t for t in transcript
+               if t.get("blocked") and t["actor"] == "attacker-1"]
+    assert len(blocked) == 2  # rounds 4 and 5
+    # Each blocked turn emitted an acted-while-banned policy violation.
+    pv = [e for e in attacker.session.observer.events
+          if e[0] == "policy.violation"]
+    assert len(pv) == 2
+    assert all(e[1].get("rule") == "acted_while_banned" for e in pv)
+
+
 def test_live_agent_without_key_fails_clearly(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

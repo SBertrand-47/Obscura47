@@ -333,13 +333,18 @@ class LiveDefender:
                     if self.experiment_id else MemorySink())
             observer = Observer(actor, sink=sink)
         self.observer = observer
+        self._handled: set[str] = set()
 
     def assess(self, view: dict[str, Any]) -> list[dict[str, Any]]:
-        """Flag and ban every agent the view flags. Emits the response events
-        and returns the responses issued."""
+        """Flag and ban every newly flagged agent. Idempotent: an agent already
+        responded to in a prior assess is skipped, so calling this each round
+        emits one flag+ban per agent (when it first trips a threshold)."""
         issued: list[dict[str, Any]] = []
         for f in (view.get("threats") or {}).get("flagged_agents", []):
             target = f["agent"]
+            if target in self._handled:
+                continue
+            self._handled.add(target)
             reason = "; ".join(f.get("reasons", []))
             self.observer.emit("defense.flag", session_id=self.session_id,
                                target=target, signal="recon", reason=reason)
@@ -348,3 +353,51 @@ class LiveDefender:
             issued.append({"defender": self.actor, "target": target,
                            "action": "ban", "reasons": f.get("reasons", [])})
         return issued
+
+
+def run_society(agents: list[tuple[str, "LiveAgent"]], *,
+                defender: "LiveDefender | None" = None,
+                correlate=None, rounds: int = 6) -> list[dict[str, Any]]:
+    """Interleave several live agents and a defender, round by round.
+
+    Each round every agent that is not finished and not banned takes one step;
+    then (if given) the defender assesses the run so far via ``correlate`` and
+    may ban agents. A banned agent's later turns are skipped and recorded as a
+    blocked ``policy.violation`` - so the ban lands mid-run and the dashboard
+    shows the attacker stopped in its tracks, not just flagged after the fact.
+
+    ``agents`` is a list of (actor_name, LiveAgent); ``correlate`` is a callable
+    returning the current crossplane view. Returns a flat transcript.
+    """
+    transcript: list[dict[str, Any]] = []
+    banned: set[str] = set()
+    done: set[str] = set()
+    last: dict[str, str | None] = {}
+    for rnd in range(1, rounds + 1):
+        for actor, agent in agents:
+            if actor in done:
+                continue
+            if actor in banned:
+                try:
+                    agent.session.observer.emit(
+                        "policy.violation",
+                        session_id=agent.session.session_id,
+                        rule="acted_while_banned", target=actor)
+                except Exception:
+                    pass
+                transcript.append({"round": rnd, "actor": actor,
+                                   "blocked": True})
+                continue
+            rec = agent.step(last.get(actor))
+            last[actor] = rec.get("result_summary")
+            transcript.append({"round": rnd, "actor": actor, **rec})
+            if rec.get("kind") == "finish":
+                done.add(actor)
+        if defender is not None and correlate is not None:
+            for r in defender.assess(correlate()):
+                banned.add(r["target"])
+                transcript.append({"round": rnd, "banned": r["target"],
+                                   "by": getattr(defender, "actor", None)})
+        if len(done) >= len(agents):
+            break
+    return transcript
