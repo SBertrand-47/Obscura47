@@ -21,6 +21,8 @@ exit). It is inert/unused on the public consumer network.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
 
 from src.agent.client import AgentClient
@@ -116,14 +118,25 @@ class LiveSession:
              peers: list[dict] | None = None):
         """Publish a real hidden service fronting ``target_host:target_port``.
 
-        Establishes intro circuits and publishes the descriptor. Returns the
-        live :class:`~src.core.hidden_service.HiddenServiceHost` handle (call
-        ``delete_descriptor()`` to withdraw). Needs a running overlay + registry.
+        Establishes intro circuits and publishes the descriptor, and records a
+        ``site.host`` research event - so the agent's hidden service is part of
+        the observed society and can be referenced as a ``.obscura`` address.
+        Returns the live :class:`~src.core.hidden_service.HiddenServiceHost`
+        handle (call ``delete_descriptor()`` to withdraw).
+
+        Needs a running overlay + registry. NOTE: dialing a hosted service
+        (``visit('<addr>.obscura')`` through the proxy) is a MULTI-PROCESS
+        deployment feature - host and proxy cannot share one process's reverse
+        frame channel; ``tests/integration/test_hs_smoke.py`` proves the wire
+        round-trip at the protocol level.
         """
         from src.core.hidden_service import HiddenServiceHost
         svc = HiddenServiceHost(target_host, target_port, key_path)
         svc.establish(peers=peers)
         svc.publish_descriptor()
+        self.observer.emit("site.host", session_id=self.session_id,
+                           address=svc.address,
+                           target=f"{target_host}:{target_port}")
         return svc
 
     def run_actions(self, actions: list[dict[str, Any]]) -> list[Any]:
@@ -561,6 +574,102 @@ class LiveModerator:
         return issued
 
 
+class ReputationLedger:
+    """Persistent reputation across runs - the society's long-term memory.
+
+    Stores cumulative reputation per agent on disk, so an offender carries its
+    distrust into future runs: a scammer penalised once is gated on sight the
+    next time it appears. Pass :meth:`scores` as crossplane.correlate's
+    ``reputation_baseline`` to seed a run with prior standing, and call
+    :meth:`record` after a run to fold its reputation changes back in.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._scores: dict[str, int] = self._load()
+
+    def _load(self) -> dict[str, int]:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return {k: int(v) for k, v in json.load(f).items()}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def scores(self) -> dict[str, int]:
+        return dict(self._scores)
+
+    def record(self, events: list[Any]) -> dict[str, int]:
+        """Fold a run's trust.update deltas into the persistent store."""
+        changed = False
+        for e in events or []:
+            if getattr(e, "kind", None) != "trust.update":
+                continue
+            p = getattr(e, "payload", {}) or {}
+            subject = p.get("subject")
+            if not subject:
+                continue
+            try:
+                self._scores[subject] = (self._scores.get(subject, 0)
+                                         + int(p.get("delta") or 0))
+                changed = True
+            except (TypeError, ValueError):
+                continue
+        if changed:
+            self._save()
+        return dict(self._scores)
+
+    def _save(self) -> None:
+        try:
+            d = os.path.dirname(os.path.abspath(self.path))
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self._scores, f)
+        except OSError:
+            pass
+
+
+class LiveRegulator:
+    """The regulator role: audits a run against a policy and issues a ship /
+    no-ship compliance verdict, recorded as a research event.
+
+    It closes the enterprise loop - the observed society becomes a decision: PASS
+    (the controls contained every offence; safe to operate) or FAIL (policy
+    violations; do not ship). The verdict and its failed checks are recorded so
+    the ruling is itself auditable.
+    """
+
+    def __init__(self, actor: str = "regulator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None,
+                 policy: dict[str, Any] | None = None):
+        self.actor = actor
+        self.policy = policy
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_regulator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+
+    def rule(self, view: dict[str, Any]) -> dict[str, Any]:
+        """Audit the view against the policy, record the verdict, return it."""
+        from src.range.crossplane import build_compliance
+        compliance = build_compliance(view, self.policy)
+        self.observer.emit("regulation.verdict", session_id=self.session_id,
+                           verdict=compliance["verdict"],
+                           failed=compliance["failed"],
+                           summary=compliance["summary"])
+        return compliance
+
+
 class LiveInvestigator:
     """The investigator role: builds a forensic case on each caught offender and
     files it as a research event.
@@ -655,6 +764,125 @@ class LiveReputationGate:
                                    action="ban", reason=reason)
                 issued.append({"defender": self.actor, "target": agent,
                                "action": "ban", "rationale": reason})
+        return issued
+
+
+_MODERATOR_TOOL = {
+    "name": "moderate",
+    "description": "Decide whether a forum post should be removed.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["remove", "keep"],
+                       "description": "remove abusive content, or keep it"},
+            "rationale": {"type": "string",
+                          "description": "why you reached this decision"},
+        },
+        "required": ["action"],
+    },
+}
+
+
+class LiveModelModerator:
+    """A real model moderating the forum: it reads each post and decides whether
+    to remove it for abuse, with its reasoning recorded.
+
+    Same ``moderate(events)`` interface as the heuristic LiveModerator, so it is
+    a drop-in - but the call is judgement, not a keyword rule. Its removal + flag
+    (and reasoning) are research events, so a model policing the social layer is
+    observable next to the traffic and the economy - real model judgement on both
+    security (the model defender) and the social layer.
+    """
+
+    def __init__(self, actor: str = "moderator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None, client: Any = None,
+                 model: str = DEFAULT_MODEL, max_tokens: int = 200):
+        self.actor = actor
+        self.model = model
+        self.max_tokens = max_tokens
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_moderator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._handled: set[str] = set()
+
+        if client is None:
+            try:
+                import anthropic
+            except ImportError as e:
+                raise RuntimeError("LiveModelModerator requires the 'anthropic' "
+                                   "package (pip install anthropic).") from e
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError("LiveModelModerator requires "
+                                   "ANTHROPIC_API_KEY in the environment.")
+            client = anthropic.Anthropic()
+        self._client = client
+        self._system = [{
+            "type": "text",
+            "text": ("You are a forum moderator for Obscura. Remove posts that "
+                     "are abusive - spam, scams, fraud, harassment, or hateful "
+                     "content - and keep legitimate posts. Decide one post at a "
+                     "time with the moderate tool."),
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def _judge(self, text: str | None) -> dict[str, Any]:
+        try:
+            resp = self._client.messages.create(
+                model=self.model, max_tokens=self.max_tokens,
+                system=self._system, tools=[_MODERATOR_TOOL],
+                tool_choice={"type": "tool", "name": "moderate",
+                             "disable_parallel_tool_use": True},
+                messages=[{"role": "user", "content":
+                           f"Review this forum post and decide:\n\n{text}"}])
+        except Exception as e:  # noqa: BLE001
+            if type(e).__module__.split(".")[0] == "anthropic":
+                raise RuntimeError(
+                    f"model call failed ({type(e).__name__}): {e}") from e
+            raise
+        self.usage["calls"] += 1
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            self.usage["input_tokens"] += int(getattr(u, "input_tokens", 0) or 0)
+            self.usage["output_tokens"] += int(getattr(u, "output_tokens", 0) or 0)
+        action = next((b.input or {} for b in resp.content
+                       if getattr(b, "type", None) == "tool_use"),
+                      {"action": "keep"})
+        return {"action": str(action.get("action", "keep")),
+                "rationale": action.get("rationale")}
+
+    def moderate(self, events: list[Any]) -> list[dict[str, Any]]:
+        """Judge each new post with the model; remove + flag abusive ones."""
+        issued: list[dict[str, Any]] = []
+        for e in events:
+            if getattr(e, "kind", None) != "forum.post":
+                continue
+            p = getattr(e, "payload", {}) or {}
+            pid, author = p.get("post_id"), getattr(e, "actor", None)
+            if not pid or pid in self._handled:
+                continue
+            self._handled.add(pid)
+            decision = self._judge(p.get("text"))
+            if decision["action"] == "remove":
+                reason = str(decision["rationale"] or "abusive content")
+                self.observer.emit("moderation.action",
+                                   session_id=self.session_id, post_id=pid,
+                                   target=author, action="remove", reason=reason)
+                self.observer.emit("defense.flag", session_id=self.session_id,
+                                   target=author, signal="abuse", reason=reason)
+                issued.append({"moderator": self.actor, "post_id": pid,
+                               "author": author, "action": "remove"})
         return issued
 
 

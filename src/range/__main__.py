@@ -263,10 +263,58 @@ _DISPATCH = {
 
 _RUN_KINDS = ("readiness", "adaptive", "agents", "society")
 
-_USAGE = ("usage: python -m src.range {run|list|report|evaluate|compare|"
-          "dashboard|adaptive|agents|scenario|matrix|gate|suite|evidence|"
-          "security-report|incidents|observe|trajectory|coverage|ablation} "
-          "[args...]")
+_USAGE = ("usage: python -m src.range {run|society|list|report|evaluate|"
+          "compare|dashboard|adaptive|agents|scenario|matrix|gate|suite|"
+          "evidence|security-report|incidents|observe|trajectory|coverage|"
+          "ablation} [args...]")
+
+
+def _society_main(argv: list[str]) -> int:
+    """Run the whole observable live society and write its dashboard."""
+    import os
+    import tempfile
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.range society",
+        description="Run the whole observable live society in one command.")
+    parser.add_argument("--html", default=None, help="write the dashboard here")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--workdir", default=None,
+                        help="telemetry dir (default: a temp dir)")
+    args = parser.parse_args(argv)
+
+    from src.range.society import run_demo_society
+    from src.utils import config, diag
+    from src.utils import experiment as exp
+
+    workdir = args.workdir or tempfile.mkdtemp(prefix="obscura-society-")
+    logs = os.path.join(workdir, "logs")
+    os.makedirs(logs, exist_ok=True)
+    config.IS_RANGE_MODE = True
+    os.environ["OBSCURA_DIAG"] = "1"
+    diag.DIAG_DIR = logs
+    exp.EXPERIMENTS_DIR = os.path.join(workdir, "exp")
+    exp._current_id = None
+    exp._env_resolved = False
+
+    view = run_demo_society(logs_dir=logs)
+    comp = view.get("compliance") or {}
+
+    if args.html:
+        path = args.html
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_crossplane.render_html(view))
+        print(f"  dashboard: {path}")
+    if args.json:
+        print(json.dumps(view, indent=2, default=str))
+        return 0
+    print(f"Society run  experiment={view.get('experiment_id')}  "
+          f"verdict={comp.get('verdict')}")
+    for s in (view.get("narrative") or []):
+        print(f"  - {s}")
+    print(f"  telemetry: {workdir}")
+    return 0
 
 
 def _list_main(argv: list[str]) -> int:
@@ -274,7 +322,7 @@ def _list_main(argv: list[str]) -> int:
     print(f"run kinds:    {', '.join(_RUN_KINDS)}")
     print(f"casts:        default, {', '.join(sorted(_agents.CASTS))}")
     print(f"suite:        {', '.join(c.name for c in _suite.DEFAULT_SUITE)}")
-    print(f"subcommands:  run, list, {', '.join(sorted(_DISPATCH))}")
+    print(f"subcommands:  run, society, list, {', '.join(sorted(_DISPATCH))}")
     return 0
 
 
@@ -286,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd == "run":
         return _run_main(rest)
+    if cmd == "society":
+        return _society_main(rest)
     if cmd == "list":
         return _list_main(rest)
     if cmd in _DISPATCH:

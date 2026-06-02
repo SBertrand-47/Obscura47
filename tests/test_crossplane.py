@@ -304,6 +304,43 @@ def test_forum_abuse_is_flagged_and_removed():
     assert "forum post" in story and "removed for abuse" in story
 
 
+def test_compliance_verdict_pass_and_fail():
+    contained = {"threats": {"flagged_agents": [
+        {"agent": "a", "status": "contained"}]},
+        "economy": {"scam_sellers": {"a": {"amount": 50, "refunded": True}}},
+        "coverage": {"fully_observable": True}}
+    assert cp.build_compliance(contained)["verdict"] == "PASS"
+
+    uncontained = {"threats": {"flagged_agents": [
+        {"agent": "a", "status": "open"}]},
+        "economy": {"scam_sellers": {}},
+        "coverage": {"fully_observable": True}}
+    fail = cp.build_compliance(uncontained)
+    assert fail["verdict"] == "FAIL"
+    assert "all offenders contained" in fail["failed"]
+
+    funds_lost = {"threats": {"flagged_agents": [
+        {"agent": "a", "status": "contained"}]},
+        "economy": {"scam_sellers": {"a": {"amount": 50, "refunded": False}}},
+        "coverage": {"fully_observable": True}}
+    lost = cp.build_compliance(funds_lost)
+    assert lost["verdict"] == "FAIL"
+    assert "no funds lost to fraud" in lost["failed"]
+    # The verdict renders on the dashboard and in text.
+    html = cp.render_html(cp.correlate("e", events=[], spans=[]))
+    assert "Compliance verdict" in html
+
+
+def test_hosted_hidden_services_surfaced():
+    events = [_ev_actor("seller-1", "site.host", "SH", 1.0,
+                        address="abc123.obscura", target="127.0.0.1:80")]
+    view = cp.correlate("e", events=events, spans=[])
+    assert view["hosted_services"] == [{"host": "seller-1",
+                                        "address": "abc123.obscura",
+                                        "target": "127.0.0.1:80"}]
+    assert "hidden service" in " ".join(view["narrative"])
+
+
 def test_investigator_builds_case_files():
     # A scam produces a forensic case file: charges, who caught them, evidence.
     events = [

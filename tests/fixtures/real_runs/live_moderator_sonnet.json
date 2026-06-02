@@ -1,0 +1,32 @@
+[
+  {
+    "blocks": [
+      {
+        "input": {
+          "action": "keep",
+          "rationale": "This post is a simple, friendly introductory message expressing intent to trade fairly. It contains no spam, scams, fraud, harassment, or hateful content."
+        },
+        "id": "toolu_01SToHgZpDb2SrADwf454p7e"
+      }
+    ],
+    "usage": {
+      "input_tokens": 766,
+      "output_tokens": 74
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "action": "remove",
+          "rationale": "This post is a clear scam. It promises to double money in exchange for sending coins, which is a classic \"money doubling\" fraud scheme. It also uses spam-like language with excessive capitalization and false promises of \"FREE MONEY.\" Additionally, it falsely labels the market as a \"SCAM,\" which could constitute harassment toward the platform. This post should be removed to protect users from financial fraud."
+        },
+        "id": "toolu_012i9TSHwTg56JTqyN1UXUrm"
+      }
+    ],
+    "usage": {
+      "input_tokens": 786,
+      "output_tokens": 126
+    }
+  }
+]

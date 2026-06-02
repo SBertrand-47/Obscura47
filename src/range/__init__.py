@@ -22,7 +22,8 @@ from src.range.forensics import build_incidents, campaign, incidents_from_events
 from src.range.gate import check_gate
 from src.range.live import (
     LiveAgent, LiveDefender, LiveEscrow, LiveInvestigator, LiveModelDefender,
-    LiveModerator, LiveReputationGate, LiveSession, run_society)
+    LiveModelModerator, LiveModerator, LiveRegulator, LiveReputationGate,
+    LiveSession, ReputationLedger, run_society)
 from src.range.llm_io import (
     RecordingClient, ReplayClient, load_recording, save_recording)
 from src.range.matrix import risk_matrix
@@ -58,6 +59,6 @@ __all__ = [
     "correlate_planes",
     # live bridge: agents on the real overlay
     "LiveSession", "LiveAgent", "LiveDefender", "LiveModelDefender",
-    "LiveEscrow", "LiveReputationGate", "LiveModerator", "LiveInvestigator",
-    "run_society",
+    "LiveEscrow", "LiveReputationGate", "LiveModerator", "LiveModelModerator",
+    "LiveInvestigator", "LiveRegulator", "ReputationLedger", "run_society",
 ]

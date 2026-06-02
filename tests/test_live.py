@@ -286,6 +286,52 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_reputation_ledger_carries_distrust_across_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range import crossplane as cp
+    from src.range.live import LiveReputationGate, ReputationLedger
+
+    path = str(tmp_path / "rep.json")
+    # Run 1: the escrow penalises seller-1 for a scam; the ledger persists it.
+    run1 = [_evt("escrow", "trust.update", subject="seller-1", delta=-2,
+                 reason="scam")]
+    ReputationLedger(path).record(run1)
+
+    # Run 2: a fresh process loads the persisted standing. seller-1 returns and
+    # commits no new crime, but its history makes it distrusted.
+    ledger2 = ReputationLedger(path)
+    assert ledger2.scores()["seller-1"] == -2
+    view = cp.correlate("run2", events=[], spans=[],
+                        reputation_baseline=ledger2.scores())
+    assert view["reputation"]["seller-1"] == -2
+    flagged = {x["agent"]: x for x in view["threats"]["flagged_agents"]}
+    assert "seller-1" in flagged
+    assert any("distrust" in r for r in flagged["seller-1"]["reasons"])
+
+    # The gate bans it on sight, on its prior reputation alone.
+    cap = _Capture()
+    gate = LiveReputationGate("reputation-gate",
+                              observer=Observer("reputation-gate", sink=cap),
+                              session_id="SG")
+    assert any(i["target"] == "seller-1" for i in gate.enforce(view))
+
+
+def test_live_regulator_issues_ship_verdict(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveRegulator
+
+    cap = _Capture()
+    reg = LiveRegulator("regulator", observer=Observer("regulator", sink=cap),
+                        session_id="SR")
+    view = {"threats": {"flagged_agents": [
+        {"agent": "a", "status": "contained"}]},
+        "economy": {"scam_sellers": {}}, "coverage": {"fully_observable": True}}
+    comp = reg.rule(view)
+    assert comp["verdict"] == "PASS"
+    assert any(e.kind == "regulation.verdict"
+               and e.payload.get("verdict") == "PASS" for e in cap.events)
+
+
 def test_live_investigator_files_cases(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range.live import LiveInvestigator
@@ -311,6 +357,66 @@ def test_live_investigator_files_cases(monkeypatch):
     assert ("investigation.case", "seller-1", "contained") in kinds
     # Idempotent: a second pass files nothing new.
     assert inv.investigate(view) == []
+
+
+def test_live_model_moderator_judges_each_post(monkeypatch):
+    # A real model (replayed) judges each post: it keeps the benign one and
+    # removes the abusive one, with its reasoning.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelModerator
+    from src.range.llm_io import ReplayClient
+
+    cap = _Capture()
+    recs = [
+        {"blocks": [{"input": {"action": "keep",
+                               "rationale": "benign greeting"}, "id": "m1"}],
+         "usage": None},
+        {"blocks": [{"input": {"action": "remove",
+                               "rationale": "scam / spam"}, "id": "m2"}],
+         "usage": None},
+    ]
+    mod = LiveModelModerator("moderator",
+                             observer=Observer("moderator", sink=cap),
+                             session_id="SM", client=ReplayClient(recs))
+    events = [_evt("user-1", "forum.post", forum="g", post_id="p1",
+                   text="hello all, glad to be here"),
+              _evt("troll-1", "forum.post", forum="g", post_id="p2",
+                   text="SCAM click here for free money")]
+    issued = mod.moderate(events)
+
+    assert any(i["post_id"] == "p2" and i["author"] == "troll-1"
+               for i in issued)
+    assert not any(i["post_id"] == "p1" for i in issued)
+    kinds = {(e.kind, e.payload.get("post_id"), e.payload.get("action"))
+             for e in cap.events}
+    assert ("moderation.action", "p2", "remove") in kinds
+    rm = next(e for e in cap.events if e.kind == "moderation.action")
+    assert "scam" in (rm.payload.get("reason") or "").lower()
+
+
+def test_real_model_moderator_replay(monkeypatch):
+    # A real claude-sonnet-4-6 moderator's judgements, replayed: it keeps the
+    # benign post and removes the scam, with its real reasoning preserved.
+    import os as _os
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelModerator
+    from src.range.llm_io import ReplayClient, load_recording
+
+    fix = _os.path.join(_os.path.dirname(__file__), "fixtures", "real_runs",
+                        "live_moderator_sonnet.json")
+    cap = _Capture()
+    mod = LiveModelModerator("moderator",
+                             observer=Observer("moderator", sink=cap),
+                             session_id="SM", client=ReplayClient(
+                                 load_recording(fix)))
+    events = [_evt("user-1", "forum.post", forum="g", post_id="p1",
+                   text="benign"),
+              _evt("troll-1", "forum.post", forum="g", post_id="p2",
+                   text="abusive")]
+    issued = mod.moderate(events)
+    assert [i["post_id"] for i in issued] == ["p2"]   # only the scam removed
+    rm = next(e for e in cap.events if e.kind == "moderation.action")
+    assert "scam" in (rm.payload.get("reason") or "").lower()
 
 
 def test_live_moderator_removes_abusive_posts(monkeypatch):
@@ -480,6 +586,32 @@ def test_run_society_interleaves_and_blocks_banned_agents():
           if e[0] == "policy.violation"]
     assert len(pv) == 2
     assert all(e[1].get("rule") == "acted_while_banned" for e in pv)
+
+
+def test_live_session_hosts_a_hidden_service(monkeypatch, tmp_path):
+    # An agent publishes a real hidden-service descriptor, gets a .obscura
+    # address, and the hosting is observable (a site.host event). The wire
+    # round-trip is a multi-process feature (see test_hs_smoke).
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.core.hidden_service import HiddenServiceHost
+    from src.utils.onion_addr import is_obscura_address
+
+    store: dict = {}
+    monkeypatch.setattr(HiddenServiceHost, "establish",
+                        lambda self, *a, **k: True)
+    monkeypatch.setattr(HiddenServiceHost, "publish_descriptor",
+                        lambda self: store.setdefault(self.address, True))
+
+    cap = _Capture()
+    sess = LiveSession("seller-1", session_id="S-SELL",
+                       observer=Observer("seller-1", sink=cap),
+                       client=AgentClient(proxy_host="127.0.0.1", proxy_port=1))
+    svc = sess.host("127.0.0.1", 9999, str(tmp_path / "hs.pem"))
+
+    assert is_obscura_address(svc.address)   # a real .obscura address
+    assert svc.address in store              # descriptor published
+    hosted = [e for e in cap.events if e.kind == "site.host"]
+    assert hosted and hosted[0].payload.get("address") == svc.address
 
 
 def test_live_agent_can_pay_for_goods(monkeypatch):
