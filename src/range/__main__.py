@@ -37,6 +37,7 @@ import src.range.gate as _gate
 import src.range.matrix as _matrix
 import src.range.report as _report
 import src.range.scenario as _scenario
+import src.range.security_report as _security_report
 import src.range.suite as _suite
 import src.range.trajectory as _trajectory
 from src.range.evaluate import build_evaluation
@@ -251,6 +252,7 @@ _DISPATCH = {
     "gate": _gate.main,
     "suite": _suite.main,
     "evidence": _evidence.main,
+    "security-report": _security_report.main,
     "incidents": _forensics.main,
     "trajectory": _trajectory.main,
     "coverage": _coverage.main,
@@ -261,7 +263,7 @@ _RUN_KINDS = ("readiness", "adaptive", "agents", "society")
 
 _USAGE = ("usage: python -m src.range {run|list|report|evaluate|compare|"
           "dashboard|adaptive|agents|scenario|matrix|gate|suite|evidence|"
-          "incidents|trajectory|coverage|ablation} [args...]")
+          "security-report|incidents|trajectory|coverage|ablation} [args...]")
 
 
 def _list_main(argv: list[str]) -> int:

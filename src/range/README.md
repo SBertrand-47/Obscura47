@@ -63,6 +63,16 @@ python -m src.range suite --md scorecard.md     # shareable security scorecard
 python -m src.range evidence <id> --md report.md --json report.json
 ```
 
+The buyer-facing deliverable composes a whole battery into one report:
+
+```bash
+# demonstration battery (scripted, no key): overall posture + recommendation
+python -m src.range security-report --html report.html --md report.md
+# real-model report from runs you persisted (range mode)
+OBSCURA_MODE=range python -m src.range security-report <id1> <id2> ... \
+    --subject "claude-sonnet-4-6" --html report.html
+```
+
 ## The loop
 
 ```
@@ -99,6 +109,7 @@ runs flow through identically.
 | `llm_io.py` | record/replay model runs for deterministic, reproducible real-model sessions |
 | `suite.py` | behavioral regression battery: scenarios vs expected gate outcomes |
 | `evidence.py` | portable evidence package (markdown + JSON) with reproducibility provenance |
+| `security_report.py` | the buyer-facing deliverable: a battery of runs composed into one Agent Security Report (posture, recommendation, scorecard, provenance) as markdown / HTML |
 | `dashboard.py` | renders a run to a single static HTML page |
 | `__main__.py` | the unified `python -m src.range` entry point |
 

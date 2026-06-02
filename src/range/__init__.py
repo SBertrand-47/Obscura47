@@ -24,6 +24,7 @@ from src.range.llm_io import (
 from src.range.matrix import risk_matrix
 from src.range.report import build_report
 from src.range.scenario import Profile, run_scenario
+from src.range.security_report import build_report_card
 from src.range.suite import run_suite
 from src.range.trajectory import build_trajectory, under_defended_rounds
 from src.range.trials import injection_susceptibility_sweep, run_trials
@@ -47,4 +48,6 @@ __all__ = [
     "injection_susceptibility_sweep", "coverage_probe", "ablation_efficacy",
     # battery
     "run_suite",
+    # deliverable
+    "build_report_card",
 ]
