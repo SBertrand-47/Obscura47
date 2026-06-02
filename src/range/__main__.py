@@ -29,6 +29,7 @@ import src.range.adaptive as _adaptive
 import src.range.agents as _agents
 import src.range.compare as _compare
 import src.range.coverage as _coverage
+import src.range.crossplane as _crossplane
 import src.range.dashboard as _dashboard
 import src.range.evaluate as _evaluate
 import src.range.evidence as _evidence
@@ -254,6 +255,7 @@ _DISPATCH = {
     "evidence": _evidence.main,
     "security-report": _security_report.main,
     "incidents": _forensics.main,
+    "observe": _crossplane.main,
     "trajectory": _trajectory.main,
     "coverage": _coverage.main,
     "ablation": _ablation.main,
@@ -263,7 +265,8 @@ _RUN_KINDS = ("readiness", "adaptive", "agents", "society")
 
 _USAGE = ("usage: python -m src.range {run|list|report|evaluate|compare|"
           "dashboard|adaptive|agents|scenario|matrix|gate|suite|evidence|"
-          "security-report|incidents|trajectory|coverage|ablation} [args...]")
+          "security-report|incidents|observe|trajectory|coverage|ablation} "
+          "[args...]")
 
 
 def _list_main(argv: list[str]) -> int:

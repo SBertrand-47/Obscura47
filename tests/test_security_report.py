@@ -166,42 +166,56 @@ def test_parse_compare_groups_validates_equal_length():
         sr._parse_compare_groups(["noequals"])          # missing '='
 
 
-# Sonnet fixture, Haiku fixture, cast, rounds, roles - aligned by scenario.
+# Scenario -> (cast, rounds, roles, {model: fixture}), aligned across subjects.
 _COMPARE_PAIRS = [
-    ("Attacker 12r", "attacker_12rounds.json", "attacker_12rounds_haiku.json",
-     "default", 12, {"attacker"}),
-    ("Injection", "injection_attacker_8rounds.json",
-     "injection_attacker_haiku.json", "injection", 8, {"attacker"}),
-    ("Forum abuse", "forum_attacker_8.json", "forum_attacker_haiku.json",
-     "forum", 8, {"attacker"}),
-    ("Honeypot", "honeypot_prober_8.json", "honeypot_prober_haiku.json",
-     "honeypot", 8, {"attacker"}),
-    ("Scam / escrow", "scam_escrow_seller_8.json",
-     "scam_escrow_seller_haiku.json", "scam-escrow", 8, {"seller"}),
-    ("Society", "society_attackers_8.json", "society_attackers_haiku.json",
-     "society", 8, {"attacker"}),
+    ("Attacker 12r", "default", 12, {"attacker"},
+     {"sonnet": "attacker_12rounds.json", "haiku": "attacker_12rounds_haiku.json",
+      "opus": "attacker_12rounds_opus.json"}),
+    ("Injection", "injection", 8, {"attacker"},
+     {"sonnet": "injection_attacker_8rounds.json",
+      "haiku": "injection_attacker_haiku.json",
+      "opus": "injection_attacker_opus.json"}),
+    ("Forum abuse", "forum", 8, {"attacker"},
+     {"sonnet": "forum_attacker_8.json", "haiku": "forum_attacker_haiku.json",
+      "opus": "forum_attacker_opus.json"}),
+    ("Honeypot", "honeypot", 8, {"attacker"},
+     {"sonnet": "honeypot_prober_8.json", "haiku": "honeypot_prober_haiku.json",
+      "opus": "honeypot_prober_opus.json"}),
+    ("Scam / escrow", "scam-escrow", 8, {"seller"},
+     {"sonnet": "scam_escrow_seller_8.json",
+      "haiku": "scam_escrow_seller_haiku.json",
+      "opus": "scam_escrow_seller_opus.json"}),
+    ("Society", "society", 8, {"attacker"},
+     {"sonnet": "society_attackers_8.json",
+      "haiku": "society_attackers_haiku.json",
+      "opus": "society_attackers_opus.json"}),
 ]
 
+_MODELS = {"sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5",
+           "opus": "claude-opus-4-8"}
 
-def test_real_leaderboard_sonnet_vs_haiku(public):
-    def _runs(idx):
+
+def test_real_leaderboard_ranks_three_models(public):
+    def _runs(key):
         out = []
-        for label, son, hai, cast, rounds, roles in _COMPARE_PAIRS:
-            fn = (son, hai)[idx]
+        for label, cast, rounds, roles, fx in _COMPARE_PAIRS:
             ev = run_pipeline(kind="agents", cast=cast, rounds=rounds,
                               llm_roles=roles,
-                              replay_path=os.path.join(_FIXTURES, fn))["evaluation"]
+                              replay_path=os.path.join(
+                                  _FIXTURES, fx[key]))["evaluation"]
             out.append((label, ev))
         return out
 
-    cmp = sr.build_comparison([("claude-sonnet-4-6", _runs(0)),
-                               ("claude-haiku-4-5", _runs(1))],
-                              generated_at="2026-06-01")
-    # Both models appear, ranked, with a real verdict matrix and real divergences.
+    cmp = sr.build_comparison(
+        [(_MODELS[k], _runs(k)) for k in ("sonnet", "haiku", "opus")],
+        generated_at="2026-06-01")
     names = {r["subject"] for r in cmp["ranking"]}
-    assert names == {"claude-sonnet-4-6", "claude-haiku-4-5"}
-    assert cmp["safest"] in names
+    assert names == set(_MODELS.values())
     assert len(cmp["scenarios"]) == len(_COMPARE_PAIRS)
-    # The two models do not behave identically across the battery.
+    # On this real battery, Opus is the most reserved and Sonnet the most active,
+    # so the safety ranking is Opus < Haiku < Sonnet (uncontained counts).
+    ranked = [r["subject"] for r in cmp["ranking"]]
+    assert ranked == ["claude-opus-4-8", "claude-haiku-4-5", "claude-sonnet-4-6"]
+    assert cmp["safest"] == "claude-opus-4-8"
     assert cmp["verdict_divergences"]
     assert "## Scenario verdicts by subject" in sr.render_comparison_markdown(cmp)

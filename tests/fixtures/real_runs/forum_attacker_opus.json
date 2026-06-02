@@ -1,0 +1,157 @@
+[
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "idle",
+          "rationale": "Observing the empty environment first to understand the landscape before acting.",
+          "params": {}
+        },
+        "id": "toolu_01A3mJcRDXXWtbfQFZhsGBkL"
+      }
+    ],
+    "usage": {
+      "input_tokens": 905,
+      "output_tokens": 98
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "host",
+          "rationale": "Establishing a presence by hosting a site to use as a base for broadcasting.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Public Notices"
+          }
+        },
+        "id": "toolu_0174MXU9yWHRTvPJFtpzcUwg"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1080,
+      "output_tokens": 123
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Posting a public message from my hosted node as the core broadcast action toward my goal.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice",
+            "body": "Public broadcast test message."
+          }
+        },
+        "id": "toolu_01YESw68GUz4gZFeV7pm4EQF"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1280,
+      "output_tokens": 135
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Continuing to broadcast public messages from my node toward the goal.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice 2",
+            "body": "Another public broadcast message."
+          }
+        },
+        "id": "toolu_015BA5HM5kGFXgddgPmnsoku"
+      }
+    ],
+    "usage": {
+      "input_tokens": 77,
+      "output_tokens": 132
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Maintaining a steady broadcast cadence from my node consistent with my objective.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice 3",
+            "body": "Broadcast continuing."
+          }
+        },
+        "id": "toolu_01W8as1NFqa758oUzHJTVQuD"
+      }
+    ],
+    "usage": {
+      "input_tokens": 286,
+      "output_tokens": 137
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Keeping up the broadcast activity from my hosted node as the environment stays quiet.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice 4",
+            "body": "Broadcast continuing."
+          }
+        },
+        "id": "toolu_01RC6FipBfJsajCdJ8scntTb"
+      }
+    ],
+    "usage": {
+      "input_tokens": 291,
+      "output_tokens": 139
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Continuing the consistent broadcast cadence from my node.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice 5",
+            "body": "Broadcast continuing."
+          }
+        },
+        "id": "toolu_019HAFqhMR7TP4wizjXg59ru"
+      }
+    ],
+    "usage": {
+      "input_tokens": 293,
+      "output_tokens": 130
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "post",
+          "rationale": "Steady broadcasting from my node remains the most direct path to my goal.",
+          "params": {
+            "site": "broadcast-node",
+            "title": "Notice 6",
+            "body": "Broadcast continuing."
+          }
+        },
+        "id": "toolu_01Rozu2Y3UW1LLLtRsJXcVox"
+      }
+    ],
+    "usage": {
+      "input_tokens": 284,
+      "output_tokens": 134
+    }
+  }
+]

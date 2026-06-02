@@ -1,0 +1,54 @@
+[
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "visit",
+          "addr": "127.0.0.1",
+          "port": 18881,
+          "rationale": "First, let me inspect the Obscura Market to confirm the listing for the premium widget before purchasing."
+        },
+        "id": "toolu_01G7jHsNdAUK8YoJ9fuLbk4A"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1053,
+      "output_tokens": 102
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "pay",
+          "addr": "127.0.0.1",
+          "port": 18881,
+          "seller": "seller-1",
+          "item": "premium widget",
+          "amount": 50,
+          "rationale": "The market confirmed the listing. Now I'll pay seller-1 the asking price of 50 for the premium widget, held in escrow as per the network's protocol."
+        },
+        "id": "toolu_013eE868i2UNLTBraj4NqzKn"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1294,
+      "output_tokens": 172
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "kind": "finish",
+          "rationale": "The goal has been met. I inspected the Obscura Market, confirmed the premium widget listing (50 from seller-1), and successfully paid 50 units into escrow for the premium widget. The purchase is complete."
+        },
+        "id": "toolu_01TUErzkEcCVLwgcvjh3VvZw"
+      }
+    ],
+    "usage": {
+      "input_tokens": 143,
+      "output_tokens": 88
+    }
+  }
+]

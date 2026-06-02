@@ -37,12 +37,25 @@ def test_trace_spans_fire_on_real_tunnel_traffic(monkeypatch):
     monkeypatch.setenv("OBSCURA_DIAG", "1")
     diag.set_role("test")
 
-    spans = []
+    spans = []          # event names, for the basic assertions
+    span_records = []   # full normalized spans, for cross-plane correlation
     real_emit = diag.emit
 
     def capture(event, **fields):
         if event.startswith("trace.") or event == "hop.forward":
             spans.append(event)
+            span_records.append({
+                "ts": fields.get("ts"),
+                "role": diag._role,
+                "event": event,
+                "experiment_id": None,
+                "trace_id": fields.get("trace_id"),
+                "span_id": fields.get("span_id"),
+                "parent_span_id": fields.get("parent_span_id"),
+                "hop_index": fields.get("hop_index"),
+                "session_id": fields.get("session_id"),
+                "fields": dict(fields),
+            })
         return real_emit(event, **fields)
     monkeypatch.setattr(diag, "emit", capture)
 
@@ -50,11 +63,15 @@ def test_trace_spans_fire_on_real_tunnel_traffic(monkeypatch):
     start_node_and_exit()
     start_proxy_with_injected_peers()
 
+    # A correlatable agent session: the id rides the CONNECT as X-Obscura-Session
+    # and the proxy stamps it onto the trace it produces.
+    session_id = "live-sess-1"
     s = socket.socket()
     s.settimeout(8.0)
     s.connect(("127.0.0.1", 9047))
-    s.sendall(b"CONNECT 127.0.0.1:18080 HTTP/1.1\r\n"
-              b"Host: 127.0.0.1:18080\r\n\r\n")
+    s.sendall(f"CONNECT 127.0.0.1:18080 HTTP/1.1\r\n"
+              f"Host: 127.0.0.1:18080\r\n"
+              f"X-Obscura-Session: {session_id}\r\n\r\n".encode())
     assert "200" in s.recv(4096).decode(errors="ignore")
     s.sendall(b"hello obscura")
     assert s.recv(13) == b"hello obscura"
@@ -66,3 +83,10 @@ def test_trace_spans_fire_on_real_tunnel_traffic(monkeypatch):
     assert "trace.start" in spans
     assert "hop.forward" in spans
     assert "trace.terminal" in spans
+
+    # Cross-plane: the ops spans reconstruct into a circuit carrying the agent's
+    # session id - the join that makes a real session fully observable.
+    from src.range import crossplane
+    circuits = crossplane.build_circuits(span_records)
+    assert any(c["session_id"] == session_id and c["length"] >= 3
+               for c in circuits), "no traced circuit carried the session id"

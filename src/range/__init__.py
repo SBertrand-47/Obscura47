@@ -14,11 +14,15 @@ from src.range.agents import (
 # Aliased to avoid shadowing the same-named submodules on the package.
 from src.range.compare import compare as compare_configs
 from src.range.coverage import probe as coverage_probe
+from src.range.crossplane import correlate as correlate_planes
 from src.range.dashboard import render_html as render_dashboard
 from src.range.evaluate import build_evaluation, evaluate_run
 from src.range.evidence import build_evidence
 from src.range.forensics import build_incidents, campaign, incidents_from_events
 from src.range.gate import check_gate
+from src.range.live import (
+    LiveAgent, LiveDefender, LiveEscrow, LiveInvestigator, LiveModelDefender,
+    LiveModerator, LiveReputationGate, LiveSession, run_society)
 from src.range.llm_io import (
     RecordingClient, ReplayClient, load_recording, save_recording)
 from src.range.matrix import risk_matrix
@@ -50,4 +54,10 @@ __all__ = [
     "run_suite",
     # deliverable
     "build_report_card", "build_comparison",
+    # cross-plane observability
+    "correlate_planes",
+    # live bridge: agents on the real overlay
+    "LiveSession", "LiveAgent", "LiveDefender", "LiveModelDefender",
+    "LiveEscrow", "LiveReputationGate", "LiveModerator", "LiveInvestigator",
+    "run_society",
 ]
