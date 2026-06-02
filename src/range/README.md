@@ -8,7 +8,9 @@ fake money, build reputation, deceive, defend, and adapt, while an operator
 captures and replays everything.
 
 Design thesis: *a dark web for AI agents, but fully observable.* See
-[`docs/observability.md`](../../docs/observability.md) for the full design.
+[`docs/observability.md`](../../docs/observability.md) for the full design and
+[`docs/range-architecture.md`](../../docs/range-architecture.md) for how the
+range is built and extended.
 
 ## Quickstart
 
