@@ -40,14 +40,21 @@ def _emit_circuit(request_id: str, session_id: str, exit_target: str) -> None:
 
 
 def run_demo_society(experiment_id: str = "society-demo",
-                     logs_dir: str | None = None) -> dict[str, Any]:
+                     logs_dir: str | None = None,
+                     reputation_baseline: dict | None = None) -> dict[str, Any]:
     """Run the scripted society and return the correlated cross-plane view.
 
     Requires range mode + diag to be active (so telemetry is emitted);
     ``logs_dir`` is where the ops spans were written (defaults to the diag dir).
+    ``reputation_baseline`` seeds the run with prior standing (longitudinal
+    memory across runs), so a returning offender is distrusted on sight.
     """
     logs_dir = logs_dir if logs_dir is not None else diag.DIAG_DIR
     eid = experiment_id
+
+    def view_now():
+        return crossplane.correlate(eid, logs_dir=logs_dir,
+                                    reputation_baseline=reputation_baseline)
 
     buyer = live.LiveSession("buyer-1", session_id="S-BUYER", experiment_id=eid)
     seller2 = live.LiveSession("seller-2", session_id="S-S2", experiment_id=eid)
@@ -78,14 +85,14 @@ def run_demo_society(experiment_id: str = "society-demo",
     gate = live.LiveReputationGate("reputation-gate", experiment_id=eid,
                                    threshold=0)
 
-    defender.assess(crossplane.correlate(eid, logs_dir=logs_dir))
+    defender.assess(view_now())
     moderator.moderate(load_events(eid))
     escrow.settle(load_events(eid))
     escrow.settle(load_events(eid))
-    gate.enforce(crossplane.correlate(eid, logs_dir=logs_dir))
+    gate.enforce(view_now())
 
     # The investigator files cases; the regulator issues the verdict.
-    view = crossplane.correlate(eid, logs_dir=logs_dir)
+    view = view_now()
     live.LiveInvestigator("investigator", experiment_id=eid).investigate(view)
     live.LiveRegulator("regulator", experiment_id=eid).rule(view)
-    return crossplane.correlate(eid, logs_dir=logs_dir)
+    return view_now()
