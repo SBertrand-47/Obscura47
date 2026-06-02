@@ -280,6 +280,30 @@ def test_scam_seller_flagged_and_contained_by_escrow():
     assert "seller-1 was flagged" in story
 
 
+def test_forum_abuse_is_flagged_and_removed():
+    # An abusive post is removed by a moderator; its author is flagged and
+    # contained, while a benign poster is left alone.
+    events = [
+        _ev_actor("user-1", "forum.post", "SU", 1.0, forum="g", post_id="p1",
+                  text="hi all"),
+        _ev_actor("troll-1", "forum.post", "ST", 1.1, forum="g", post_id="p2",
+                  text="scam spam click here"),
+        _ev_actor("moderator", "moderation.action", "SM", 2.0, post_id="p2",
+                  target="troll-1", action="remove", reason="abusive content"),
+        _ev_actor("moderator", "defense.flag", "SM", 2.1, target="troll-1",
+                  signal="abuse", reason="posted abusive content"),
+    ]
+    view = cp.correlate("exp1", events=events, spans=[])
+    assert view["forum"]["post_count"] == 2
+    assert "p2" in view["forum"]["removed"]
+    f = {x["agent"]: x for x in view["threats"]["flagged_agents"]}
+    assert "troll-1" in f and "user-1" not in f
+    assert any("abusive" in r for r in f["troll-1"]["reasons"])
+    assert f["troll-1"]["status"] == "contained"   # removal contains the author
+    story = " ".join(view["narrative"])
+    assert "forum post" in story and "removed for abuse" in story
+
+
 def test_reputation_accumulates_and_renders():
     # Reputation is the running sum of trust.update deltas the escrow issues.
     events = [

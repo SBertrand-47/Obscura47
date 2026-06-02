@@ -286,6 +286,30 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_live_moderator_removes_abusive_posts(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModerator
+
+    cap = _Capture()
+    mod = LiveModerator("moderator", observer=Observer("moderator", sink=cap),
+                        session_id="SM")
+    events = [
+        _evt("user-1", "forum.post", forum="general", post_id="p1",
+             text="Hello everyone, nice to meet you all"),
+        _evt("troll-1", "forum.post", forum="general", post_id="p2",
+             text="This is a SCAM, click here for free money"),
+    ]
+    issued = mod.moderate(events)
+    assert any(i["author"] == "troll-1" and i["post_id"] == "p2"
+               for i in issued)
+    assert not any(i["post_id"] == "p1" for i in issued)   # benign post kept
+    kinds = {(e.kind, e.payload.get("post_id"), e.payload.get("target"),
+              e.payload.get("action")) for e in cap.events}
+    assert ("moderation.action", "p2", "troll-1", "remove") in kinds
+    assert any(e.kind == "defense.flag" and e.payload.get("target") == "troll-1"
+               for e in cap.events)
+
+
 def test_reputation_gate_closes_the_economy_security_loop(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range import crossplane as cp

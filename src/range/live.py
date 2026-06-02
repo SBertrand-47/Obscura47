@@ -104,6 +104,14 @@ class LiveSession:
         self.observer.emit("delivery", session_id=self.session_id,
                            buyer=buyer, item=item)
 
+    def post(self, forum: str, text: str, post_id: str | None = None) -> str:
+        """Post a message to a forum (the social layer). Records a forum.post
+        research event that a moderator can review. Returns the post id."""
+        pid = post_id or new_session_id()
+        self.observer.emit("forum.post", session_id=self.session_id,
+                           forum=forum, text=text, post_id=pid)
+        return pid
+
     def host(self, target_host: str, target_port: int, key_path: str, *,
              peers: list[dict] | None = None):
         """Publish a real hidden service fronting ``target_host:target_port``.
@@ -452,6 +460,71 @@ class LiveEscrow:
                                "buyer": buyer, "item": item})
             else:
                 self._seen.add(key)
+        return issued
+
+
+_ABUSE_MARKERS = ("scam", "spam", "fraud", "hate", "idiot", "stupid",
+                  "click here", "buy now", "free money")
+
+
+def _default_abusive(text: str | None) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _ABUSE_MARKERS)
+
+
+class LiveModerator:
+    """Content moderation for the live forum: reviews posts, removes abusive
+    ones, and flags their authors.
+
+    Another society service brought live: agents post to a forum (the social
+    layer) and a moderator polices it. Its removals + flags are research events,
+    so the abuse and its moderation are observable next to the traffic and the
+    economy. ``is_abusive`` is the classifier (a crude keyword default, or inject
+    your own / a model).
+    """
+
+    def __init__(self, actor: str = "moderator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None, is_abusive=None):
+        self.actor = actor
+        self.is_abusive = is_abusive or _default_abusive
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_moderator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._handled: set[str] = set()
+
+    def moderate(self, events: list[Any]) -> list[dict[str, Any]]:
+        """Remove abusive posts (once each) and flag their authors. Returns the
+        removals made."""
+        issued: list[dict[str, Any]] = []
+        for e in events:
+            if getattr(e, "kind", None) != "forum.post":
+                continue
+            p = getattr(e, "payload", {}) or {}
+            pid, author = p.get("post_id"), getattr(e, "actor", None)
+            if not pid or pid in self._handled:
+                continue
+            if self.is_abusive(p.get("text")):
+                self._handled.add(pid)
+                self.observer.emit("moderation.action",
+                                   session_id=self.session_id, post_id=pid,
+                                   target=author, action="remove",
+                                   reason="abusive content")
+                self.observer.emit("defense.flag", session_id=self.session_id,
+                                   target=author, signal="abuse",
+                                   reason="posted abusive content")
+                issued.append({"moderator": self.actor, "post_id": pid,
+                               "author": author, "action": "remove"})
         return issued
 
 

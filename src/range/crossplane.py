@@ -194,6 +194,7 @@ def correlate(experiment_id: str | None = None, *,
     responses = _responses(events)
     economy = _economy(events)
     reputation = _reputation(events)
+    forum = _forum(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {
         "experiment_id": experiment_id,
@@ -201,13 +202,37 @@ def correlate(experiment_id: str | None = None, *,
         "circuits": circuits,
         "coverage": coverage,
         "graph": graph,
-        "threats": _detect_threats(sessions, responses, economy, reputation),
+        "threats": _detect_threats(sessions, responses, economy, reputation,
+                                   forum),
         "responses": responses,
         "economy": economy,
         "reputation": reputation,
+        "forum": forum,
     }
     view["narrative"] = build_narrative(view)
     return view
+
+
+def _forum(events: list[Any] | None) -> dict[str, Any]:
+    """Reconstruct the forum (the social layer): posts, and which were removed
+    by a moderator. The authors of removed posts are the abusive ones."""
+    posts, removed = [], set()
+    for e in events or []:
+        k = getattr(e, "kind", None)
+        p = getattr(e, "payload", {}) or {}
+        if k == "forum.post":
+            posts.append({"author": getattr(e, "actor", None),
+                          "forum": p.get("forum"), "post_id": p.get("post_id"),
+                          "text": p.get("text")})
+        elif k == "moderation.action" and p.get("action") == "remove":
+            if p.get("post_id"):
+                removed.add(p.get("post_id"))
+    abusive: dict[str, int] = {}
+    for post in posts:
+        if post["post_id"] in removed:
+            abusive[post["author"]] = abusive.get(post["author"], 0) + 1
+    return {"posts": posts, "post_count": len(posts),
+            "removed": sorted(removed), "abusive_authors": abusive}
 
 
 def _reputation(events: list[Any] | None) -> dict[str, int]:
@@ -292,6 +317,11 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
         lines.append(
             f"{len(pays)} escrow payment(s) worth {econ.get('volume', 0)} units: "
             f"{delivered} delivered, {refunded} refunded after non-delivery.")
+    forum = view.get("forum") or {}
+    if forum.get("post_count"):
+        rm = len(forum.get("removed", []))
+        lines.append(f"{forum['post_count']} forum post(s); {rm} removed for "
+                     f"abuse by moderation.")
     for f in flagged:
         reason = ", ".join(f["reasons"])
         if f["status"] == "contained":
@@ -345,7 +375,9 @@ def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
             out.append({"defender": getattr(e, "actor", None),
                         "target": target, "action": "flag",
                         "reason": payload.get("reason")})
-        elif kind == "moderation.action" and payload.get("action") == "ban":
+        elif (kind == "moderation.action"
+              and payload.get("action") in ("ban", "remove")):
+            # A ban or a content removal both contain the offending agent.
             out.append({"defender": getattr(e, "actor", None),
                         "target": target, "action": "ban",
                         "reason": payload.get("reason")})
@@ -355,7 +387,8 @@ def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
 def _detect_threats(sessions: list[dict[str, Any]],
                     responses: list[dict[str, Any]] = (),
                     economy: dict[str, Any] | None = None,
-                    reputation: dict[str, int] | None = None) -> dict[str, Any]:
+                    reputation: dict[str, int] | None = None,
+                    forum: dict[str, Any] | None = None) -> dict[str, Any]:
     """Flag suspicious agents from the joined planes, so the dashboard tells a
     security story: fanning out across many services (recon), traffic that never
     showed up on the wire (evasion), and taking payment without delivering
@@ -406,6 +439,10 @@ def _detect_threats(sessions: list[dict[str, Any]],
         if rep < 0:
             ent = flags.setdefault(agent, {"reasons": [], "services": []})
             ent["reasons"].append(f"distrusted (reputation {rep})")
+
+    for author, n in (forum or {}).get("abusive_authors", {}).items():
+        ent = flags.setdefault(author, {"reasons": [], "services": []})
+        ent["reasons"].append(f"posted abusive content ({n} removed)")
 
     flagged = []
     for actor in sorted(flags):
