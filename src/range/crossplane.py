@@ -193,7 +193,7 @@ def correlate(experiment_id: str | None = None, *,
     }
     responses = _responses(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
-    return {
+    view = {
         "experiment_id": experiment_id,
         "sessions": sessions,
         "circuits": circuits,
@@ -202,6 +202,55 @@ def correlate(experiment_id: str | None = None, *,
         "threats": _detect_threats(sessions, responses),
         "responses": responses,
     }
+    view["narrative"] = build_narrative(view)
+    return view
+
+
+def build_narrative(view: dict[str, Any]) -> list[str]:
+    """A plain-language account of the run from the joined planes: who acted,
+    who was flagged and how the defender responded, and whether anything went
+    unobserved. The dashboard's 'what happened on Obscura' summary."""
+    cov = view["coverage"]
+    g = view.get("graph") or {}
+    threats = view.get("threats") or {}
+    flagged = threats.get("flagged_agents", [])
+    responder = {r["defender"] for r in view.get("responses", [])
+                 if r.get("defender")}
+
+    lines = [f"{len(g.get('agents', []))} agent(s) interacted with "
+             f"{len(g.get('services', []))} service(s) across "
+             f"{cov['research_sessions']} session(s) on Obscura."]
+    for f in flagged:
+        reason = ", ".join(f["reasons"])
+        if f["status"] == "contained":
+            s = (f"{f['agent']} was flagged ({reason}) and contained by "
+                 f"{', '.join(f['contained_by'])}.")
+            if f.get("response_reason"):
+                s += f' Defender: "{f["response_reason"]}"'
+        elif f["status"] == "detected":
+            s = (f"{f['agent']} was flagged ({reason}) and detected by "
+                 f"{', '.join(f['detected_by'])} but not contained.")
+        else:
+            s = f"{f['agent']} was flagged ({reason}) with no defender response."
+        lines.append(s)
+    clean = [a for a in g.get("agents", [])
+             if a not in set(threats.get("flagged", [])) and a not in responder]
+    if clean:
+        lines.append(f"{', '.join(clean)} behaved normally (no flags).")
+    if responder and not flagged:
+        lines.append(f"{', '.join(sorted(responder))} watched but took no "
+                     f"action.")
+    if cov["fully_observable"]:
+        lines.append("Every dial was traced on the wire - the run is fully "
+                     "observable.")
+    else:
+        if cov["dial_sessions_unobserved"]:
+            lines.append(f"{len(cov['dial_sessions_unobserved'])} session(s) "
+                         f"dialed without leaving a trace (observability gap).")
+        if cov["unattributed_circuits"]:
+            lines.append(f"{cov['unattributed_circuits']} circuit(s) on the "
+                         f"wire could not be attributed to an agent.")
+    return lines
 
 
 def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
@@ -400,6 +449,10 @@ def render_text(view: dict[str, Any]) -> str:
         f"  fully observable: {cov['fully_observable']}",
         "",
     ]
+    for s in (view.get("narrative") or []):
+        lines.append(f"  - {s}")
+    if view.get("narrative"):
+        lines.append("")
     if not view["sessions"]:
         lines.append("  (no correlated sessions)")
     for s in view["sessions"]:
@@ -571,6 +624,13 @@ def render_html(view: dict[str, Any]) -> str:
                      ("flagged agents", len(flagged)),
                      ("defender responses", len(view.get("responses", [])))])
 
+    narrative = view.get("narrative") or build_narrative(view)
+    summary_html = ""
+    if narrative:
+        pts = "".join(f"<li>{_esc(s)}</li>" for s in narrative)
+        summary_html = (f'<section><h2>What happened on Obscura</h2>'
+                        f'<ul class="story">{pts}</ul></section>')
+
     graph_html = ""
     if graph.get("agents") or graph.get("services"):
         legend = ('<div class="legend">'
@@ -695,6 +755,7 @@ def render_html(view: dict[str, Any]) -> str:
  .threats{{list-style:none;padding:0;margin:0}}
  .threats li{{margin:8px 0;color:#f0c9b0}}
  .why{{color:#9ec1ff;font-style:italic;font-size:12px}}
+ ul.story{{margin:4px 0;padding-left:20px}} ul.story li{{margin:5px 0}}
  .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}
  .hop{{display:inline-flex;flex-direction:column;background:#161c2b;
    border:1px solid #2c3344;border-radius:8px;padding:6px 11px;min-width:64px}}
@@ -715,6 +776,7 @@ def render_html(view: dict[str, Any]) -> str:
 <span class="pill" style="background:{posture[1]}">{posture[0]}</span>
 <div class="chips">{chips}</div>
 </div></div>
+{summary_html}
 {graph_html}
 {threat_html}
 {sessions_html or '<section><p class="empty">no correlated sessions</p></section>'}

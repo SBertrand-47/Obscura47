@@ -243,6 +243,33 @@ def test_detect_and_respond_marks_flagged_agent_contained(tmp_path):
     html = cp.render_html(view)
     assert "detect &amp; respond" in html
     assert "contained by defender-1" in html
+    # The run narrates itself, in the view and on the dashboard.
+    assert any("contained by defender-1" in s for s in view["narrative"])
+    assert "What happened on Obscura" in html
+    assert "attacker-1 was flagged" in cp.render_text(view)
+
+
+def test_build_narrative_tells_the_story():
+    view = {
+        "coverage": {"research_sessions": 3, "fully_observable": True,
+                     "dial_sessions_unobserved": [], "unattributed_circuits": 0},
+        "graph": {"agents": ["attacker-1", "buyer-1", "defender-1"],
+                  "services": ["a:1", "a:2", "a:3", "m"]},
+        "threats": {"flagged": ["attacker-1"], "flagged_agents": [{
+            "agent": "attacker-1",
+            "reasons": ["fanned out across 3 services (recon)"],
+            "status": "contained", "contained_by": ["defender-1"],
+            "detected_by": ["defender-1"],
+            "response_reason": "classic reconnaissance"}]},
+        "responses": [{"defender": "defender-1", "target": "attacker-1",
+                       "action": "ban", "reason": "classic reconnaissance"}],
+    }
+    story = " ".join(cp.build_narrative(view))
+    assert "attacker-1 was flagged" in story
+    assert "contained by defender-1" in story
+    assert "classic reconnaissance" in story
+    assert "buyer-1 behaved normally" in story        # defender excluded
+    assert "fully observable" in story
 
 
 def test_graph_renders_in_text_and_html(tmp_path):
