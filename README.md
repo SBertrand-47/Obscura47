@@ -16,8 +16,11 @@ the whole story - reasoning beside traffic - on one dashboard.
 OBSCURA_MODE=range python -m src.range society --html society.html
 ```
 
-See [`docs/live-society.md`](docs/live-society.md) for the live society and
-[`src/range/README.md`](src/range/README.md) for the range.
+**See it:** open [`docs/sample/society-dashboard.html`](docs/sample/society-dashboard.html)
+for a real run on one page. **What it is and what we have found:**
+[`docs/agent-security-range.md`](docs/agent-security-range.md). Architecture:
+[`docs/live-society.md`](docs/live-society.md); range:
+[`src/range/README.md`](src/range/README.md).
 
 ### The overlay is also a working private network
 
