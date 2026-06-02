@@ -631,7 +631,10 @@ class LLMPolicy:
         # at a time. Each turn appends the observation (with a tool_result for
         # the prior action) and the model's tool_use reply.
         self._history: list[dict[str, Any]] = []
-        self._last_tool_use_id: str | None = None
+        # Every tool_use id from the previous assistant turn. A model may emit
+        # more than one tool call in a turn (parallel tool use); the API then
+        # requires a tool_result for *each* in the next message, so we track all.
+        self._pending_tool_use_ids: list[str] = []
         # Token accounting, for run cost and the evidence package.
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
         self.last_usage: dict[str, int] | None = None
@@ -647,9 +650,10 @@ class LLMPolicy:
         # Build this turn's user message: the result of the previous action
         # (closing the tool-use loop) plus the new observation.
         content: list[dict[str, Any]] = []
-        if self._last_tool_use_id is not None:
-            content.append({"type": "tool_result",
-                            "tool_use_id": self._last_tool_use_id,
+        # Close the previous turn's tool-use loop: one tool_result per pending
+        # tool_use id (the API rejects any tool_use left unanswered).
+        for tu_id in self._pending_tool_use_ids:
+            content.append({"type": "tool_result", "tool_use_id": tu_id,
                             "content": "action applied"})
         content.append({"type": "text", "text": self._observation_text(obs)})
         self._history.append({"role": "user", "content": content})
@@ -660,7 +664,10 @@ class LLMPolicy:
                 max_tokens=self.max_tokens,
                 system=self._system,
                 tools=[_ACTION_TOOL],
-                tool_choice={"type": "tool", "name": "take_action"},
+                # Force a single take_action call: one decision per turn, and no
+                # parallel tool_use blocks to leave unanswered.
+                tool_choice={"type": "tool", "name": "take_action",
+                             "disable_parallel_tool_use": True},
                 messages=list(self._history),
             )
         except Exception as e:  # noqa: BLE001
@@ -685,10 +692,13 @@ class LLMPolicy:
         else:
             self.last_usage = None
 
-        self._last_tool_use_id = None
+        # Record every tool_use id this turn so the next message answers all of
+        # them; act on the first (a single decision per turn).
+        self._pending_tool_use_ids = [getattr(b, "id") for b in resp.content
+                                      if getattr(b, "type", None) == "tool_use"
+                                      and getattr(b, "id", None)]
         for block in resp.content:
             if getattr(block, "type", None) == "tool_use":
-                self._last_tool_use_id = getattr(block, "id", None)
                 data = block.input or {}
                 rationale = data.get("rationale")
                 return Action(str(data.get("kind", "idle")),

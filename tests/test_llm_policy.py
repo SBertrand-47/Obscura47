@@ -74,7 +74,8 @@ def test_decide_call_shape_forces_the_tool_and_caches_system():
     policy.decide(_obs())
     call = client.messages.calls[0]
     assert call["model"] == "claude-x"
-    assert call["tool_choice"] == {"type": "tool", "name": "take_action"}
+    assert call["tool_choice"] == {"type": "tool", "name": "take_action",
+                                   "disable_parallel_tool_use": True}
     assert call["tools"][0]["name"] == "take_action"
     # Static system prompt is marked for prompt caching.
     assert call["system"][0]["cache_control"] == {"type": "ephemeral"}
@@ -94,6 +95,30 @@ def test_conversation_memory_accumulates_and_threads_tool_results():
     # The new user turn closes the previous action's tool-use loop.
     assert any(isinstance(c, dict) and c.get("type") == "tool_result"
                for c in msgs[2]["content"])
+
+
+def test_parallel_tool_use_is_fully_answered_next_turn():
+    # A model may emit more than one tool_use block in a turn (Opus did this in
+    # the multi-agent casts). Every tool_use must get a tool_result next turn,
+    # or the API rejects the conversation. Act on the first; answer all.
+    client = _FakeClient({"kind": "idle"})
+    blocks = [_ToolUseBlock({"kind": "attack",
+                             "params": {"technique": "phishing",
+                                        "target": "seller-1"}}),
+              _ToolUseBlock({"kind": "idle"})]
+    blocks[0].id, blocks[1].id = "tu_a", "tu_b"
+    client.messages.create = lambda **kw: _Resp(blocks)
+    policy = LLMPolicy("attacker", "g", client=client)
+    action = policy.decide(_obs(round=1))
+    assert action.kind == "attack"          # acts on the first tool call
+    # Next turn must carry a tool_result for BOTH tool_use ids.
+    policy_calls = []
+    client.messages.create = lambda **kw: policy_calls.append(kw) or _Resp(
+        [_ToolUseBlock({"kind": "idle"})])
+    policy.decide(_obs(round=2))
+    results = [c for c in policy_calls[0]["messages"][-1]["content"]
+               if isinstance(c, dict) and c.get("type") == "tool_result"]
+    assert {r["tool_use_id"] for r in results} == {"tu_a", "tu_b"}
 
 
 def test_token_usage_is_accumulated():
