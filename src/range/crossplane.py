@@ -131,7 +131,8 @@ def build_circuits(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def correlate(experiment_id: str | None = None, *,
               events: list[Any] | None = None,
               spans: list[dict[str, Any]] | None = None,
-              logs_dir: str | None = None) -> dict[str, Any]:
+              logs_dir: str | None = None,
+              hosts: dict[str, str] | None = None) -> dict[str, Any]:
     """Join research events and ops spans by ``session_id`` for one run.
 
     Returns a per-session view (the agent's research events plus the network
@@ -195,6 +196,53 @@ def correlate(experiment_id: str | None = None, *,
         "sessions": sessions,
         "circuits": circuits,
         "coverage": coverage,
+        "graph": traffic_graph(sessions, hosts=hosts),
+    }
+
+
+def _session_actor(session: dict[str, Any]) -> str | None:
+    """The agent behind a session: the actor that emitted its research events."""
+    for e in session["research_events"]:
+        actor = getattr(e, "actor", None)
+        if actor:
+            return actor
+    return None
+
+
+def traffic_graph(sessions: list[dict[str, Any]],
+                  hosts: dict[str, str] | None = None) -> dict[str, Any]:
+    """The cross-agent traffic graph: who dialed whom, across all sessions.
+
+    Nodes are agents and the services they reached; an edge is an agent dialing
+    a service, with a dial count and whether that traffic was observed on the
+    wire. ``hosts`` optionally maps a service address to the agent hosting it, so
+    a dial collapses into an agent-to-agent edge - the social graph of the run.
+    """
+    hosts = hosts or {}
+    agents: set[str] = set()
+    services: set[str] = set()
+    edges: dict[tuple[str, str], dict[str, Any]] = {}
+    for s in sessions:
+        actor = _session_actor(s) or s["session_id"]
+        agents.add(actor)
+        observed = s["observed_on_wire"]
+        for e in s["research_events"]:
+            if getattr(e, "kind", None) != "dial.out":
+                continue
+            dst = (getattr(e, "payload", {}) or {}).get("addr")
+            if not dst:
+                continue
+            services.add(dst)
+            ent = edges.setdefault((actor, dst), {
+                "src": actor, "dst": dst, "dst_agent": hosts.get(dst),
+                "dials": 0, "observed": False})
+            ent["dials"] += 1
+            ent["observed"] = ent["observed"] or observed
+    return {
+        "agents": sorted(agents),
+        "services": sorted(services),
+        "edges": [edges[k] for k in sorted(edges)],
+        "hosts": dict(hosts),
     }
 
 
@@ -264,6 +312,17 @@ def render_text(view: dict[str, Any]) -> str:
             tag = "R" if it["plane"] == "research" else "O"
             lines.append(f"    [{tag}] {it['kind']:<16} {it['actor'] or '':<10} "
                          f"{it['detail']}")
+        lines.append("")
+    graph = view.get("graph") or {}
+    if graph.get("edges"):
+        lines.append("traffic graph (who dialed whom):")
+        for e in graph["edges"]:
+            dst = e["dst"]
+            if e.get("dst_agent"):
+                dst = f"{dst} [{e['dst_agent']}]"
+            flag = "observed" if e["observed"] else "unobserved"
+            lines.append(f"  {e['src']} -> {dst}  "
+                         f"({e['dials']} dial(s), {flag})")
         lines.append("")
     if cov["dial_sessions_unobserved"]:
         lines.append("WARNING: research dials with no ops trace (unobserved "
@@ -350,6 +409,30 @@ def render_html(view: dict[str, Any]) -> str:
                        f'<p class="sub">Circuits seen on the wire with no '
                        f'matching agent decision.</p>{items}</section>')
 
+    # Cross-agent traffic graph: who dialed whom across the whole run.
+    graph = view.get("graph") or {}
+    graph_html = ""
+    if graph.get("edges"):
+        grows = ""
+        for e in graph["edges"]:
+            dst = _esc(e["dst"])
+            if e.get("dst_agent"):
+                dst += f' <small>[{_esc(e["dst_agent"])}]</small>'
+            ocol = "#2e7d32" if e["observed"] else "#c62828"
+            otext = "observed" if e["observed"] else "unobserved"
+            grows += (f'<tr><td><b>{_esc(e["src"])}</b></td>'
+                      f'<td class="arrow">&rarr;</td><td>{dst}</td>'
+                      f'<td>{_esc(e["dials"])}</td>'
+                      f'<td><span class="badge" style="background:{ocol}">'
+                      f'{otext}</span></td></tr>')
+        graph_html = (
+            f'<section><h2>Traffic graph &middot; who dialed whom</h2>'
+            f'<p class="sub">{len(graph["agents"])} agent(s), '
+            f'{len(graph["services"])} service(s)</p>'
+            f'<table class="tl"><thead><tr><th>agent</th><th></th>'
+            f'<th>service</th><th>dials</th><th>wire</th></tr></thead>'
+            f'<tbody>{grows}</tbody></table></section>')
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Obscura observe &middot; {_esc(view.get('experiment_id') or '')}</title>
@@ -384,6 +467,7 @@ def render_html(view: dict[str, Any]) -> str:
  &middot; {cov['research_sessions']} research sessions &middot;
  {cov['ops_circuits']} ops circuits &middot;
  {cov['sessions_observed_on_wire']} observed on wire</p>
+{graph_html}
 {sessions_html or '<p class="empty">no correlated sessions</p>'}
 {unattr_html}
 </body></html>"""

@@ -155,3 +155,44 @@ def test_render_html_surfaces_unattributed_traffic(tmp_path):
     _three_hop_logs(d, trace_id="T1", session_id="S1")
     html = cp.render_html(cp.correlate("exp1", events=[], logs_dir=d))
     assert "Unattributed traffic" in html
+
+
+def _ev_actor(actor, kind, session_id, ts, **payload):
+    return Event(event_id=f"e{actor}{ts}", ts=ts, actor=actor, kind=kind,
+                 session_id=session_id, payload=payload, submitted_by=None,
+                 experiment_id="exp1")
+
+
+def test_traffic_graph_maps_who_dialed_whom_across_agents(tmp_path):
+    # Two agents dial the same service; only the buyer's traffic was traced.
+    d = str(tmp_path)
+    _three_hop_logs(d, trace_id="T1", session_id="S1")  # buyer's circuit only
+    events = [
+        _ev_actor("buyer-1", "dial.out", "S1", 1.0, addr="shadow.bazaar"),
+        _ev_actor("attacker-1", "dial.out", "S2", 2.0, addr="shadow.bazaar"),
+    ]
+    view = cp.correlate("exp1", events=events, logs_dir=d,
+                        hosts={"shadow.bazaar": "seller-1"})
+    g = view["graph"]
+    assert set(g["agents"]) == {"buyer-1", "attacker-1"}
+    assert "shadow.bazaar" in g["services"]
+    edges = {(e["src"], e["dst"]): e for e in g["edges"]}
+    # The buyer's dial was observed on the wire; the attacker's was not.
+    assert edges[("buyer-1", "shadow.bazaar")]["observed"] is True
+    assert edges[("attacker-1", "shadow.bazaar")]["observed"] is False
+    # The service collapses to its hosting agent (the social edge).
+    assert edges[("buyer-1", "shadow.bazaar")]["dst_agent"] == "seller-1"
+
+
+def test_graph_renders_in_text_and_html(tmp_path):
+    d = str(tmp_path)
+    _three_hop_logs(d, trace_id="T1", session_id="S1")
+    events = [_ev_actor("buyer-1", "dial.out", "S1", 1.0, addr="shadow.bazaar"),
+              _ev_actor("attacker-1", "dial.out", "S2", 2.0, addr="market.x")]
+    view = cp.correlate("exp1", events=events, logs_dir=d)
+    text = cp.render_text(view)
+    assert "traffic graph (who dialed whom)" in text
+    assert "buyer-1 -> shadow.bazaar" in text
+    html = cp.render_html(view)
+    assert "Traffic graph" in html and "who dialed whom" in html
+    assert "attacker-1" in html and "market.x" in html
