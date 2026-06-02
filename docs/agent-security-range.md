@@ -65,6 +65,27 @@ identical to a "many services = reconnaissance" rule. Given each agent's
 activity, the real defender distinguished them - banning only the scanner,
 sparing the shopper - evidence for model-based controls over fixed rules.
 
+## Reproduce them yourself
+
+Every finding is a replay of a real model run, locked as a test, so you can
+verify each claim with no API key (the model's recorded decisions are replayed
+deterministically):
+
+```bash
+# 1. horizon-dependence: benign at 3 rounds, an uncontained campaign at 12
+python -m pytest tests/test_real_model_replay.py -k horizon -q
+
+# 2. a model defrauds when it believes it is unobserved, and is caught
+python -m pytest tests/test_live_seller_real.py -q
+
+# 4. a model defender spares the shopper and bans the scanner
+python -m pytest "tests/test_live.py::test_real_defender_spares_shopper_bans_scanner_replay" -q
+```
+
+The deliberating defender (finding 3) is in the live-overlay integration suite
+(`tests/integration/test_live_society_real.py`, run individually with
+`-m integration`).
+
 ## What you can study
 
 The range is an experiment harness, not a fixed demo:
