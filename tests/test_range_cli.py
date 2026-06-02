@@ -60,11 +60,45 @@ def test_run_agents(capsys):
     assert "kind=agents" in capsys.readouterr().out
 
 
+def test_run_society(capsys):
+    assert cli.main(["run", "--kind", "society", "--rounds", "8"]) == 0
+    out = capsys.readouterr().out
+    assert "kind=society" in out and "verdict=contained" in out
+
+
 def test_run_json(capsys):
     assert cli.main(["run", "--kind", "readiness", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert "experiment_id" in payload
     assert payload["evaluation"]["verdict"] == "contained"
+
+
+def test_parse_model_for():
+    roles = ("attacker", "defender")
+    assert cli._parse_model_for(["attacker=claude-opus-4-8"], roles) == {
+        "attacker": "claude-opus-4-8"}
+    with pytest.raises(ValueError):
+        cli._parse_model_for(["nokey"], roles)
+    with pytest.raises(ValueError):
+        cli._parse_model_for(["wizard=x"], roles)
+
+
+def test_run_model_and_model_for_thread_through(tmp_path, capsys):
+    recs = [{"blocks": [{"input": {"kind": "attack",
+                                   "params": {"technique": "phishing",
+                                              "target": "seller-1"}},
+                         "id": "tu"}], "usage": None} for _ in range(2)]
+    path = str(tmp_path / "rec.json")
+    json.dump(recs, open(path, "w"))
+    code = cli.main(["run", "--kind", "agents", "--llm-roles", "attacker",
+                     "--replay", path, "--model", "claude-haiku-4-5-20251001",
+                     "--model-for", "attacker=claude-opus-4-8", "--rounds", "2"])
+    assert code == 0
+    assert "attacker=claude-opus-4-8" in capsys.readouterr().out
+
+
+def test_run_rejects_bad_model_for_role():
+    assert cli.main(["run", "--kind", "agents", "--model-for", "wizard=x"]) == 2
 
 
 def test_run_agents_replay_reproduces_without_key(tmp_path):
@@ -97,6 +131,14 @@ def test_run_agents_llm_without_key_exits_1(capsys):
 def test_unknown_subcommand(capsys):
     assert cli.main(["bogus"]) == 2
     assert "unknown subcommand" in capsys.readouterr().err
+
+
+def test_list_command_enumerates_the_surface(capsys):
+    assert cli.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert "run kinds:" in out and "casts:" in out and "subcommands:" in out
+    for token in ("society", "honeypot", "scam-escrow", "ablation"):
+        assert token in out
 
 
 def test_help_lists_subcommands(capsys):

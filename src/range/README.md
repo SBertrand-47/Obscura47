@@ -8,7 +8,9 @@ fake money, build reputation, deceive, defend, and adapt, while an operator
 captures and replays everything.
 
 Design thesis: *a dark web for AI agents, but fully observable.* See
-[`docs/observability.md`](../../docs/observability.md) for the full design.
+[`docs/observability.md`](../../docs/observability.md) for the full design and
+[`docs/range-architecture.md`](../../docs/range-architecture.md) for how the
+range is built and extended.
 
 ## Quickstart
 
@@ -23,9 +25,13 @@ python -m src.range run --kind adaptive --defender weak --rounds 10
 
 # decision-loop agents; persist a replayable run and emit an HTML dashboard
 OBSCURA_MODE=range python -m src.range run --kind agents --dashboard
+OBSCURA_MODE=range python -m src.range run --kind society --dashboard  # all threat families at once
 
 # drive a role with a real model (needs: pip install anthropic + ANTHROPIC_API_KEY)
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender
+OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles all --model claude-sonnet-4-6
+OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender \
+    --model-for attacker=claude-opus-4-8 --model-for defender=claude-haiku-4-5-20251001
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker --record run.json
 python -m src.range run --kind agents --llm-roles attacker --replay run.json   # deterministic, no key
 

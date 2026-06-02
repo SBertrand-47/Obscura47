@@ -1178,6 +1178,20 @@ def default_cast(policy_factory=None) -> list[Agent]:
 CAST_ROLES = ("host", "seller", "buyer", "attacker", "defender", "moderator")
 
 
+# Named scenario casts runnable via `--cast`. "default" is special-cased (it
+# takes the LLM-role policy factory); the rest are scripted.
+CASTS = {
+    "injection": injection_cast,
+    "defended-injection": defended_injection_cast,
+    "collusion": collusion_cast,
+    "defended-collusion": defended_collusion_cast,
+    "honeypot": honeypot_cast,
+    "scam-escrow": scam_escrow_cast,
+    "forum": forum_moderation_cast,
+    "society": society_cast,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Turnkey runner: drive chosen roles with a live Claude model, run the
     world, and print the evaluation.
@@ -1202,9 +1216,9 @@ def main(argv: list[str] | None = None) -> int:
              f"(any of {', '.join(CAST_ROLES)}), or 'none' for all-scripted",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--cast", choices=("default", "injection", "society"),
+    parser.add_argument("--cast", choices=("default", *sorted(CASTS)),
                         default="default",
-                        help="'injection' demonstrates indirect prompt injection")
+                        help="a named scenario cast (default uses --llm-roles)")
     parser.add_argument("--events", action="store_true",
                         help="also print the round-by-round event timeline")
     parser.add_argument("--json", action="store_true")
@@ -1229,8 +1243,8 @@ def main(argv: list[str] | None = None) -> int:
         return ScriptedPolicy()
 
     try:
-        cast = ({"injection": injection_cast, "society": society_cast}
-                .get(args.cast, lambda: default_cast(factory))())
+        cast = (default_cast(factory) if args.cast == "default"
+                else CASTS[args.cast]())
     except RuntimeError as e:
         # LLM policy unavailable (no SDK / no key). Be explicit, do not fall
         # back silently to scripted: the user asked for live models.
