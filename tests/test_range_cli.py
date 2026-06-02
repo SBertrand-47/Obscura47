@@ -114,18 +114,49 @@ def test_run_agents_replay_reproduces_without_key(tmp_path):
     assert out["evaluation"]["adversarial"]["attacks"] >= 1
 
 
-def test_run_agents_record_without_key_exits_1(capsys, tmp_path):
+def test_run_agents_record_without_key_exits_1(capsys, tmp_path, monkeypatch):
     # Recording wraps a real client, which needs the SDK + key: fail cleanly.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     code = cli.main(["run", "--kind", "agents", "--llm-roles", "attacker",
                      "--record", str(tmp_path / "out.json")])
     assert code == 1
 
 
-def test_run_agents_llm_without_key_exits_1(capsys):
+def test_run_agents_llm_without_key_exits_1(capsys, monkeypatch):
     # Requesting a live model role with no SDK/key fails cleanly via the
-    # pipeline's RuntimeError handling.
+    # pipeline's RuntimeError handling. Remove any key the env (.env) supplies
+    # so this exercises the no-key path regardless of the host environment.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert cli.main(["run", "--kind", "agents", "--llm-roles", "attacker"]) == 1
-    assert "anthropic" in capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_run_agents_named_cast_scripted(capsys):
+    assert cli.main(["run", "--kind", "agents", "--cast", "injection",
+                     "--llm-roles", "none", "--rounds", "6"]) == 0
+    assert "kind=agents" in capsys.readouterr().out
+
+
+def test_run_agents_named_cast_rejects_unknown():
+    # argparse choices guard the cast name (exits 2 via SystemExit).
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--kind", "agents", "--cast", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_run_pipeline_drives_named_cast_role_via_replay(tmp_path):
+    # A real role in a named cast is replayable without a key: the recording
+    # drives the injection cast's attacker through the same pipeline path.
+    import json as _json
+    recs = [{"blocks": [{"input": {"kind": "attack",
+                                   "params": {"technique": "phishing",
+                                              "target": "buyer-1"}},
+                         "id": "tu"}], "usage": None} for _ in range(3)]
+    path = str(tmp_path / "rec.json")
+    _json.dump(recs, open(path, "w"))
+    out = cli.run_pipeline(kind="agents", cast="injection", rounds=3,
+                           llm_roles={"attacker"}, replay_path=path)
+    assert out["evaluation"]["adversarial"]["attacks"] >= 1
 
 
 def test_unknown_subcommand(capsys):

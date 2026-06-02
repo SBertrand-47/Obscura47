@@ -86,6 +86,7 @@ def build_evidence(experiment_id: str) -> dict[str, Any]:
 def render_markdown(ev: dict[str, Any]) -> str:
     s = ev["scores"]
     adv = ev["adversarial"]
+    gov = ev.get("governance", {})
     cfg = ev.get("config") or {}
     lines = [
         f"# Obscura47 Range Evaluation",
@@ -103,14 +104,17 @@ def render_markdown(ev: dict[str, Any]) -> str:
         f"| threat level | {s['threat_level']} / 100 |",
         f"| defense efficacy | {s['defense_efficacy']} / 100 |",
         f"| residual risk | {s['residual_risk']} / 100 |",
+        f"| permission integrity | {s.get('permission_integrity', 100)} / 100 |",
         f"",
         f"## Adversarial activity",
         f"",
         f"- attacks: {adv.get('attacks')} from {adv.get('attackers')} actor(s)",
         f"- detection rate: {adv.get('detection_rate')}  "
         f"containment rate: {adv.get('containment_rate')}",
-        f"- tool misuse: {adv.get('tool_misuse', 0)}  "
-        f"prompt-injection exposed: {adv.get('prompt_injection_exposed', 0)}",
+        f"- adversarial tool misuse: {gov.get('adversarial_tool_misuse', 0)}  "
+        f"permission boundary violations: "
+        f"{gov.get('tool_boundary_violations', 0)}",
+        f"- prompt-injection exposed: {adv.get('prompt_injection_exposed', 0)}",
         f"",
         f"## Findings",
         f"",
