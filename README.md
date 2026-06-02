@@ -1,26 +1,57 @@
 # Obscura47
 
-Obscura47 is a Tor-style overlay network written in Python. It lets people
-route traffic through relay nodes and publish private `.obscura` hidden
-services without exposing those services directly to the clearnet. It aims to
-resist traffic analysis - see [Traffic-Analysis Resistance](#traffic-analysis-resistance)
-for what that protects against and, just as importantly, what it does not.
+Obscura47 is an observability-first range for studying how autonomous AI agents
+behave under adversarial conditions. Agents act, trade, deceive, and defend in a
+live society, and you observe and contain every move - then get a ship/no-ship
+verdict you can put in front of a release committee.
 
-The public framing of this project is intentionally simple:
+It runs on a private, Tor-style overlay network (relays, exits, `.obscura`
+hidden services) - the same architecture as Tor, inverted: in range mode,
+instead of hiding traffic it makes every action attributable. So you can watch a
+real model agent probe a network, scam a buyer, get caught and banned, and read
+the whole story - reasoning beside traffic - on one dashboard.
+
+```bash
+# run the whole observable society and write its dashboard
+OBSCURA_MODE=range python -m src.range society --html society.html
+```
+
+See [`docs/live-society.md`](docs/live-society.md) for the live society and
+[`src/range/README.md`](src/range/README.md) for the range.
+
+### The overlay is also a working private network
+
+The substrate is a real, usable Tor-style overlay in its own right, and running
+nodes is how the network grows. The agent-range observability is **off by
+default** (it is a deliberate privacy regression, gated on `OBSCURA_MODE=range`),
+so the consumer network is unaffected - you can simply:
 
 - run a local proxy
 - join the network as a relay
 - publish a local site or TCP service at a `.obscura` address
 - optionally browse an opt-in `.obscura` directory
 
-This README focuses on that public product surface, not every internal module
-or experimental direction in the codebase.
+It aims to resist traffic analysis - see
+[Traffic-Analysis Resistance](#traffic-analysis-resistance) for what that
+protects against and, just as importantly, what it does not.
 
 Code in this repository is licensed under [Apache-2.0](./LICENSE). The
 Obscura47 name and branding are governed separately by
 [TRADEMARKS.md](./TRADEMARKS.md).
 
 ## What You Can Do
+
+**Study AI agents (the range)**
+
+- **Run a live agent society** and watch it on one dashboard: real and scripted
+  agents trade, probe, and deceive; controls catch them; a regulator issues a
+  ship/no-ship verdict (`python -m src.range society --html society.html`)
+- **Measure which controls are load-bearing** by ablating one and watching the
+  verdict flip (`python -m src.range society --without defender`)
+- **Replay captured real-model runs** deterministically, with no API key, so
+  genuine agent behaviour is regression-locked
+
+**Use the network**
 
 - **Connect to the network** from the desktop app, tray app, or CLI
 - **Browse through Obscura** using the local proxy, or point Firefox at it for
@@ -349,14 +380,17 @@ operator turns them on (`OBSCURA_MODE=range`).
   consumer use must leave them off. See
   [`docs/observability.md`](docs/observability.md).
 
-- **Agent research range (`src/range/`).** An experimental, fully instrumented
-  harness for studying how autonomous agents behave in a controlled adversarial
-  environment: a small economy (marketplace, reputation gating, escrow) with
-  attacker, defender and moderator agents, plus tools to score a run, compare
-  configurations, gate on a safety policy, replay it, and export an evidence
-  report. Agents can be scripted (deterministic) or driven by a model. See
+- **Agent research range (`src/range/`).** A fully instrumented harness for
+  studying how autonomous agents behave under adversarial conditions. Two ways
+  to run it: an in-process simulation (score a run, compare configurations, gate
+  on a safety policy, replay it, export an evidence report; agents scripted or
+  model-driven), and a **live observable society** on the real overlay - agents
+  trading, probing, and deceiving, policed by a full control suite (defender,
+  escrow, moderator, reputation gate), investigated into case files, and
+  regulated into a ship/no-ship verdict, with reputation that persists across
+  runs. See [`docs/live-society.md`](docs/live-society.md) and
   [`src/range/README.md`](src/range/README.md). Run one with
-  `python -m src.range run`.
+  `python -m src.range society` or `python -m src.range run`.
 
 ## Building
 
