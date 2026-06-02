@@ -15,7 +15,7 @@ import threading
 import pytest
 
 from src.agent.client import AgentClient
-from src.agent.observatory import Observer
+from src.agent.observatory import Event, Observer
 from src.range.live import LiveSession
 from src.utils import config
 
@@ -243,6 +243,43 @@ def test_live_defender_flags_and_bans_flagged_agents(monkeypatch):
               for e in cap.events]
     assert ("defense.flag", "attacker-1", None) in events
     assert ("moderation.action", "attacker-1", "ban") in events
+
+
+def _evt(actor, kind, **payload):
+    return Event(event_id="e", ts=0.0, actor=actor, kind=kind, session_id="s",
+                 payload=payload, submitted_by=None, experiment_id="x")
+
+
+def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveEscrow
+
+    cap = _Capture()
+    escrow = LiveEscrow("escrow", observer=Observer("escrow", sink=cap),
+                        session_id="SE", grace=1)
+    events = [
+        _evt("buyer-1", "escrow.open", seller="seller-1", item="widget",
+             amount=50),
+        _evt("buyer-1", "escrow.open", seller="seller-2", item="gadget",
+             amount=30),
+        _evt("seller-2", "delivery", buyer="buyer-1", item="gadget"),
+    ]
+    # First cycle: the delivered order is released; the undelivered one gets a
+    # grace cycle.
+    r1 = escrow.settle(events)
+    assert any(x["settle"] == "release" and x["seller"] == "seller-2"
+               for x in r1)
+    assert not any(x["settle"] == "refund" for x in r1)
+    # Second cycle: still no delivery from seller-1 -> refund + flag + ban.
+    r2 = escrow.settle(events)
+    assert any(x["settle"] == "refund" and x["seller"] == "seller-1"
+               for x in r2)
+
+    kinds = {(e.kind, e.payload.get("seller"), e.payload.get("target"),
+              e.payload.get("action")) for e in cap.events}
+    assert ("escrow.release", "seller-2", None, None) in kinds
+    assert ("escrow.refund", "seller-1", None, None) in kinds
+    assert ("moderation.action", None, "seller-1", "ban") in kinds
 
 
 def _recon_view():

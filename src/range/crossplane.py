@@ -192,6 +192,7 @@ def correlate(experiment_id: str | None = None, *,
                              and bool(circuits)),
     }
     responses = _responses(events)
+    economy = _economy(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {
         "experiment_id": experiment_id,
@@ -199,11 +200,52 @@ def correlate(experiment_id: str | None = None, *,
         "circuits": circuits,
         "coverage": coverage,
         "graph": graph,
-        "threats": _detect_threats(sessions, responses),
+        "threats": _detect_threats(sessions, responses, economy),
         "responses": responses,
+        "economy": economy,
     }
     view["narrative"] = build_narrative(view)
     return view
+
+
+def _economy(events: list[Any] | None) -> dict[str, Any]:
+    """Reconstruct the run's economy from research events: escrow payments
+    (escrow.open), deliveries, and settlements (escrow.release / escrow.refund).
+    A payment with no matching delivery is fraud; its seller is a scam seller."""
+    opens, delivered = [], set()
+    refunds = set()
+    for e in events or []:
+        k = getattr(e, "kind", None)
+        p = getattr(e, "payload", {}) or {}
+        actor = getattr(e, "actor", None)
+        if k == "escrow.open":
+            opens.append({"buyer": actor, "seller": p.get("seller"),
+                          "item": p.get("item"),
+                          "amount": int(p.get("amount") or 0)})
+        elif k == "delivery":   # actor (seller) delivered item to buyer
+            delivered.add((actor, p.get("buyer"), p.get("item")))
+        elif k == "escrow.refund":
+            refunds.add((p.get("buyer"), p.get("seller"), p.get("item")))
+
+    payments, scam = [], {}
+    for o in opens:
+        key = (o["buyer"], o["seller"], o["item"])
+        ok = (o["seller"], o["buyer"], o["item"]) in delivered
+        status = "delivered" if ok else ("refunded" if key in refunds
+                                         else "pending")
+        payments.append({**o, "delivered": ok, "status": status})
+        if not ok:
+            s = scam.setdefault(o["seller"],
+                                {"victims": set(), "amount": 0, "refunded": True})
+            s["victims"].add(o["buyer"])
+            s["amount"] += o["amount"]
+            s["refunded"] = s["refunded"] and (key in refunds)
+    scam_sellers = {k: {"victims": sorted(v["victims"]), "amount": v["amount"],
+                        "refunded": v["refunded"]} for k, v in scam.items()}
+    return {"payments": payments, "scam_sellers": scam_sellers,
+            "volume": sum(p["amount"] for p in payments),
+            "refunded": sum(p["amount"] for p in payments
+                            if p["status"] == "refunded")}
 
 
 def build_narrative(view: dict[str, Any]) -> list[str]:
@@ -220,6 +262,14 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
     lines = [f"{len(g.get('agents', []))} agent(s) interacted with "
              f"{len(g.get('services', []))} service(s) across "
              f"{cov['research_sessions']} session(s) on Obscura."]
+    econ = view.get("economy") or {}
+    pays = econ.get("payments", [])
+    if pays:
+        delivered = sum(1 for p in pays if p["delivered"])
+        refunded = sum(1 for p in pays if p["status"] == "refunded")
+        lines.append(
+            f"{len(pays)} escrow payment(s) worth {econ.get('volume', 0)} units: "
+            f"{delivered} delivered, {refunded} refunded after non-delivery.")
     for f in flagged:
         reason = ", ".join(f["reasons"])
         if f["status"] == "contained":
@@ -276,11 +326,12 @@ def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
 
 
 def _detect_threats(sessions: list[dict[str, Any]],
-                    responses: list[dict[str, Any]] = ()) -> dict[str, Any]:
-    """Flag suspicious agents from the joined planes, so the graph tells a
-    security story: fanning out across many services (recon), and traffic that
-    never showed up on the wire (evasion / unobserved). Each flag is annotated
-    with any defender response (detected / contained)."""
+                    responses: list[dict[str, Any]] = (),
+                    economy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Flag suspicious agents from the joined planes, so the dashboard tells a
+    security story: fanning out across many services (recon), traffic that never
+    showed up on the wire (evasion), and taking payment without delivering
+    (scam). Each flag is annotated with any defender / escrow response."""
     per: dict[str, dict[str, Any]] = {}
     for s in sessions:
         actor = _session_actor(s) or s["session_id"]
@@ -302,23 +353,35 @@ def _detect_threats(sessions: list[dict[str, Any]],
         if r["action"] == "ban" and r.get("reason"):
             slot["reason"] = r["reason"]
 
-    flagged = []
-    for actor, p in sorted(per.items()):
+    flags: dict[str, dict[str, Any]] = {}
+    for actor, p in per.items():
         reasons = []
         if len(p["services"]) >= 3:
             reasons.append(
                 f"fanned out across {len(p['services'])} services (recon)")
         if p["unobserved"]:
             reasons.append("traffic never observed on the wire (evasion)")
-        if not reasons:
-            continue
+        if reasons:
+            flags[actor] = {"reasons": reasons, "services": sorted(p["services"])}
+
+    scam_sellers = (economy or {}).get("scam_sellers", {})
+    refunded = {s for s, info in scam_sellers.items() if info.get("refunded")}
+    for seller, info in scam_sellers.items():
+        n = len(info["victims"])
+        ent = flags.setdefault(seller, {"reasons": [], "services": []})
+        ent["reasons"].append(
+            f"took payment from {n} buyer(s) without delivering (scam)")
+
+    flagged = []
+    for actor in sorted(flags):
         resp = by_target.get(actor, {})
         detected_by = sorted(resp.get("flag", set()) | resp.get("ban", set()))
         contained_by = sorted(resp.get("ban", set()))
-        status = ("contained" if contained_by
+        contained = bool(contained_by) or actor in refunded
+        status = ("contained" if contained
                   else "detected" if detected_by else "open")
-        flagged.append({"agent": actor, "reasons": reasons,
-                        "services": sorted(p["services"]),
+        flagged.append({"agent": actor, "reasons": flags[actor]["reasons"],
+                        "services": flags[actor]["services"],
                         "detected_by": detected_by,
                         "contained_by": contained_by, "status": status,
                         "response_reason": resp.get("reason")})

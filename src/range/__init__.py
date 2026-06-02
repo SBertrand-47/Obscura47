@@ -21,7 +21,8 @@ from src.range.evidence import build_evidence
 from src.range.forensics import build_incidents, campaign, incidents_from_events
 from src.range.gate import check_gate
 from src.range.live import (
-    LiveAgent, LiveDefender, LiveModelDefender, LiveSession, run_society)
+    LiveAgent, LiveDefender, LiveEscrow, LiveModelDefender, LiveSession,
+    run_society)
 from src.range.llm_io import (
     RecordingClient, ReplayClient, load_recording, save_recording)
 from src.range.matrix import risk_matrix
@@ -57,5 +58,5 @@ __all__ = [
     "correlate_planes",
     # live bridge: agents on the real overlay
     "LiveSession", "LiveAgent", "LiveDefender", "LiveModelDefender",
-    "run_society",
+    "LiveEscrow", "run_society",
 ]

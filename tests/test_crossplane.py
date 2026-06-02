@@ -249,6 +249,37 @@ def test_detect_and_respond_marks_flagged_agent_contained(tmp_path):
     assert "attacker-1 was flagged" in cp.render_text(view)
 
 
+def test_scam_seller_flagged_and_contained_by_escrow():
+    # A buyer pays two sellers; one delivers, one does not and is refunded +
+    # banned by escrow. The non-delivering seller is flagged for scam, contained.
+    events = [
+        _ev_actor("buyer-1", "escrow.open", "SB", 1.0, seller="seller-1",
+                  item="widget", amount=50),
+        _ev_actor("buyer-1", "escrow.open", "SB", 1.1, seller="seller-2",
+                  item="gadget", amount=30),
+        _ev_actor("seller-2", "delivery", "SS2", 1.2, buyer="buyer-1",
+                  item="gadget"),
+        _ev_actor("escrow", "escrow.refund", "SE", 2.0, buyer="buyer-1",
+                  seller="seller-1", item="widget", amount=50),
+        _ev_actor("escrow", "defense.flag", "SE", 2.1, target="seller-1",
+                  signal="scam", reason="took 50 and did not deliver"),
+        _ev_actor("escrow", "moderation.action", "SE", 2.2, target="seller-1",
+                  action="ban", reason="took 50 and did not deliver"),
+    ]
+    view = cp.correlate("exp1", events=events, spans=[])
+    econ = view["economy"]
+    assert "seller-1" in econ["scam_sellers"]
+    assert econ["scam_sellers"]["seller-1"]["refunded"] is True
+    assert econ["volume"] == 80 and econ["refunded"] == 50
+    flagged = {f["agent"]: f for f in view["threats"]["flagged_agents"]}
+    assert "seller-1" in flagged and "seller-2" not in flagged
+    assert flagged["seller-1"]["status"] == "contained"
+    assert any("scam" in r for r in flagged["seller-1"]["reasons"])
+    story = " ".join(view["narrative"])
+    assert "escrow payment" in story
+    assert "seller-1 was flagged" in story
+
+
 def test_build_narrative_tells_the_story():
     view = {
         "coverage": {"research_sessions": 3, "fully_observable": True,

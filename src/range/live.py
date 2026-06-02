@@ -91,6 +91,19 @@ class LiveSession:
         return self.client.call_tool(addr, tool, args or {}, port=port,
                                      session_id=self.session_id)
 
+    def pay(self, seller: str, amount: int, item: str) -> None:
+        """Pay a seller into escrow for an item (the buyer side of a trade).
+        Records an escrow.open research event - the money is held until the
+        seller delivers or the escrow refunds it."""
+        self.observer.emit("escrow.open", session_id=self.session_id,
+                           seller=seller, amount=int(amount), item=item)
+
+    def deliver(self, buyer: str, item: str) -> None:
+        """Deliver an item to a buyer (the seller side of a trade). Records a
+        delivery research event that lets the escrow release the held funds."""
+        self.observer.emit("delivery", session_id=self.session_id,
+                           buyer=buyer, item=item)
+
     def host(self, target_host: str, target_port: int, key_path: str, *,
              peers: list[dict] | None = None):
         """Publish a real hidden service fronting ``target_host:target_port``.
@@ -352,6 +365,87 @@ class LiveDefender:
                                target=target, action="ban", reason=reason)
             issued.append({"defender": self.actor, "target": target,
                            "action": "ban", "reasons": f.get("reasons", [])})
+        return issued
+
+
+class LiveEscrow:
+    """Settlement + fraud control for the live economy.
+
+    Holds buyers' escrow payments and reconciles them against deliveries: it
+    releases funds to sellers who delivered, and - after a one-cycle grace so an
+    honest seller has a chance to ship - refunds buyers and flags + bans sellers
+    who took payment without delivering (a scam). Its settlements are research
+    events under one identity, so the economic crime and its remedy are
+    observable on the same dashboard as the traffic.
+    """
+
+    def __init__(self, actor: str = "escrow", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None, grace: int = 1):
+        self.actor = actor
+        self.grace = grace
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_escrow")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._settled: set = set()
+        self._seen: set = set()
+
+    def settle(self, events: list[Any]) -> list[dict[str, Any]]:
+        """Reconcile the open escrows against deliveries seen so far. Releases
+        delivered orders; refunds + flags + bans non-delivering sellers after a
+        grace cycle. Idempotent per order. Returns the settlements made."""
+        opens: dict[tuple, dict] = {}
+        delivered: set = set()
+        for e in events:
+            k = getattr(e, "kind", None)
+            p = getattr(e, "payload", {}) or {}
+            actor = getattr(e, "actor", None)
+            if k == "escrow.open":
+                key = (actor, p.get("seller"), p.get("item"))
+                opens[key] = {"buyer": actor, "seller": p.get("seller"),
+                              "item": p.get("item"),
+                              "amount": int(p.get("amount") or 0)}
+            elif k == "delivery":
+                delivered.add((actor, p.get("buyer"), p.get("item")))
+
+        issued: list[dict[str, Any]] = []
+        for key, o in opens.items():
+            if key in self._settled:
+                continue
+            buyer, seller, item = key
+            if (seller, buyer, item) in delivered:
+                self._settled.add(key)
+                self.observer.emit("escrow.release", session_id=self.session_id,
+                                   buyer=buyer, seller=seller, item=item,
+                                   amount=o["amount"])
+                issued.append({"settle": "release", "seller": seller,
+                               "buyer": buyer, "item": item})
+            elif key in self._seen:   # had a grace cycle, still not delivered
+                self._settled.add(key)
+                reason = (f"took {o['amount']} from {buyer} for '{item}' and "
+                          f"did not deliver")
+                self.observer.emit("escrow.refund", session_id=self.session_id,
+                                   buyer=buyer, seller=seller, item=item,
+                                   amount=o["amount"])
+                self.observer.emit("defense.flag", session_id=self.session_id,
+                                   target=seller, signal="scam", reason=reason)
+                self.observer.emit("moderation.action",
+                                   session_id=self.session_id, target=seller,
+                                   action="ban", reason=reason)
+                issued.append({"settle": "refund", "seller": seller,
+                               "buyer": buyer, "item": item})
+            else:
+                self._seen.add(key)
         return issued
 
 
