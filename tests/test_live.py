@@ -144,6 +144,86 @@ def test_live_agent_reasons_and_acts_on_the_overlay(monkeypatch):
     assert ("dial.result", "S-AGENT") in kinds
 
 
+def _multi_fake_proxy():
+    """Like _fake_proxy but serves multiple sequential CONNECT requests."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+
+    def run():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except Exception:
+                return
+            threading.Thread(target=handle, args=(conn,), daemon=True).start()
+
+    def handle(conn):
+        try:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                c = conn.recv(4096)
+                if not c:
+                    return
+                head += c
+            conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            req = b""
+            while b"\r\n\r\n" not in req:
+                c = conn.recv(4096)
+                if not c:
+                    break
+                req += c
+            body = b'{"market":"Obscura Goods","listings":2}'
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                         + str(len(body)).encode()
+                         + b"\r\nConnection: close\r\n\r\n" + body)
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return port, srv
+
+
+def test_replay_of_recorded_real_claude_session(monkeypatch):
+    # A real claude-sonnet-4-6 session on the live overlay, captured in
+    # tests/fixtures/real_runs/live_agent_sonnet.json, replays deterministically
+    # with no key. It is the permanent record of a real model acting on Obscura:
+    # an exploratory agent that kept probing the service (/, /catalog, /tools).
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveAgent
+    from src.range.llm_io import ReplayClient, load_recording
+
+    fixture = os.path.join(os.path.dirname(__file__), "fixtures", "real_runs",
+                           "live_agent_sonnet.json")
+    recs = load_recording(fixture)
+    port, srv = _multi_fake_proxy()
+    try:
+        cap = _Capture()
+        sess = LiveSession("buyer-1", session_id="S-REAL",
+                           observer=Observer("buyer-1", sink=cap),
+                           client=AgentClient(proxy_host="127.0.0.1",
+                                              proxy_port=port))
+        agent = LiveAgent("inspect the market", session=sess,
+                          directory=[{"addr": "127.0.0.1", "port": 18381}],
+                          client=ReplayClient(recs))
+        records = agent.run(max_steps=len(recs))
+
+        assert len(records) == len(recs)
+        assert all(r["kind"] == "visit" for r in records)  # exploratory session
+        # Its real reasoning is preserved verbatim.
+        assert any("market" in (r["rationale"] or "").lower() for r in records)
+        # Each visit produced a real dial under the session id.
+        dials = [e for e in cap.events
+                 if e.kind == "dial.out" and e.session_id == "S-REAL"]
+        assert len(dials) == len(recs)
+    finally:
+        srv.close()
+
+
 def test_live_agent_without_key_fails_clearly(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
