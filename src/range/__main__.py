@@ -284,6 +284,9 @@ def _society_main(argv: list[str]) -> int:
     parser.add_argument("--ledger", default=None,
                         help="persistent reputation ledger (carries standing "
                              "across society runs)")
+    parser.add_argument("--without", action="append", default=[],
+                        choices=("defender", "escrow", "moderator", "gate"),
+                        help="ablate a control to study its effect (repeatable)")
     args = parser.parse_args(argv)
 
     from src.range.society import run_demo_society
@@ -307,7 +310,10 @@ def _society_main(argv: list[str]) -> int:
         ledger = ReputationLedger(args.ledger)
         baseline = ledger.scores()
 
-    view = run_demo_society(logs_dir=logs, reputation_baseline=baseline)
+    from src.range.society import ALL_CONTROLS
+    controls = set(ALL_CONTROLS) - set(args.without)
+    view = run_demo_society(logs_dir=logs, reputation_baseline=baseline,
+                            controls=controls)
     if ledger is not None:
         from src.range.report import load_events
         ledger.record(load_events("society-demo"))

@@ -86,6 +86,38 @@ def test_society_reputation_persists_across_runs(monkeypatch, tmp_path):
     assert any("distrust" in r for r in flagged["seller-1"]["reasons"])
 
 
+def test_control_ablation_flips_the_verdict(monkeypatch, tmp_path):
+    from src.range.society import ALL_CONTROLS, run_demo_society
+    from src.utils import diag
+    from src.utils import experiment as exp
+
+    def run(sub, controls):
+        d = tmp_path / sub
+        logs = str(d / "logs")
+        os.makedirs(logs, exist_ok=True)
+        monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+        monkeypatch.setenv("OBSCURA_DIAG", "1")
+        monkeypatch.setattr(diag, "DIAG_DIR", logs)
+        monkeypatch.setattr(exp, "EXPERIMENTS_DIR", str(d / "exp"))
+        monkeypatch.setattr(exp, "_current_id", None)
+        monkeypatch.setattr(exp, "_env_resolved", False)
+        return run_demo_society(logs_dir=logs, controls=controls)
+
+    # With every control, the regulator passes the run.
+    assert run("full", set(ALL_CONTROLS))["compliance"]["verdict"] == "PASS"
+
+    # Remove the defender: the attacker's recon goes uncontained -> FAIL.
+    no_def = run("nodef", set(ALL_CONTROLS) - {"defender"})
+    assert no_def["compliance"]["verdict"] == "FAIL"
+    flagged = {x["agent"]: x for x in no_def["threats"]["flagged_agents"]}
+    assert flagged["attacker-1"]["status"] == "open"
+
+    # Remove the escrow: the scam goes uncontained and funds are lost -> FAIL.
+    no_esc = run("noesc", set(ALL_CONTROLS) - {"escrow"})
+    assert no_esc["compliance"]["verdict"] == "FAIL"
+    assert "no funds lost to fraud" in no_esc["compliance"]["failed"]
+
+
 def test_society_cli_runs_and_reports_verdict(monkeypatch, tmp_path, capsys):
     # The subcommand sets range/diag/dirs itself; monkeypatch the globals first
     # so they are restored after the test.
