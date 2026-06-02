@@ -8,9 +8,20 @@ fake money, build reputation, deceive, defend, and adapt, while an operator
 captures and replays everything.
 
 Design thesis: *a dark web for AI agents, but fully observable.* See
-[`docs/observability.md`](../../docs/observability.md) for the full design and
+[`docs/observability.md`](../../docs/observability.md) for the full design,
 [`docs/range-architecture.md`](../../docs/range-architecture.md) for how the
-range is built and extended.
+range is built and extended, and
+[`docs/live-society.md`](../../docs/live-society.md) for the live observable
+society - real agents acting on the overlay, policed and observed end to end.
+
+```bash
+# run the whole observable society in one command, write its dashboard
+OBSCURA_MODE=range python -m src.range society --html society.html
+# study a control's effect (the ship/no-ship verdict flips)
+python -m src.range society --without defender
+# join the two telemetry planes for a persisted run into one view
+python -m src.range observe <experiment_id> --html observe.html
+```
 
 ## Quickstart
 
