@@ -216,6 +216,35 @@ def test_threats_flag_unobserved_traffic_as_evasion():
     assert any("evasion" in r for r in reasons)
 
 
+def test_detect_and_respond_marks_flagged_agent_contained(tmp_path):
+    # An attacker fans out (recon); a defender flags and bans it. The view must
+    # show the flag AND the response: status "contained", a graph response link.
+    d = str(tmp_path)
+    _three_hop_logs(d, trace_id="T1", session_id="S1")  # attacker circuit
+    events = [
+        _ev_actor("attacker-1", "dial.out", "S1", 1.0, addr="a", port=8001),
+        _ev_actor("attacker-1", "dial.out", "S1", 1.1, addr="a", port=8002),
+        _ev_actor("attacker-1", "dial.out", "S1", 1.2, addr="a", port=8003),
+        _ev_actor("defender-1", "defense.flag", "SD", 2.0, target="attacker-1",
+                  signal="recon"),
+        _ev_actor("defender-1", "moderation.action", "SD", 2.1,
+                  target="attacker-1", action="ban"),
+    ]
+    view = cp.correlate("exp1", events=events, logs_dir=d)
+    f = next(x for x in view["threats"]["flagged_agents"]
+             if x["agent"] == "attacker-1")
+    assert f["status"] == "contained"
+    assert f["contained_by"] == ["defender-1"]
+    assert view["threats"]["responses"] == 2
+    # The defender and the response link are in the graph.
+    assert "defender-1" in view["graph"]["agents"]
+    assert any(r["action"] == "ban" and r["target"] == "attacker-1"
+               for r in view["graph"]["responses"])
+    html = cp.render_html(view)
+    assert "detect &amp; respond" in html
+    assert "contained by defender-1" in html
+
+
 def test_graph_renders_in_text_and_html(tmp_path):
     d = str(tmp_path)
     _three_hop_logs(d, trace_id="T1", session_id="S1")

@@ -303,3 +303,48 @@ class LiveAgent:
                 break
             last = rec.get("result_summary")
         return records
+
+
+class LiveDefender:
+    """Watches a run's telemetry and responds: flags + bans suspicious agents.
+
+    Given a crossplane view of the run (the joined planes), it issues a real
+    response for each flagged agent - a ``defense.flag`` and a ban
+    (``moderation.action``) research event, under one defender identity and the
+    run's experiment. Those events are what turns the dashboard from "detected"
+    into "detected and contained": the defender's action is observable next to
+    the attacker's traffic. Inert on the public network (range-mode telemetry).
+    """
+
+    def __init__(self, actor: str = "defender-1", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None):
+        self.actor = actor
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_defender")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+
+    def assess(self, view: dict[str, Any]) -> list[dict[str, Any]]:
+        """Flag and ban every agent the view flags. Emits the response events
+        and returns the responses issued."""
+        issued: list[dict[str, Any]] = []
+        for f in (view.get("threats") or {}).get("flagged_agents", []):
+            target = f["agent"]
+            reason = "; ".join(f.get("reasons", []))
+            self.observer.emit("defense.flag", session_id=self.session_id,
+                               target=target, signal="recon", reason=reason)
+            self.observer.emit("moderation.action", session_id=self.session_id,
+                               target=target, action="ban", reason=reason)
+            issued.append({"defender": self.actor, "target": target,
+                           "action": "ban", "reasons": f.get("reasons", [])})
+        return issued

@@ -191,21 +191,45 @@ def correlate(experiment_id: str | None = None, *,
         "fully_observable": (not unobserved and not unattributed
                              and bool(circuits)),
     }
-    graph = traffic_graph(sessions, hosts=hosts)
+    responses = _responses(events)
+    graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     return {
         "experiment_id": experiment_id,
         "sessions": sessions,
         "circuits": circuits,
         "coverage": coverage,
         "graph": graph,
-        "threats": _detect_threats(sessions),
+        "threats": _detect_threats(sessions, responses),
+        "responses": responses,
     }
 
 
-def _detect_threats(sessions: list[dict[str, Any]]) -> dict[str, Any]:
+def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
+    """Defender responses found in the research plane: a defense.flag or a ban
+    (moderation.action) naming a target. This is the 'response' half of the
+    detect-and-respond story."""
+    out = []
+    for e in events or []:
+        kind = getattr(e, "kind", None)
+        payload = getattr(e, "payload", {}) or {}
+        target = payload.get("target")
+        if not target:
+            continue
+        if kind == "defense.flag":
+            out.append({"defender": getattr(e, "actor", None),
+                        "target": target, "action": "flag"})
+        elif kind == "moderation.action" and payload.get("action") == "ban":
+            out.append({"defender": getattr(e, "actor", None),
+                        "target": target, "action": "ban"})
+    return out
+
+
+def _detect_threats(sessions: list[dict[str, Any]],
+                    responses: list[dict[str, Any]] = ()) -> dict[str, Any]:
     """Flag suspicious agents from the joined planes, so the graph tells a
     security story: fanning out across many services (recon), and traffic that
-    never showed up on the wire (evasion / unobserved)."""
+    never showed up on the wire (evasion / unobserved). Each flag is annotated
+    with any defender response (detected / contained)."""
     per: dict[str, dict[str, Any]] = {}
     for s in sessions:
         actor = _session_actor(s) or s["session_id"]
@@ -217,6 +241,13 @@ def _detect_threats(sessions: list[dict[str, Any]]) -> dict[str, Any]:
                     p["services"].add(dst)
         if s["made_research_dials"] and not s["observed_on_wire"]:
             p["unobserved"] += 1
+
+    by_target: dict[str, dict[str, set]] = {}
+    for r in responses or []:
+        slot = by_target.setdefault(r["target"], {"flag": set(), "ban": set()})
+        if r.get("defender"):
+            slot[r["action"]].add(r["defender"])
+
     flagged = []
     for actor, p in sorted(per.items()):
         reasons = []
@@ -225,11 +256,20 @@ def _detect_threats(sessions: list[dict[str, Any]]) -> dict[str, Any]:
                 f"fanned out across {len(p['services'])} services (recon)")
         if p["unobserved"]:
             reasons.append("traffic never observed on the wire (evasion)")
-        if reasons:
-            flagged.append({"agent": actor, "reasons": reasons,
-                            "services": sorted(p["services"])})
+        if not reasons:
+            continue
+        resp = by_target.get(actor, {})
+        detected_by = sorted(resp.get("flag", set()) | resp.get("ban", set()))
+        contained_by = sorted(resp.get("ban", set()))
+        status = ("contained" if contained_by
+                  else "detected" if detected_by else "open")
+        flagged.append({"agent": actor, "reasons": reasons,
+                        "services": sorted(p["services"]),
+                        "detected_by": detected_by,
+                        "contained_by": contained_by, "status": status})
     return {"flagged_agents": flagged,
-            "flagged": sorted(f["agent"] for f in flagged)}
+            "flagged": sorted(f["agent"] for f in flagged),
+            "responses": len(responses or [])}
 
 
 def _session_actor(session: dict[str, Any]) -> str | None:
@@ -259,13 +299,15 @@ def _dial_target(event: Any) -> str | None:
 
 
 def traffic_graph(sessions: list[dict[str, Any]],
-                  hosts: dict[str, str] | None = None) -> dict[str, Any]:
+                  hosts: dict[str, str] | None = None,
+                  responses: list[dict[str, Any]] = ()) -> dict[str, Any]:
     """The cross-agent traffic graph: who dialed whom, across all sessions.
 
     Nodes are agents and the services they reached; an edge is an agent dialing
     a service, with a dial count and whether that traffic was observed on the
     wire. ``hosts`` optionally maps a service address to the agent hosting it, so
     a dial collapses into an agent-to-agent edge - the social graph of the run.
+    ``responses`` add defender agents and defender->target response links.
     """
     hosts = hosts or {}
     agents: set[str] = set()
@@ -287,11 +329,15 @@ def traffic_graph(sessions: list[dict[str, Any]],
                 "dials": 0, "observed": False})
             ent["dials"] += 1
             ent["observed"] = ent["observed"] or observed
+    for r in responses or []:
+        if r.get("defender"):
+            agents.add(r["defender"])
     return {
         "agents": sorted(agents),
         "services": sorted(services),
         "edges": [edges[k] for k in sorted(edges)],
         "hosts": dict(hosts),
+        "responses": list(responses or []),
     }
 
 
@@ -439,8 +485,23 @@ def _svg_graph(graph: dict, flagged: set[str]) -> str:
     ay = {a: col_y(i, len(agents)) for i, a in enumerate(agents)}
     sy = {s: col_y(i, len(services)) for i, s in enumerate(services)}
 
+    responses = graph.get("responses", [])
+    defenders = {r["defender"] for r in responses if r.get("defender")}
+    banned = {r["target"] for r in responses if r.get("action") == "ban"}
+
     parts = [f'<svg viewBox="0 0 {W} {H}" width="100%" '
              f'preserveAspectRatio="xMidYMid meet" class="graph">']
+    # Defender response arcs (defender -> target), bulging out on the left.
+    for r in responses:
+        d, t = r.get("defender"), r.get("target")
+        if d in ay and t in ay:
+            y1, y2 = ay[d], ay[t]
+            cx, cy = ax - 78, (y1 + y2) // 2
+            parts.append(f'<path d="M {ax} {y1} Q {cx} {cy} {ax} {y2}" '
+                         f'fill="none" stroke="#c62828" stroke-width="2" '
+                         f'stroke-dasharray="5 3"/>')
+            parts.append(f'<text x="{cx - 4}" y="{cy + 3}" text-anchor="end" '
+                         f'class="elabel resp">{_esc(r["action"]).upper()}</text>')
     for e in graph["edges"]:
         if e["src"] not in ay or e["dst"] not in sy:
             continue
@@ -465,13 +526,20 @@ def _svg_graph(graph: dict, flagged: set[str]) -> str:
     for a in agents:
         y = ay[a]
         flag = a in flagged
-        fill = "#c62828" if flag else "#2e7d32"
-        ring = '#ff8a80" stroke-width="3' if flag else '#9ece6a" stroke-width="2'
+        is_def = a in defenders
+        if is_def:
+            fill, ring = "#1565c0", '#7aa2f7" stroke-width="2'
+        elif flag:
+            fill, ring = "#c62828", '#ff8a80" stroke-width="3'
+        else:
+            fill, ring = "#2e7d32", '#9ece6a" stroke-width="2'
         parts.append(f'<circle cx="{ax}" cy="{y}" r="11" fill="{fill}" '
                      f'stroke="{ring}"/>')
-        label = _esc(a) + (" ⚠" if flag else "")
+        mark = " ⛔" if a in banned else (" ⚠" if flag else
+                                              (" \U0001f6e1" if is_def else ""))
+        cls = "flag" if (flag and not is_def) else ("def" if is_def else "")
         parts.append(f'<text x="{ax - 16}" y="{y + 4}" text-anchor="end" '
-                     f'class="nlabel{" flag" if flag else ""}">{label}</text>')
+                     f'class="nlabel {cls}">{_esc(a)}{mark}</text>')
     parts.append("</svg>")
     return "".join(parts)
 
@@ -494,7 +562,8 @@ def render_html(view: dict[str, Any]) -> str:
         for k, v in [("research sessions", cov["research_sessions"]),
                      ("ops circuits", cov["ops_circuits"]),
                      ("observed on wire", cov["sessions_observed_on_wire"]),
-                     ("flagged agents", len(flagged))])
+                     ("flagged agents", len(flagged)),
+                     ("defender responses", len(view.get("responses", [])))])
 
     graph_html = ""
     if graph.get("agents") or graph.get("services"):
@@ -512,11 +581,21 @@ def render_html(view: dict[str, Any]) -> str:
 
     threat_html = ""
     if threats.get("flagged_agents"):
-        items = "".join(
-            f'<li><span class="badge bad">{_esc(f["agent"])}</span> '
-            f'{_esc("; ".join(f["reasons"]))}</li>'
-            for f in threats["flagged_agents"])
-        threat_html = (f'<section class="alert"><h2>&#9888; Flagged agents</h2>'
+        items = ""
+        for f in threats["flagged_agents"]:
+            status = f.get("status", "open")
+            if status == "contained":
+                resp = (f'<span class="badge good">contained by '
+                        f'{_esc(", ".join(f["contained_by"]))}</span>')
+            elif status == "detected":
+                resp = (f'<span class="badge warn">detected by '
+                        f'{_esc(", ".join(f["detected_by"]))}</span>')
+            else:
+                resp = '<span class="badge bad">no response</span>'
+            items += (f'<li><span class="badge bad">{_esc(f["agent"])}</span> '
+                      f'{_esc("; ".join(f["reasons"]))} &rarr; {resp}</li>')
+        threat_html = (f'<section class="alert"><h2>&#9888; Flagged agents '
+                       f'&middot; detect &amp; respond</h2>'
                        f'<ul class="threats">{items}</ul></section>')
 
     sessions_html = ""
@@ -583,7 +662,8 @@ def render_html(view: dict[str, Any]) -> str:
  .sub{{color:#8b95a5;margin:4px 0 12px;font-size:13px}}
  .badge{{color:#fff;border-radius:4px;padding:2px 8px;font-size:11px;
    font-weight:600;text-transform:uppercase;letter-spacing:.03em}}
- .badge.bad{{background:#c62828}}
+ .badge.bad{{background:#c62828}} .badge.good{{background:#2e7d32}}
+ .badge.warn{{background:#ef6c00}}
  section{{background:#12151d;border:1px solid #222838;border-radius:12px;
    padding:18px 20px;margin:18px auto;max-width:1000px}}
  section.alert{{border-color:#7a3b1a;background:#1c130c}}
@@ -600,7 +680,9 @@ def render_html(view: dict[str, Any]) -> str:
  svg.graph{{display:block;max-height:520px}}
  svg .nlabel{{fill:#cdd6e6;font:600 13px ui-monospace,Menlo,monospace}}
  svg .nlabel.flag{{fill:#ff8a80}} svg .nlabel.svc{{fill:#9ec1ff;font-weight:500}}
+ svg .nlabel.def{{fill:#9ec1ff}}
  svg .elabel{{fill:#7e8aa0;font:11px ui-monospace,monospace;text-anchor:middle}}
+ svg .elabel.resp{{fill:#e0566a;font-weight:700}}
  .threats{{list-style:none;padding:0;margin:0}}
  .threats li{{margin:8px 0;color:#f0c9b0}}
  .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}

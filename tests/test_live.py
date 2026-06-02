@@ -224,6 +224,27 @@ def test_replay_of_recorded_real_claude_session(monkeypatch):
         srv.close()
 
 
+def test_live_defender_flags_and_bans_flagged_agents(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveDefender
+
+    cap = _Capture()
+    defender = LiveDefender("defender-1", observer=Observer("defender-1",
+                                                            sink=cap),
+                            session_id="SD")
+    view = {"threats": {"flagged_agents": [
+        {"agent": "attacker-1", "reasons": ["fanned out (recon)"]}]}}
+    issued = defender.assess(view)
+
+    assert issued == [{"defender": "defender-1", "target": "attacker-1",
+                       "action": "ban", "reasons": ["fanned out (recon)"]}]
+    # The response is two real research events: a flag and a ban.
+    events = [(e.kind, e.payload.get("target"), e.payload.get("action"))
+              for e in cap.events]
+    assert ("defense.flag", "attacker-1", None) in events
+    assert ("moderation.action", "attacker-1", "ban") in events
+
+
 def test_live_agent_without_key_fails_clearly(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

@@ -92,13 +92,28 @@ def test_adversarial_society_flags_recon_on_the_graph(monkeypatch, tmp_path):
         flagged = view["threats"]["flagged"]
         assert "attacker-1" in flagged
         assert "buyer-1" not in flagged
-        assert any("recon" in r for f in view["threats"]["flagged_agents"]
-                   if f["agent"] == "attacker-1" for r in f["reasons"])
 
-        # The dashboard renders the graph + the flag.
-        html = crossplane.render_html(view)
-        assert "<svg" in html and "Flagged agents" in html
-        assert "attacker-1" in html
+        # A live defender watches the run and RESPONDS: flags + bans the
+        # attacker. Its response is real research telemetry under the same run.
+        defender = live.LiveDefender("defender-1", experiment_id=eid)
+        issued = defender.assess(view)
+        assert any(r["target"] == "attacker-1" and r["action"] == "ban"
+                   for r in issued)
+        time.sleep(0.3)
+
+        # Re-correlate: the attacker is now flagged AND contained.
+        view2 = crossplane.correlate(eid, logs_dir=ov["logs_dir"])
+        f = next(x for x in view2["threats"]["flagged_agents"]
+                 if x["agent"] == "attacker-1")
+        assert f["status"] == "contained"
+        assert "defender-1" in f["contained_by"]
+        assert "defender-1" in view2["graph"]["agents"]
+        assert any(r["action"] == "ban" for r in view2["graph"]["responses"])
+
+        # The dashboard shows detection AND response.
+        html = crossplane.render_html(view2)
+        assert "<svg" in html and "detect &amp; respond" in html
+        assert "contained by defender-1" in html
         out = os.environ.get("OBSCURA_OBSERVE_OUT")
         if out:
             with open(out, "w", encoding="utf-8") as f:
