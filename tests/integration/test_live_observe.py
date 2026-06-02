@@ -154,14 +154,32 @@ def test_live_session_is_fully_observable_across_planes(monkeypatch, tmp_path):
         threading.Thread(target=proxy_mod.start_proxy, daemon=True).start()
         assert _wait_for_port("127.0.0.1", PROXY_PORT), "proxy never came up"
 
-        # A real agent session on the real overlay.
+        # A real MODEL-DRIVEN agent session on the real overlay. The model is
+        # replayed (deterministic, no key); its decisions execute for real.
+        from src.range.llm_io import ReplayClient
         eid = "live-observe"
         exp.set_experiment_id(eid)
         sess = live.LiveSession("buyer-1", session_id="S-OBSERVE",
                                 experiment_id=eid, proxy_host="127.0.0.1",
                                 proxy_port=PROXY_PORT)
-        resp = sess.visit("127.0.0.1", "/", port=HTTP_PORT)
-        assert resp.status == 200, f"overlay request failed: {resp.status}"
+        recs = [
+            {"blocks": [{"input": {"kind": "visit", "addr": "127.0.0.1",
+                                   "path": "/", "port": HTTP_PORT,
+                                   "rationale": "inspect the service"},
+                         "id": "t1"}],
+             "usage": {"input_tokens": 30, "output_tokens": 8}},
+            {"blocks": [{"input": {"kind": "finish", "rationale": "done"},
+                         "id": "t2"}],
+             "usage": {"input_tokens": 20, "output_tokens": 4}},
+        ]
+        agent = live.LiveAgent("inspect services on Obscura", session=sess,
+                               directory=[{"addr": "127.0.0.1",
+                                           "port": HTTP_PORT,
+                                           "title": "local service"}],
+                               client=ReplayClient(recs))
+        records = agent.run(max_steps=3)
+        assert records[0]["kind"] == "visit", records
+        assert "status 200" in (records[0]["result_summary"] or ""), records[0]
         time.sleep(0.7)  # let the terminal span flush to the diag log
 
         # Join the planes from the REAL emitted telemetry.
@@ -171,6 +189,9 @@ def test_live_session_is_fully_observable_across_planes(monkeypatch, tmp_path):
         assert s is not None, f"session not found: {view['coverage']}"
         assert s["made_research_dials"], "no research dial recorded"
         assert s["observed_on_wire"], f"no ops trace: {view['coverage']}"
+        # The agent's reasoning is part of the observed session, next to its traffic.
+        assert any(e.kind == "agent.decision" for e in s["research_events"]), \
+            "agent decision not recorded in the session"
         # The circuit reconstructs the real path proxy -> relay -> exit.
         assert any(c["length"] >= 2 for c in s["circuits"]), \
             f"circuit too short: {[c['length'] for c in s['circuits']]}"

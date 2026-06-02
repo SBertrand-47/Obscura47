@@ -27,6 +27,7 @@ from src.agent.client import AgentClient
 from src.agent.observatory import (
     JsonlSink, MemorySink, Observer, new_session_id,
 )
+from src.range.agents import DEFAULT_MODEL
 from src.utils import experiment
 
 
@@ -129,3 +130,176 @@ class LiveSession:
             except Exception as e:  # noqa: BLE001 - record and continue
                 results.append(e)
         return results
+
+
+# Tool the model is forced to call each step (one action per turn).
+_LIVE_TOOL = {
+    "name": "take_action",
+    "description": "Choose your next action on the Obscura network.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["visit", "call", "finish"],
+                     "description": "visit a service, call a tool on it, or "
+                                    "finish when your goal is met"},
+            "addr": {"type": "string",
+                     "description": "the .obscura address / host to act on"},
+            "path": {"type": "string", "description": "HTTP path (default /)"},
+            "port": {"type": "integer", "description": "service port (default 80)"},
+            "tool": {"type": "string", "description": "tool name for a call"},
+            "args": {"type": "object", "description": "arguments for a call"},
+            "rationale": {"type": "string",
+                          "description": "why you chose this action"},
+        },
+        "required": ["kind"],
+    },
+}
+
+
+class LiveAgent:
+    """A real model that reasons and ACTS on the Obscura overlay.
+
+    Each step the model is given its goal, the services it knows about, and the
+    result of its last action, and it chooses the next move (visit / call /
+    finish). The move is executed for real through a :class:`LiveSession`, so the
+    agent's reasoning (a research-plane ``agent.decision`` event), its dial
+    events, and the ops-plane circuit its traffic produced are all correlated by
+    one session id - the agent is observable end to end.
+
+    The model client is injectable: pass a
+    :class:`~src.range.llm_io.ReplayClient` to replay a recording deterministically
+    (no key), or leave it ``None`` to build a real Anthropic client (needs the
+    ``anthropic`` package + ``ANTHROPIC_API_KEY``).
+    """
+
+    def __init__(self, goal: str, *, session: LiveSession,
+                 directory: list[dict[str, Any]] | None = None,
+                 client: Any = None, model: str = DEFAULT_MODEL,
+                 max_tokens: int = 320):
+        self.goal = goal
+        self.session = session
+        self.directory = list(directory or [])
+        self.model = model
+        self.max_tokens = max_tokens
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self._history: list[dict[str, Any]] = []
+        self._pending_tool_use_ids: list[str] = []
+
+        if client is None:
+            try:
+                import anthropic
+            except ImportError as e:
+                raise RuntimeError("LiveAgent requires the 'anthropic' package "
+                                   "(pip install anthropic).") from e
+            import os
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise RuntimeError(
+                    "LiveAgent requires ANTHROPIC_API_KEY in the environment.")
+            client = anthropic.Anthropic()
+        self._client = client
+
+        self._system = [{
+            "type": "text",
+            "text": ("You are an autonomous agent operating on Obscura, a "
+                     "private overlay network of services reachable by address. "
+                     f"Pursue this goal: {goal}\n"
+                     "Each turn, choose ONE action with take_action: visit a "
+                     "service, call a tool on it, or finish when the goal is "
+                     "met. Prefer services from the provided directory. Give a "
+                     "brief rationale."),
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def _observation_text(self, last_result: str | None) -> str:
+        lines = [f"Goal: {self.goal}", "", "Known services on Obscura:"]
+        if self.directory:
+            for s in self.directory:
+                lines.append(f"  - {s.get('addr')} (port {s.get('port', 80)})"
+                             f": {s.get('title', '')}")
+        else:
+            lines.append("  (none known yet)")
+        if last_result is not None:
+            lines += ["", f"Result of your last action: {last_result}"]
+        lines += ["", "Choose your next action with take_action."]
+        return "\n".join(lines)
+
+    def step(self, last_result: str | None = None) -> dict[str, Any]:
+        """One decision + its real execution. Returns a record of the step."""
+        content: list[dict[str, Any]] = []
+        for tu_id in self._pending_tool_use_ids:
+            content.append({"type": "tool_result", "tool_use_id": tu_id,
+                            "content": "action applied"})
+        content.append({"type": "text",
+                        "text": self._observation_text(last_result)})
+        self._history.append({"role": "user", "content": content})
+
+        try:
+            resp = self._client.messages.create(
+                model=self.model, max_tokens=self.max_tokens,
+                system=self._system, tools=[_LIVE_TOOL],
+                tool_choice={"type": "tool", "name": "take_action",
+                             "disable_parallel_tool_use": True},
+                messages=list(self._history))
+        except Exception as e:  # noqa: BLE001
+            if type(e).__module__.split(".")[0] == "anthropic":
+                raise RuntimeError(
+                    f"model call failed ({type(e).__name__}): {e}") from e
+            raise
+        self._history.append({"role": "assistant", "content": resp.content})
+
+        self.usage["calls"] += 1
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            self.usage["input_tokens"] += int(getattr(u, "input_tokens", 0) or 0)
+            self.usage["output_tokens"] += int(getattr(u, "output_tokens", 0) or 0)
+
+        self._pending_tool_use_ids = [getattr(b, "id") for b in resp.content
+                                      if getattr(b, "type", None) == "tool_use"
+                                      and getattr(b, "id", None)]
+        action = next((b.input or {} for b in resp.content
+                       if getattr(b, "type", None) == "tool_use"), {"kind": "finish"})
+        kind = str(action.get("kind", "finish"))
+        rationale = action.get("rationale")
+
+        # Research plane: the agent's reasoning, before it acts.
+        try:
+            self.session.observer.emit(
+                "agent.decision", session_id=self.session.session_id,
+                action_kind=kind, addr=action.get("addr"),
+                rationale=str(rationale) if rationale else None)
+        except Exception:
+            pass
+
+        record = {"kind": kind, "addr": action.get("addr"),
+                  "rationale": rationale, "result_summary": None, "error": None}
+        try:
+            if kind == "visit":
+                resp_o = self.session.visit(
+                    str(action.get("addr")), str(action.get("path", "/")),
+                    int(action.get("port", 80) or 80))
+                record["result_summary"] = (
+                    f"status {resp_o.status}, {len(resp_o.body or b'')} bytes")
+            elif kind == "call":
+                out = self.session.call(
+                    str(action.get("addr")), str(action.get("tool")),
+                    action.get("args") or {},
+                    int(action.get("port", 80) or 80))
+                record["result_summary"] = f"tool result: {str(out)[:120]}"
+            # "finish" needs no overlay action.
+        except Exception as e:  # noqa: BLE001 - the agent observes failures too
+            record["error"] = str(e) or repr(e)
+            record["result_summary"] = f"error: {record['error']}"
+        return record
+
+    def run(self, max_steps: int = 5) -> list[dict[str, Any]]:
+        """Loop decision -> real action until the model finishes or the budget
+        is spent. Returns the per-step records."""
+        records: list[dict[str, Any]] = []
+        last: str | None = None
+        for _ in range(max_steps):
+            rec = self.step(last)
+            records.append(rec)
+            if rec["kind"] == "finish":
+                break
+            last = rec.get("result_summary")
+        return records

@@ -98,6 +98,62 @@ def test_live_session_threads_session_and_emits_research(monkeypatch):
     assert ("dial.result", "S-LIVE") in kinds
 
 
+def test_live_agent_reasons_and_acts_on_the_overlay(monkeypatch):
+    # A model (replayed, deterministic) decides to visit a service then finish;
+    # the decision executes for real through the session, emitting the agent's
+    # reasoning AND its dial events under one session id.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveAgent
+    from src.range.llm_io import ReplayClient
+
+    captured: dict = {}
+    port, t = _fake_proxy(captured)
+    cap = _Capture()
+    sess = LiveSession("buyer-1", session_id="S-AGENT",
+                       observer=Observer("buyer-1", sink=cap),
+                       client=AgentClient(proxy_host="127.0.0.1",
+                                          proxy_port=port))
+    recs = [
+        {"blocks": [{"input": {"kind": "visit", "addr": "shadow.bazaar",
+                               "path": "/deals",
+                               "rationale": "check the premium deals"},
+                     "id": "t1"}],
+         "usage": {"input_tokens": 50, "output_tokens": 10}},
+        {"blocks": [{"input": {"kind": "finish", "rationale": "seen enough"},
+                     "id": "t2"}],
+         "usage": {"input_tokens": 40, "output_tokens": 5}},
+    ]
+    agent = LiveAgent("find premium deals", session=sess,
+                      directory=[{"addr": "shadow.bazaar", "port": 80,
+                                  "title": "Shadow Bazaar"}],
+                      client=ReplayClient(recs))
+    records = agent.run(max_steps=4)
+    t.join(timeout=3)
+
+    # The model visited, then finished - the loop stopped on finish.
+    assert [r["kind"] for r in records] == ["visit", "finish"]
+    assert "status 200" in records[0]["result_summary"]
+    assert records[0]["rationale"] == "check the premium deals"
+    assert agent.usage == {"calls": 2, "input_tokens": 90, "output_tokens": 15}
+    # The real visit carried the session id on the wire.
+    assert "x-obscura-session: s-agent" in captured["connect"].lower()
+    # Research plane recorded both the reasoning and the dial, same session id.
+    kinds = {(e.kind, e.session_id) for e in cap.events}
+    assert ("agent.decision", "S-AGENT") in kinds
+    assert ("dial.out", "S-AGENT") in kinds
+    assert ("dial.result", "S-AGENT") in kinds
+
+
+def test_live_agent_without_key_fails_clearly(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from src.range.live import LiveAgent
+    sess = LiveSession("a", session_id="S", observer=Observer("a", sink=_Capture()),
+                       client=AgentClient(proxy_host="127.0.0.1", proxy_port=1))
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        LiveAgent("goal", session=sess)
+
+
 def test_real_trace_and_research_emission_correlate(monkeypatch, tmp_path):
     # Drive the REAL emission paths (trace.py spans + observatory events) under
     # range mode + diag into isolated temp dirs, then join with crossplane. This
