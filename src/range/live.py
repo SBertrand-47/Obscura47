@@ -161,10 +161,10 @@ _LIVE_TOOL = {
         "type": "object",
         "properties": {
             "kind": {"type": "string",
-                     "enum": ["visit", "call", "pay", "finish"],
+                     "enum": ["visit", "call", "pay", "deliver", "finish"],
                      "description": "visit a service, call a tool on it, pay a "
-                                    "seller for goods (held in escrow), or "
-                                    "finish when your goal is met"},
+                                    "seller for goods (held in escrow), deliver "
+                                    "an item you sold to a buyer, or finish"},
             "addr": {"type": "string",
                      "description": "the .obscura address / host to act on"},
             "path": {"type": "string", "description": "HTTP path (default /)"},
@@ -172,8 +172,10 @@ _LIVE_TOOL = {
             "tool": {"type": "string", "description": "tool name for a call"},
             "args": {"type": "object", "description": "arguments for a call"},
             "seller": {"type": "string", "description": "seller to pay (for pay)"},
+            "buyer": {"type": "string",
+                      "description": "buyer to deliver to (for deliver)"},
             "amount": {"type": "integer", "description": "amount to pay"},
-            "item": {"type": "string", "description": "item being bought"},
+            "item": {"type": "string", "description": "the item bought / sold"},
             "rationale": {"type": "string",
                           "description": "why you chose this action"},
         },
@@ -236,8 +238,12 @@ class LiveAgent:
             "cache_control": {"type": "ephemeral"},
         }]
 
-    def _observation_text(self, last_result: str | None) -> str:
-        lines = [f"Goal: {self.goal}", "", "Known services on Obscura:"]
+    def _observation_text(self, last_result: str | None,
+                          context: str | None = None) -> str:
+        lines = [f"Goal: {self.goal}"]
+        if context:
+            lines += ["", context]
+        lines += ["", "Known services on Obscura:"]
         if self.directory:
             for s in self.directory:
                 offer = ""
@@ -253,14 +259,17 @@ class LiveAgent:
         lines += ["", "Choose your next action with take_action."]
         return "\n".join(lines)
 
-    def step(self, last_result: str | None = None) -> dict[str, Any]:
-        """One decision + its real execution. Returns a record of the step."""
+    def step(self, last_result: str | None = None,
+             context: str | None = None) -> dict[str, Any]:
+        """One decision + its real execution. ``context`` injects extra
+        situational text into the observation (e.g. an order a seller received).
+        Returns a record of the step."""
         content: list[dict[str, Any]] = []
         for tu_id in self._pending_tool_use_ids:
             content.append({"type": "tool_result", "tool_use_id": tu_id,
                             "content": "action applied"})
         content.append({"type": "text",
-                        "text": self._observation_text(last_result)})
+                        "text": self._observation_text(last_result, context)})
         self._history.append({"role": "user", "content": content})
 
         try:
@@ -322,6 +331,11 @@ class LiveAgent:
                 self.session.pay(seller, amount, item)
                 record["result_summary"] = (
                     f"paid {amount} to {seller} for '{item}' (held in escrow)")
+            elif kind == "deliver":
+                buyer = str(action.get("buyer"))
+                item = str(action.get("item", ""))
+                self.session.deliver(buyer, item)
+                record["result_summary"] = f"delivered '{item}' to {buyer}"
             # "finish" needs no overlay action.
         except Exception as e:  # noqa: BLE001 - the agent observes failures too
             record["error"] = str(e) or repr(e)
