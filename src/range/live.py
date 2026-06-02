@@ -357,16 +357,19 @@ class LiveDefender:
         self._handled: set[str] = set()
 
     def assess(self, view: dict[str, Any]) -> list[dict[str, Any]]:
-        """Flag and ban every newly flagged agent. Idempotent: an agent already
-        responded to in a prior assess is skipped, so calling this each round
-        emits one flag+ban per agent (when it first trips a threshold)."""
+        """Ban agents flagged for a SECURITY offense (recon / evasion), once
+        each. Economic and social offenders are left to the escrow and the
+        moderator, so each control owns its own domain. Idempotent."""
         issued: list[dict[str, Any]] = []
         for f in (view.get("threats") or {}).get("flagged_agents", []):
             target = f["agent"]
+            reasons = f.get("reasons", [])
             if target in self._handled:
                 continue
+            if not any("recon" in r or "evasion" in r for r in reasons):
+                continue
             self._handled.add(target)
-            reason = "; ".join(f.get("reasons", []))
+            reason = "; ".join(reasons)
             self.observer.emit("defense.flag", session_id=self.session_id,
                                target=target, signal="recon", reason=reason)
             self.observer.emit("moderation.action", session_id=self.session_id,
