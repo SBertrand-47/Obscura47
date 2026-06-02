@@ -14,6 +14,7 @@ from src.range.agents import (
 # Aliased to avoid shadowing the same-named submodules on the package.
 from src.range.compare import compare as compare_configs
 from src.range.coverage import probe as coverage_probe
+from src.range.crossplane import correlate as correlate_planes
 from src.range.dashboard import render_html as render_dashboard
 from src.range.evaluate import build_evaluation, evaluate_run
 from src.range.evidence import build_evidence
@@ -50,4 +51,6 @@ __all__ = [
     "run_suite",
     # deliverable
     "build_report_card", "build_comparison",
+    # cross-plane observability
+    "correlate_planes",
 ]
