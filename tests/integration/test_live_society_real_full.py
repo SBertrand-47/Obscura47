@@ -81,6 +81,12 @@ def test_real_models_two_fronts_caught_and_observed(monkeypatch, tmp_path):
         assert filed["seller-1"]["evidence"]["funds_taken"] == 50
         assert filed["attacker-1"]["evidence"]["services_probed"]
 
+        # The regulator issues the ship verdict: every offence was contained,
+        # the funds were refunded, and the run was fully observable -> PASS.
+        regulator = live.LiveRegulator("regulator", experiment_id=eid)
+        compliance = regulator.rule(view)
+        assert compliance["verdict"] == "PASS", compliance
+
         # Front 1 (security): the real attacker's recon is contained by defender.
         assert flagged["attacker-1"]["status"] == "contained"
         assert any("recon" in r for r in flagged["attacker-1"]["reasons"])
@@ -99,7 +105,7 @@ def test_real_models_two_fronts_caught_and_observed(monkeypatch, tmp_path):
         assert "recon" in story and "escrow payment" in story
         html = crossplane.render_html(view)
         for token in ("attacker-1", "seller-1", "buyer-1", "Traffic graph",
-                      "Case files"):
+                      "Case files", "Compliance verdict", "PASS"):
             assert token in html
         out = os.environ.get("OBSCURA_OBSERVE_OUT")
         if out:

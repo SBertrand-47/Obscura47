@@ -561,6 +561,47 @@ class LiveModerator:
         return issued
 
 
+class LiveRegulator:
+    """The regulator role: audits a run against a policy and issues a ship /
+    no-ship compliance verdict, recorded as a research event.
+
+    It closes the enterprise loop - the observed society becomes a decision: PASS
+    (the controls contained every offence; safe to operate) or FAIL (policy
+    violations; do not ship). The verdict and its failed checks are recorded so
+    the ruling is itself auditable.
+    """
+
+    def __init__(self, actor: str = "regulator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None,
+                 policy: dict[str, Any] | None = None):
+        self.actor = actor
+        self.policy = policy
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_regulator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+
+    def rule(self, view: dict[str, Any]) -> dict[str, Any]:
+        """Audit the view against the policy, record the verdict, return it."""
+        from src.range.crossplane import build_compliance
+        compliance = build_compliance(view, self.policy)
+        self.observer.emit("regulation.verdict", session_id=self.session_id,
+                           verdict=compliance["verdict"],
+                           failed=compliance["failed"],
+                           summary=compliance["summary"])
+        return compliance
+
+
 class LiveInvestigator:
     """The investigator role: builds a forensic case on each caught offender and
     files it as a research event.

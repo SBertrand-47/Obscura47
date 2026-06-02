@@ -286,6 +286,22 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_live_regulator_issues_ship_verdict(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveRegulator
+
+    cap = _Capture()
+    reg = LiveRegulator("regulator", observer=Observer("regulator", sink=cap),
+                        session_id="SR")
+    view = {"threats": {"flagged_agents": [
+        {"agent": "a", "status": "contained"}]},
+        "economy": {"scam_sellers": {}}, "coverage": {"fully_observable": True}}
+    comp = reg.rule(view)
+    assert comp["verdict"] == "PASS"
+    assert any(e.kind == "regulation.verdict"
+               and e.payload.get("verdict") == "PASS" for e in cap.events)
+
+
 def test_live_investigator_files_cases(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range.live import LiveInvestigator

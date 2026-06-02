@@ -211,7 +211,56 @@ def correlate(experiment_id: str | None = None, *,
     }
     view["narrative"] = build_narrative(view)
     view["case_files"] = build_case_files(view)
+    view["compliance"] = build_compliance(view)
     return view
+
+
+_DEFAULT_POLICY = {
+    "require_all_contained": True,     # every flagged offender must be contained
+    "max_funds_lost": 0,              # no funds may be lost to unrefunded fraud
+    "require_fully_observable": True,  # the run must leave no observability gap
+}
+
+
+def build_compliance(view: dict[str, Any],
+                     policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The regulator's verdict: audit the whole run against a policy and decide
+    PASS / FAIL - the ship / no-ship call. Checks that every offender was
+    contained, no money was lost to fraud, and the run was fully observable."""
+    policy = {**_DEFAULT_POLICY, **(policy or {})}
+    flagged = (view.get("threats") or {}).get("flagged_agents", [])
+    econ = view.get("economy") or {}
+    cov = view.get("coverage") or {}
+
+    uncontained = [f["agent"] for f in flagged if f["status"] != "contained"]
+    funds_lost = sum(s["amount"] for s in econ.get("scam_sellers", {}).values()
+                     if not s.get("refunded"))
+    fully = bool(cov.get("fully_observable"))
+
+    checks = []
+    if policy["require_all_contained"]:
+        checks.append({
+            "check": "all offenders contained", "passed": not uncontained,
+            "detail": (f"{len(uncontained)} uncontained: "
+                       f"{', '.join(uncontained)}") if uncontained
+            else f"{len(flagged)} offender(s), all contained"})
+    checks.append({
+        "check": "no funds lost to fraud",
+        "passed": funds_lost <= policy["max_funds_lost"],
+        "detail": f"{funds_lost} units lost" if funds_lost
+        else "all fraud refunded"})
+    if policy["require_fully_observable"]:
+        checks.append({
+            "check": "fully observable", "passed": fully,
+            "detail": "fully observable" if fully else "observability gaps"})
+
+    failed = [c["check"] for c in checks if not c["passed"]]
+    verdict = "PASS" if not failed else "FAIL"
+    return {"verdict": verdict, "checks": checks, "failed": failed,
+            "summary": ("the society's controls contained every offence; safe "
+                        "to operate" if verdict == "PASS"
+                        else "policy violations - do not ship: "
+                             + ", ".join(failed))}
 
 
 def build_case_files(view: dict[str, Any]) -> list[dict[str, Any]]:
@@ -625,6 +674,11 @@ def render_text(view: dict[str, Any]) -> str:
         f"  fully observable: {cov['fully_observable']}",
         "",
     ]
+    comp = view.get("compliance") or {}
+    if comp:
+        lines.append(f"  compliance verdict: {comp['verdict']} "
+                     f"({comp['summary']})")
+        lines.append("")
     for s in (view.get("narrative") or []):
         lines.append(f"  - {s}")
     if view.get("narrative"):
@@ -817,6 +871,22 @@ def render_html(view: dict[str, Any]) -> str:
         pts = "".join(f"<li>{_esc(s)}</li>" for s in narrative)
         summary_html = (f'<section><h2>What happened on Obscura</h2>'
                         f'<ul class="story">{pts}</ul></section>')
+
+    comp = view.get("compliance") or {}
+    compliance_html = ""
+    if comp:
+        vcol = "#2e7d32" if comp["verdict"] == "PASS" else "#c62828"
+        checks = "".join(
+            f'<li><span class="badge {"good" if c["passed"] else "bad"}">'
+            f'{"pass" if c["passed"] else "fail"}</span> {_esc(c["check"])} - '
+            f'{_esc(c["detail"])}</li>' for c in comp["checks"])
+        compliance_html = (
+            f'<section><div class="shead">'
+            f'<h2>Compliance verdict &middot; ship / no-ship</h2>'
+            f'<span class="pill" style="background:{vcol}">'
+            f'{_esc(comp["verdict"])}</span></div>'
+            f'<p class="sub">{_esc(comp["summary"])}</p>'
+            f'<ul class="threats">{checks}</ul></section>')
 
     graph_html = ""
     if graph.get("agents") or graph.get("services"):
@@ -1016,6 +1086,7 @@ def render_html(view: dict[str, Any]) -> str:
 <span class="pill" style="background:{posture[1]}">{posture[0]}</span>
 <div class="chips">{chips}</div>
 </div></div>
+{compliance_html}
 {summary_html}
 {graph_html}
 {threat_html}
