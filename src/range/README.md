@@ -30,7 +30,7 @@ OBSCURA_MODE=range python -m src.range run --kind society --dashboard  # all thr
 # drive a role with a real model (needs: pip install anthropic + ANTHROPIC_API_KEY)
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles all --model claude-sonnet-4-6
-OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender \\
+OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender \
     --model-for attacker=claude-opus-4-8 --model-for defender=claude-haiku-4-5-20251001
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker --record run.json
 python -m src.range run --kind agents --llm-roles attacker --replay run.json   # deterministic, no key
