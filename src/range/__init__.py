@@ -20,6 +20,7 @@ from src.range.evaluate import build_evaluation, evaluate_run
 from src.range.evidence import build_evidence
 from src.range.forensics import build_incidents, campaign, incidents_from_events
 from src.range.gate import check_gate
+from src.range.live import LiveSession
 from src.range.llm_io import (
     RecordingClient, ReplayClient, load_recording, save_recording)
 from src.range.matrix import risk_matrix
@@ -53,4 +54,6 @@ __all__ = [
     "build_report_card", "build_comparison",
     # cross-plane observability
     "correlate_planes",
+    # live bridge: agents on the real overlay
+    "LiveSession",
 ]

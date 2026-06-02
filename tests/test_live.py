@@ -1,0 +1,151 @@
+"""Tests for the live bridge (src/range/live.py) and end-to-end cross-plane
+correlation on telemetry from the REAL emission code paths.
+
+Two angles:
+* LiveSession against a loopback fake proxy: proves it threads the session id
+  into X-Obscura-Session and emits research events with that id (no overlay).
+* Real trace.py spans + real observatory events under range mode + diag, joined
+  by src.range.crossplane: proves `observe` reconstructs a correlated session
+  from telemetry produced by the actual emission paths the router/agent use.
+"""
+import os
+import socket
+import threading
+
+import pytest
+
+from src.agent.client import AgentClient
+from src.agent.observatory import Observer
+from src.range.live import LiveSession
+from src.utils import config
+
+
+class _Capture:
+    """Minimal EventSink that keeps emitted events for assertions."""
+
+    def __init__(self):
+        self.events = []
+
+    def write(self, event):
+        self.events.append(event)
+
+    def close(self):
+        pass
+
+
+def _fake_proxy(captured: dict):
+    """A loopback server that speaks just enough CONNECT to satisfy the client:
+    accept, 200, read the tunnelled request, return a canned response."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def run():
+        try:
+            conn, _ = srv.accept()
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                head += chunk
+            captured["connect"] = head.decode(errors="ignore")
+            conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            req = b""
+            while b"\r\n\r\n" not in req:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                req += chunk
+            captured["request"] = req.decode(errors="ignore")
+            body = b'{"ok":true}'
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                         + str(len(body)).encode() + b"\r\nConnection: close"
+                         b"\r\n\r\n" + body)
+            conn.close()
+        except Exception:
+            pass
+        finally:
+            srv.close()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return port, t
+
+
+def test_live_session_threads_session_and_emits_research(monkeypatch):
+    # Public mode: no experiment side effects; we just prove the bridge threads
+    # the session id and emits correlated research events.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    captured: dict = {}
+    port, t = _fake_proxy(captured)
+    cap = _Capture()
+    sess = LiveSession("buyer-1", session_id="S-LIVE",
+                       observer=Observer("buyer-1", sink=cap),
+                       client=AgentClient(proxy_host="127.0.0.1",
+                                          proxy_port=port))
+    resp = sess.visit("shadow.bazaar", "/deals", port=80)
+    t.join(timeout=3)
+
+    assert resp.status == 200
+    # The session id rode the CONNECT as X-Obscura-Session.
+    assert "x-obscura-session: s-live" in captured["connect"].lower()
+    # Research events were emitted under the same session id.
+    kinds = {(e.kind, e.session_id) for e in cap.events}
+    assert ("dial.out", "S-LIVE") in kinds
+    assert ("dial.result", "S-LIVE") in kinds
+
+
+def test_real_trace_and_research_emission_correlate(monkeypatch, tmp_path):
+    # Drive the REAL emission paths (trace.py spans + observatory events) under
+    # range mode + diag into isolated temp dirs, then join with crossplane. This
+    # proves `observe` works on genuinely-emitted telemetry, not hand-built JSON.
+    from src.agent.observatory import JsonlSink
+    from src.range import crossplane as cp
+    from src.utils import diag, trace
+    from src.utils import experiment as exp
+
+    monkeypatch.setattr(config, "IS_RANGE_MODE", True)
+    monkeypatch.setenv("OBSCURA_DIAG", "1")
+    logs_dir = str(tmp_path / "logs")
+    os.makedirs(logs_dir)
+    monkeypatch.setattr(diag, "DIAG_DIR", logs_dir)
+    monkeypatch.setattr(exp, "EXPERIMENTS_DIR", str(tmp_path / "exp"))
+    monkeypatch.setattr(exp, "_current_id", None)
+    monkeypatch.setattr(exp, "_env_resolved", False)
+
+    eid, sid = "liveexp", "S-REAL"
+    exp.set_experiment_id(eid)
+    assert trace.is_active()  # range + diag => spans will emit
+
+    # Research plane: the agent's dial, emitted to the experiment's durable log.
+    obs = Observer("buyer-1", sink=JsonlSink(exp.events_path(eid)))
+    obs.emit("dial.out", session_id=sid, addr="shadow.bazaar", method="GET",
+             path="/")
+
+    # Ops plane: emit a real 3-span circuit via the exact API the router calls.
+    diag.set_role("proxy")
+    block = trace.start_trace("req-1", session_id=sid, exit="9.9.9.9:80",
+                              route_len=3)
+    assert block is not None
+    diag.set_role("node")
+    block = trace.relay_span(block, request_id="req-1", frame_type="connect",
+                             next_host="9.9.9.9", next_port=6000)
+    diag.set_role("exit")
+    trace.terminal_span(block, request_id="req-1", role="exit")
+
+    obs.emit("dial.result", session_id=sid, addr="shadow.bazaar", status=200)
+
+    view = cp.correlate(eid, logs_dir=logs_dir)
+    assert view["coverage"]["fully_observable"] is True
+    sess = next(s for s in view["sessions"] if s["session_id"] == sid)
+    assert sess["observed_on_wire"] is True
+    assert sess["made_research_dials"] is True
+    assert len(sess["circuits"]) == 1
+    assert sess["circuits"][0]["length"] == 3
+    assert sess["circuits"][0]["exit"] == "9.9.9.9:80"
+    # The merged timeline interleaves both planes: dial.out, the 3 spans, dial.result.
+    planes = [it["plane"] for it in sess["timeline"]]
+    assert planes == ["research", "ops", "ops", "ops", "research"]
