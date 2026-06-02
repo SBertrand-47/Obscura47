@@ -654,14 +654,23 @@ class LLMPolicy:
         content.append({"type": "text", "text": self._observation_text(obs)})
         self._history.append({"role": "user", "content": content})
 
-        resp = self._client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=self._system,
-            tools=[_ACTION_TOOL],
-            tool_choice={"type": "tool", "name": "take_action"},
-            messages=list(self._history),
-        )
+        try:
+            resp = self._client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=self._system,
+                tools=[_ACTION_TOOL],
+                tool_choice={"type": "tool", "name": "take_action"},
+                messages=list(self._history),
+            )
+        except Exception as e:  # noqa: BLE001
+            # Surface API failures (billing, rate limit, auth) as a clean
+            # RuntimeError the CLI reports nicely, not a raw traceback. Only
+            # wrap anthropic SDK errors; let real bugs propagate untouched.
+            if type(e).__module__.split(".")[0] == "anthropic":
+                raise RuntimeError(
+                    f"model call failed ({type(e).__name__}): {e}") from e
+            raise
         self._history.append({"role": "assistant", "content": resp.content})
 
         # Record token usage for cost accounting.

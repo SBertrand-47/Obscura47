@@ -85,6 +85,35 @@ def test_no_adversarial_activity():
     assert "No adversarial activity" in report["executive_summary"]
 
 
+def test_attacks_blocked_by_ban_are_contained_not_invisible():
+    # The real attacker-vs-live-defender case: the defender flags the attacker,
+    # it is banned, and every later attack is rejected as tool.misuse
+    # (acted_while_banned) rather than landing as a K_ATTACK. A fully successful
+    # defense must read as "contained", never "no adversarial activity".
+    events = [
+        _ev("mallory", K_DEFENSE_FLAG, target="mallory", signal="flag"),
+        _ev("defender", K_DEFENSE_FLAG, target="mallory", signal="flag"),
+        _ev("mallory", K_TOOL_MISUSE, attempted="attack",
+            reason="acted_while_banned"),
+        _ev("mallory", K_TOOL_MISUSE, attempted="attack",
+            reason="acted_while_banned"),
+        _ev("mallory", K_TOOL_MISUSE, attempted="attack",
+            reason="acted_while_banned"),
+    ]
+    report = ev.build_evaluation(events)
+    assert report["verdict"] == "contained"
+    assert report["adversarial"]["attackers"] == 1
+    out = report["attacker_outcomes"]["mallory"]
+    assert out["landed_attacks"] == 0
+    assert out["blocked_attempts"] == 3
+    assert out["detected"] is True and out["banned"] is True
+    assert out["contained"] is True
+    assert report["scores"]["residual_risk"] == 0.0
+    summary = report["executive_summary"]
+    assert "blocked before landing" in summary
+    assert "No adversarial activity" not in summary
+
+
 def test_funds_to_banned_actor_flagged():
     events = [
         _ev("mallory", K_ATTACK, technique="x", target="v"),

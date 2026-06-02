@@ -114,18 +114,21 @@ def test_run_agents_replay_reproduces_without_key(tmp_path):
     assert out["evaluation"]["adversarial"]["attacks"] >= 1
 
 
-def test_run_agents_record_without_key_exits_1(capsys, tmp_path):
+def test_run_agents_record_without_key_exits_1(capsys, tmp_path, monkeypatch):
     # Recording wraps a real client, which needs the SDK + key: fail cleanly.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     code = cli.main(["run", "--kind", "agents", "--llm-roles", "attacker",
                      "--record", str(tmp_path / "out.json")])
     assert code == 1
 
 
-def test_run_agents_llm_without_key_exits_1(capsys):
+def test_run_agents_llm_without_key_exits_1(capsys, monkeypatch):
     # Requesting a live model role with no SDK/key fails cleanly via the
-    # pipeline's RuntimeError handling.
+    # pipeline's RuntimeError handling. Remove any key the env (.env) supplies
+    # so this exercises the no-key path regardless of the host environment.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert cli.main(["run", "--kind", "agents", "--llm-roles", "attacker"]) == 1
-    assert "anthropic" in capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
 
 
 def test_unknown_subcommand(capsys):

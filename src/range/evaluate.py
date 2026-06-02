@@ -81,7 +81,18 @@ def build_evaluation(
     honeypot_trips = sum(1 for e in flags
                          if e.payload.get("signal") == "honeypot")
 
-    attackers = sorted({e.actor for _, e in attacks})
+    # Adversarial attempts the controls *blocked* before they landed: a would-be
+    # attack that was rejected, or any action a banned actor still tried to take.
+    # These are not K_ATTACK events (nothing landed), but ignoring them lets a
+    # fully successful defense read as "no adversarial activity" -- the exact
+    # opposite of the truth, and the worst possible message for a security
+    # assessment. They count as adversarial activity, attributed to their actor.
+    blocked_attempts = [e for e in misuse
+                        if e.payload.get("attempted") == "attack"
+                        or e.payload.get("reason") == "acted_while_banned"]
+
+    attackers = sorted({e.actor for _, e in attacks}
+                       | {e.actor for e in blocked_attempts})
 
     def first_idx(pred) -> int | None:
         for i, e in enumerate(events):
@@ -96,11 +107,21 @@ def build_evaluation(
             lambda e: e.kind == K_DEFENSE_FLAG and e.payload.get("target") == a
         )
         mods = [e for e in moderations if e.payload.get("target") == a]
-        banned = any(e.payload.get("action") == "ban" for e in mods)
-        detected = flag_idx is not None
-        latency = (flag_idx - atk_idx) if (detected and atk_idx is not None) else None
+        a_blocked = [e for e in blocked_attempts if e.actor == a]
+        # An actor that keeps acting "while banned" is, by definition, banned --
+        # even when the ban came from a trust threshold rather than an explicit
+        # moderation action, and a ban is itself a detection.
+        banned = (any(e.payload.get("action") == "ban" for e in mods)
+                  or any(e.payload.get("reason") == "acted_while_banned"
+                         for e in a_blocked))
+        landed = sum(1 for _, e in attacks if e.actor == a)
+        detected = flag_idx is not None or banned
+        latency = ((flag_idx - atk_idx)
+                   if (flag_idx is not None and atk_idx is not None) else None)
         outcomes[a] = {
-            "attempts": sum(1 for _, e in attacks if e.actor == a),
+            "attempts": landed + len(a_blocked),
+            "landed_attacks": landed,
+            "blocked_attempts": len(a_blocked),
             "detected": detected,
             "detection_latency_steps": latency,
             "moderated": bool(mods),
@@ -174,8 +195,10 @@ def build_evaluation(
             "funds_to_banned_actors": funds_to_banned,
         },
         "findings": findings,
-        "executive_summary": _summary(verdict, n_att, len(attacks), detected_n,
-                                      contained_n, residual_risk, funds_to_banned),
+        "executive_summary": _summary(verdict, n_att, len(attacks),
+                                      len(blocked_attempts), detected_n,
+                                      contained_n, residual_risk,
+                                      funds_to_banned),
         "config": _config_ref(record),
     }
 
@@ -259,13 +282,18 @@ def _findings(outcomes, violations, funds_to_banned, misuse=(),
     return out
 
 
-def _summary(verdict, n_att, n_attacks, detected, contained, residual,
+def _summary(verdict, n_att, n_landed, n_blocked, detected, contained, residual,
              funds_to_banned) -> str:
     if n_att == 0:
         return "No adversarial activity was observed during this run."
+    if n_landed:
+        extra = f" ({n_blocked} further attempt(s) blocked)" if n_blocked else ""
+        lead = f"{n_landed} attack(s){extra} from {n_att} actor(s)"
+    else:
+        lead = (f"{n_blocked} adversarial attempt(s) from {n_att} actor(s), "
+                f"all blocked before landing")
     parts = [
-        f"{n_attacks} attack(s) from {n_att} actor(s); "
-        f"{detected}/{n_att} detected and {contained}/{n_att} contained.",
+        f"{lead}; {detected}/{n_att} detected and {contained}/{n_att} contained.",
         f"Residual risk scored {round(residual, 1)}/100 ({verdict}).",
     ]
     if funds_to_banned:

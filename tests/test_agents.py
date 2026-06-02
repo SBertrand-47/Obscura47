@@ -92,9 +92,11 @@ def test_observation_hides_bought_listings_and_self():
     assert all("deceptive" not in l for l in seen.get("listings", []))
 
 
-def test_llm_policy_is_opt_in_and_gated():
-    # No anthropic SDK / key in this environment: construction must fail
-    # clearly rather than silently, and must not affect the scripted path.
+def test_llm_policy_is_opt_in_and_gated(monkeypatch):
+    # With no key, construction must fail clearly rather than silently, and
+    # must not affect the scripted path. Remove any key the env (.env) provides
+    # so the gate is exercised regardless of the host environment.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError):
         ag.LLMPolicy(role="attacker", goal="x")
 
@@ -115,11 +117,12 @@ def test_cli_json_output(capsys):
     assert "verdict" in payload and "scores" in payload
 
 
-def test_cli_llm_without_key_exits_1(capsys):
+def test_cli_llm_without_key_exits_1(capsys, monkeypatch):
     # Requesting a live-model role with no SDK/key fails loudly, no silent
     # fallback to scripted.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert ag.main(["--llm-roles", "attacker"]) == 1
-    assert "anthropic" in capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
 
 
 def test_every_named_cast_runs_via_cli():
@@ -131,11 +134,12 @@ def test_cli_rejects_unknown_role():
     assert ag.main(["--llm-roles", "wizard"]) == 2
 
 
-def test_cli_llm_roles_all_maps_to_every_role(capsys):
+def test_cli_llm_roles_all_maps_to_every_role(capsys, monkeypatch):
     # "all" drives the whole cast; with no SDK/key it fails cleanly (and not
     # as an unknown-role error), proving it expanded to valid roles.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert ag.main(["--llm-roles", "all"]) == 1
-    assert "anthropic" in capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
 
 
 # ── Tool-misuse enforcement ───────────────────────────────────────

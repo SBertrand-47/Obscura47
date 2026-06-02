@@ -4,6 +4,8 @@ The real-model code path -- the messages.create call and tool_use parsing --
 is exercised end to end against a fake client, so the integration is verified
 before any API key is present. No network, fully deterministic.
 """
+import pytest
+
 from src.range.agents import (
     LLMPolicy, Observation, ScriptedPolicy, default_cast, run_world,
 )
@@ -131,6 +133,32 @@ def test_unknown_block_falls_back_to_idle():
     client.messages.create = lambda **kw: _Resp([_NoTool()])
     policy = LLMPolicy("attacker", "g", client=client)
     assert policy.decide(_obs()).kind == "idle"
+
+
+def test_anthropic_api_error_is_wrapped_cleanly():
+    # A billing/rate/auth failure from the SDK must surface as a RuntimeError
+    # (which the CLI reports cleanly), not a raw traceback.
+    class _BadRequestError(Exception):
+        __module__ = "anthropic"
+
+    client = _FakeClient({"kind": "idle"})
+    def _boom(**kw):
+        raise _BadRequestError("credit balance is too low")
+    client.messages.create = _boom
+    policy = LLMPolicy("attacker", "g", client=client)
+    with pytest.raises(RuntimeError, match="model call failed"):
+        policy.decide(_obs())
+
+
+def test_non_anthropic_error_propagates_untouched():
+    # A real bug (not an SDK error) must not be masked as a RuntimeError.
+    client = _FakeClient({"kind": "idle"})
+    def _boom(**kw):
+        raise KeyError("a real bug")
+    client.messages.create = _boom
+    policy = LLMPolicy("attacker", "g", client=client)
+    with pytest.raises(KeyError):
+        policy.decide(_obs())
 
 
 def test_llm_attacker_drives_a_real_world_run(monkeypatch):
