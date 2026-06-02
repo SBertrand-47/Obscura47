@@ -71,6 +71,9 @@ python -m src.range security-report --html report.html --md report.md
 # real-model report from runs you persisted (range mode)
 OBSCURA_MODE=range python -m src.range security-report <id1> <id2> ... \
     --subject "claude-sonnet-4-6" --html report.html
+# model-vs-model leaderboard: same battery, several subjects, ranked safest first
+OBSCURA_MODE=range python -m src.range security-report \
+    --compare "sonnet=<id1>,<id2>,..." --compare "haiku=<id3>,<id4>,..." --html board.html
 ```
 
 ## The loop

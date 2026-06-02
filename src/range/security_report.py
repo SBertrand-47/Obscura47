@@ -144,6 +144,185 @@ def _top_finding(findings: list[dict[str, Any]]) -> dict[str, Any] | None:
     return findings[0] if findings else None
 
 
+# ── Model comparison (the leaderboard) ────────────────────────────
+
+def build_comparison(subjects: list[tuple[str, list[tuple[str, dict]]]], *,
+                     generated_at: str | None = None) -> dict[str, Any]:
+    """Rank several subjects run through the same battery, safest first.
+
+    ``subjects`` is a list of (subject_name, runs), where ``runs`` is the same
+    (label, evaluation) shape as :func:`build_report_card`. Scenario labels are
+    expected to align across subjects so they can be compared row by row.
+    Returns a ranking plus a scenario-by-subject verdict matrix.
+    """
+    cards = [(name, build_report_card(runs, subject=name)) for name, runs in
+             subjects]
+
+    rows = []
+    for name, card in cards:
+        scen = card["scenarios"]
+        uncontained = sum(1 for c in scen if c["verdict"] == "uncontained")
+        partial = sum(1 for c in scen
+                      if c["verdict"] == "detected_not_fully_contained")
+        agg = card["aggregate"]
+        rows.append({
+            "subject": name,
+            "posture": card["posture"],
+            "posture_level": card["posture_level"],
+            "uncontained": uncontained,
+            "partly_contained": partial,
+            "max_residual_risk": agg["max_residual_risk"],
+            "scenarios_with_residual_risk": agg["scenarios_with_residual_risk"],
+            "min_permission_integrity": agg["min_permission_integrity"],
+            "scenarios_run": agg["scenarios_run"],
+        })
+
+    # Safest first: fewest uncontained, then fewest partly-contained, then lower
+    # peak residual risk and fewer risky scenarios, then higher permission
+    # integrity. A total order over the safety signals we score.
+    def _key(r):
+        return (r["uncontained"], r["partly_contained"], r["max_residual_risk"],
+                r["scenarios_with_residual_risk"], -r["min_permission_integrity"])
+    rows.sort(key=_key)
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+
+    # Scenario x subject matrix, in the first subject's scenario order.
+    first_runs = subjects[0][1] if subjects else []
+    labels = [label for label, _ in first_runs]
+    matrix: dict[str, dict[str, dict]] = {}
+    for label in labels:
+        matrix[label] = {}
+        for name, card in cards:
+            cell = next((c for c in card["scenarios"] if c["label"] == label),
+                        None)
+            if cell is not None:
+                matrix[label][name] = {
+                    "verdict": cell["verdict"],
+                    "residual_risk": cell["residual_risk"],
+                    "permission_integrity": cell["permission_integrity"],
+                }
+
+    divergences = [label for label in labels
+                   if len({v["verdict"] for v in matrix[label].values()}) > 1]
+
+    return {
+        "title": "Agent Security Comparison",
+        "generated_at": generated_at,
+        "ranking": rows,
+        "safest": rows[0]["subject"] if rows else None,
+        "scenarios": labels,
+        "matrix": matrix,
+        "verdict_divergences": divergences,
+    }
+
+
+def render_comparison_markdown(cmp: dict[str, Any]) -> str:
+    lines = [f"# {cmp['title']}", ""]
+    if cmp.get("generated_at"):
+        lines.append(f"**Generated:** {cmp['generated_at']}  ")
+    if cmp.get("safest"):
+        lines.append(f"**Safest subject:** **{cmp['safest']}**")
+    lines += [
+        "",
+        "## Ranking (safest first)",
+        "",
+        "| rank | subject | posture | uncontained | partly contained | "
+        "max residual | min permission integ. |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in cmp["ranking"]:
+        lines.append(
+            f"| {r['rank']} | {r['subject']} | {r['posture']} | "
+            f"{r['uncontained']}/{r['scenarios_run']} | "
+            f"{r['partly_contained']}/{r['scenarios_run']} | "
+            f"{r['max_residual_risk']} | {r['min_permission_integrity']} |")
+    subjects = [r["subject"] for r in cmp["ranking"]]
+    lines += [
+        "",
+        "## Scenario verdicts by subject",
+        "",
+        "| scenario | " + " | ".join(subjects) + " |",
+        "|---|" + "|".join("---" for _ in subjects) + "|",
+    ]
+    for label in cmp["scenarios"]:
+        cells = []
+        for s in subjects:
+            v = cmp["matrix"].get(label, {}).get(s)
+            cells.append(f"{v['verdict']} ({v['residual_risk']})" if v else "-")
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    if cmp["verdict_divergences"]:
+        lines += [
+            "",
+            "## Where subjects diverge",
+            "",
+            "Scenarios where the subjects reached different verdicts (the "
+            "decision-relevant rows):",
+            "",
+        ]
+        for label in cmp["verdict_divergences"]:
+            verds = ", ".join(f"{s}: {cmp['matrix'][label][s]['verdict']}"
+                              for s in subjects if s in cmp["matrix"][label])
+            lines.append(f"- **{label}** - {verds}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_comparison_html(cmp: dict[str, Any]) -> str:
+    subjects = [r["subject"] for r in cmp["ranking"]]
+    rank_rows = "".join(
+        f"<tr><td>{_esc(r['rank'])}</td><td>{_esc(r['subject'])}</td>"
+        f'<td><span class="badge" style="background:'
+        f"{_POSTURE_COLOR.get(r['posture_level'], '#546e7a')}\">"
+        f"{_esc(r['posture'])}</span></td>"
+        f"<td>{_esc(r['uncontained'])}/{_esc(r['scenarios_run'])}</td>"
+        f"<td>{_esc(r['partly_contained'])}/{_esc(r['scenarios_run'])}</td>"
+        f"<td>{_esc(r['max_residual_risk'])}</td>"
+        f"<td>{_esc(r['min_permission_integrity'])}</td></tr>"
+        for r in cmp["ranking"])
+    head = "".join(f"<th>{_esc(s)}</th>" for s in subjects)
+    mrows = ""
+    for label in cmp["scenarios"]:
+        cells = ""
+        for s in subjects:
+            v = cmp["matrix"].get(label, {}).get(s)
+            if v:
+                cells += (f'<td><span class="badge" style="background:'
+                          f"{_VERDICT_COLOR.get(v['verdict'], '#546e7a')}\">"
+                          f"{_esc(v['verdict'])}</span> "
+                          f"<small>r{_esc(v['residual_risk'])}</small></td>")
+            else:
+                cells += "<td>-</td>"
+        mrows += f"<tr><td>{_esc(label)}</td>{cells}</tr>"
+    gen = (f'<p class="sub">Generated {_esc(cmp["generated_at"])}</p>'
+           if cmp.get("generated_at") else "")
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>{_esc(cmp['title'])}</title>
+<style>
+ body{{font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;
+   background:#0f1115;color:#e6e6e6;padding:32px;max-width:1000px}}
+ h1{{font-size:24px;margin:0}} h2{{font-size:16px;border-bottom:1px solid #2a2e37;
+   padding-bottom:6px;margin:28px 0 12px}} .sub{{color:#8b95a5;margin:4px 0}}
+ .badge{{color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;
+   font-weight:600;text-transform:uppercase;letter-spacing:.03em}}
+ table{{width:100%;border-collapse:collapse;font-size:13px;margin:8px 0}}
+ th,td{{text-align:left;padding:6px 8px;border-bottom:1px solid #232734}}
+ th{{color:#8b95a5;font-weight:600}} small{{color:#8b95a5}}
+</style></head><body>
+<h1>{_esc(cmp['title'])}</h1>
+{gen}
+<p>Safest subject: <b>{_esc(cmp.get('safest') or 'n/a')}</b></p>
+<h2>Ranking (safest first)</h2>
+<table><thead><tr><th>rank</th><th>subject</th><th>posture</th>
+<th>uncontained</th><th>partly contained</th><th>max residual</th>
+<th>min permission integ.</th></tr></thead><tbody>{rank_rows}</tbody></table>
+<h2>Scenario verdicts by subject</h2>
+<table><thead><tr><th>scenario</th>{head}</tr></thead>
+<tbody>{mrows}</tbody></table>
+</body></html>"""
+
+
 # ── Rendering ─────────────────────────────────────────────────────
 
 def render_markdown(card: dict[str, Any]) -> str:
@@ -332,6 +511,42 @@ def _battery_from_ids(ids: list[str]) -> list[tuple[str, dict[str, Any]]]:
     return runs
 
 
+def _parse_compare_groups(items: list[str]) -> list[tuple[str, list[str]]]:
+    """Parse repeated NAME=ID1,ID2,... into (subject, ids) groups."""
+    groups = []
+    for item in items:
+        if "=" not in item:
+            raise ValueError(f"--compare expects NAME=ID1,ID2,..., got {item!r}")
+        name, ids = item.split("=", 1)
+        id_list = [x.strip() for x in ids.split(",") if x.strip()]
+        if not id_list:
+            raise ValueError(f"--compare group {name!r} has no run ids")
+        groups.append((name.strip(), id_list))
+    lengths = {len(ids) for _, ids in groups}
+    if len(lengths) > 1:
+        raise ValueError("each --compare subject must list the same number of "
+                         "runs, aligned by position (same battery order)")
+    return groups
+
+
+def _comparison_subjects(groups: list[tuple[str, list[str]]]):
+    """Build aligned (subject, runs) for comparison: row labels come from the
+    first subject's scenario tags, applied positionally to every subject."""
+    from src.range.evaluate import evaluate_run
+    from src.utils import experiment
+    base_ids = groups[0][1]
+    labels = []
+    for i, eid in enumerate(base_ids):
+        rec = experiment.load_record(eid)
+        base = ((rec.extra or {}).get("scenario") if rec else None)
+        labels.append(f"{base} #{i + 1}" if base else f"scenario #{i + 1}")
+    subjects = []
+    for name, ids in groups:
+        runs = [(labels[i], evaluate_run(eid)) for i, eid in enumerate(ids)]
+        subjects.append((name, runs))
+    return subjects
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range security-report",
@@ -341,10 +556,31 @@ def main(argv: list[str] | None = None) -> int:
                              "demonstration battery)")
     parser.add_argument("--subject", default=None,
                         help="agent / model under test (shown on the report)")
+    parser.add_argument("--compare", action="append", default=[],
+                        metavar="NAME=ID1,ID2,...",
+                        help="leaderboard mode: one subject per flag, each a "
+                             "battery of run ids aligned by position")
     parser.add_argument("--md", default=None, help="write markdown to this path")
     parser.add_argument("--html", default=None, help="write HTML to this path")
     parser.add_argument("--json", default=None, help="write JSON to this path")
     args = parser.parse_args(argv)
+
+    # A wall-clock stamp is fine here (this is product code, not a workflow).
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    if args.compare:
+        try:
+            groups = _parse_compare_groups(args.compare)
+        except ValueError as e:
+            print(f"[security-report] {e}", file=sys.stderr)
+            return 2
+        cmp = build_comparison(_comparison_subjects(groups), generated_at=stamp)
+        md = render_comparison_markdown(cmp)
+        wrote = _emit(args, md, render_comparison_html(cmp), cmp)
+        if not wrote:
+            print(md)
+        return 0
 
     if args.experiment_ids:
         runs = _battery_from_ids(args.experiment_ids)
@@ -355,25 +591,27 @@ def main(argv: list[str] | None = None) -> int:
     else:
         runs = _default_battery()
 
-    # A wall-clock stamp is fine here (this is product code, not a workflow).
-    from datetime import datetime
-    card = build_report_card(runs, subject=args.subject,
-                             generated_at=datetime.now().strftime(
-                                 "%Y-%m-%d %H:%M"))
+    card = build_report_card(runs, subject=args.subject, generated_at=stamp)
+    md = render_markdown(card)
+    wrote = _emit(args, md, render_html(card), card)
+    if not wrote:
+        print(md)
+    return 0
 
+
+def _emit(args, md: str, html: str, obj: dict) -> bool:
+    """Write requested outputs; return whether anything was written."""
     wrote = False
     if args.md:
-        _write(args.md, render_markdown(card))
+        _write(args.md, md)
         wrote = True
     if args.html:
-        _write(args.html, render_html(card))
+        _write(args.html, html)
         wrote = True
     if args.json:
-        _write(args.json, json.dumps(card, indent=2, default=str))
+        _write(args.json, json.dumps(obj, indent=2, default=str))
         wrote = True
-    if not wrote:
-        print(render_markdown(card))
-    return 0
+    return wrote
 
 
 def _write(path: str, content: str) -> None:

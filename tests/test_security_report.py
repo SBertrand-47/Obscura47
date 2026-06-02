@@ -124,3 +124,84 @@ def test_cli_default_battery_runs(capsys):
     out = capsys.readouterr().out
     assert "Agent Security Report" in out
     assert "Scenario scorecard" in out
+
+
+# ── Model comparison / leaderboard ────────────────────────────────
+
+def test_comparison_ranks_safer_subject_first_and_finds_divergence():
+    subjects = [
+        ("model-a", [("S1", _ev("uncontained", residual=75)),
+                     ("S2", _ev("contained"))]),
+        ("model-b", [("S1", _ev("contained")), ("S2", _ev("contained"))]),
+    ]
+    cmp = sr.build_comparison(subjects)
+    assert cmp["safest"] == "model-b"
+    assert [r["subject"] for r in cmp["ranking"]] == ["model-b", "model-a"]
+    assert cmp["ranking"][0]["rank"] == 1
+    # The subjects disagree on S1, agree on S2.
+    assert cmp["verdict_divergences"] == ["S1"]
+
+
+def test_comparison_renders_markdown_and_html():
+    subjects = [
+        ("sonnet", [("Injection", _ev("uncontained", residual=40))]),
+        ("haiku", [("Injection", _ev("uncontained", residual=100))]),
+    ]
+    cmp = sr.build_comparison(subjects, generated_at="2026-06-01 12:00")
+    md = sr.render_comparison_markdown(cmp)
+    assert "# Agent Security Comparison" in md
+    assert "Ranking (safest first)" in md
+    assert "sonnet" in md and "haiku" in md
+    html = sr.render_comparison_html(cmp)
+    assert "<!DOCTYPE html>" in html and "Agent Security Comparison" in html
+    assert "dark web" not in md.lower() and "dark web" not in html.lower()
+
+
+def test_parse_compare_groups_validates_equal_length():
+    assert sr._parse_compare_groups(["a=1,2", "b=3,4"]) == [
+        ("a", ["1", "2"]), ("b", ["3", "4"])]
+    with pytest.raises(ValueError):
+        sr._parse_compare_groups(["a=1,2", "b=3"])     # unequal lengths
+    with pytest.raises(ValueError):
+        sr._parse_compare_groups(["noequals"])          # missing '='
+
+
+# Sonnet fixture, Haiku fixture, cast, rounds, roles - aligned by scenario.
+_COMPARE_PAIRS = [
+    ("Attacker 12r", "attacker_12rounds.json", "attacker_12rounds_haiku.json",
+     "default", 12, {"attacker"}),
+    ("Injection", "injection_attacker_8rounds.json",
+     "injection_attacker_haiku.json", "injection", 8, {"attacker"}),
+    ("Forum abuse", "forum_attacker_8.json", "forum_attacker_haiku.json",
+     "forum", 8, {"attacker"}),
+    ("Honeypot", "honeypot_prober_8.json", "honeypot_prober_haiku.json",
+     "honeypot", 8, {"attacker"}),
+    ("Scam / escrow", "scam_escrow_seller_8.json",
+     "scam_escrow_seller_haiku.json", "scam-escrow", 8, {"seller"}),
+    ("Society", "society_attackers_8.json", "society_attackers_haiku.json",
+     "society", 8, {"attacker"}),
+]
+
+
+def test_real_leaderboard_sonnet_vs_haiku(public):
+    def _runs(idx):
+        out = []
+        for label, son, hai, cast, rounds, roles in _COMPARE_PAIRS:
+            fn = (son, hai)[idx]
+            ev = run_pipeline(kind="agents", cast=cast, rounds=rounds,
+                              llm_roles=roles,
+                              replay_path=os.path.join(_FIXTURES, fn))["evaluation"]
+            out.append((label, ev))
+        return out
+
+    cmp = sr.build_comparison([("claude-sonnet-4-6", _runs(0)),
+                               ("claude-haiku-4-5", _runs(1))],
+                              generated_at="2026-06-01")
+    # Both models appear, ranked, with a real verdict matrix and real divergences.
+    names = {r["subject"] for r in cmp["ranking"]}
+    assert names == {"claude-sonnet-4-6", "claude-haiku-4-5"}
+    assert cmp["safest"] in names
+    assert len(cmp["scenarios"]) == len(_COMPARE_PAIRS)
+    # The two models do not behave identically across the battery.
+    assert cmp["verdict_divergences"]
+    assert "## Scenario verdicts by subject" in sr.render_comparison_markdown(cmp)
