@@ -210,7 +210,48 @@ def correlate(experiment_id: str | None = None, *,
         "forum": forum,
     }
     view["narrative"] = build_narrative(view)
+    view["case_files"] = build_case_files(view)
     return view
+
+
+def build_case_files(view: dict[str, Any]) -> list[dict[str, Any]]:
+    """The investigator's output: a forensic case file per caught offender,
+    assembled from every plane - the charges, who caught them and why, the
+    evidence (services probed, funds taken, posts removed, reputation), and the
+    disposition. Turns the observed run into per-suspect dossiers."""
+    g = view.get("graph") or {}
+    econ = view.get("economy") or {}
+    forum = view.get("forum") or {}
+    rep = view.get("reputation") or {}
+    probed: dict[str, set] = {}
+    for e in g.get("edges", []):
+        probed.setdefault(e["src"], set()).add(e["dst"])
+
+    cases = []
+    for f in (view.get("threats") or {}).get("flagged_agents", []):
+        a = f["agent"]
+        evidence: dict[str, Any] = {}
+        if probed.get(a):
+            evidence["services_probed"] = sorted(probed[a])
+        if a in econ.get("scam_sellers", {}):
+            s = econ["scam_sellers"][a]
+            evidence["funds_taken"] = s["amount"]
+            evidence["victims"] = s["victims"]
+            evidence["refunded"] = s["refunded"]
+        if a in forum.get("abusive_authors", {}):
+            evidence["posts_removed"] = forum["abusive_authors"][a]
+        if a in rep:
+            evidence["reputation"] = rep[a]
+        cases.append({
+            "subject": a,
+            "charges": f["reasons"],
+            "disposition": f["status"],
+            "detected_by": f["detected_by"],
+            "contained_by": f["contained_by"],
+            "ruling": f.get("response_reason"),
+            "evidence": evidence,
+        })
+    return cases
 
 
 def _forum(events: list[Any] | None) -> dict[str, Any]:
@@ -613,6 +654,14 @@ def render_text(view: dict[str, Any]) -> str:
             lines.append(f"  {e['src']} -> {dst}  "
                          f"({e['dials']} dial(s), {flag})")
         lines.append("")
+    cases = view.get("case_files") or []
+    if cases:
+        lines.append("case files (investigator report):")
+        for c in cases:
+            caught = ", ".join(c["contained_by"] or c["detected_by"]) or "-"
+            lines.append(f"  {c['subject']} [{c['disposition']}] - "
+                         f"{'; '.join(c['charges'])} - caught by {caught}")
+        lines.append("")
     if cov["dial_sessions_unobserved"]:
         lines.append("WARNING: research dials with no ops trace (unobserved "
                      f"traffic): {cov['dial_sessions_unobserved']}")
@@ -798,6 +847,38 @@ def render_html(view: dict[str, Any]) -> str:
                     f'<th>reputation</th></tr></thead><tbody>{rows}</tbody>'
                     f'</table></section>')
 
+    cases_html = ""
+    cases = view.get("case_files") or []
+    if cases:
+        items = ""
+        for c in cases:
+            ev = c["evidence"]
+            bits = []
+            if ev.get("services_probed"):
+                bits.append(f"probed {len(ev['services_probed'])} service(s)")
+            if "funds_taken" in ev:
+                bits.append(f"took {ev['funds_taken']} from "
+                            f"{len(ev['victims'])} buyer(s)"
+                            + (" (refunded)" if ev.get("refunded") else ""))
+            if ev.get("posts_removed"):
+                bits.append(f"{ev['posts_removed']} post(s) removed")
+            if "reputation" in ev:
+                bits.append(f"reputation {ev['reputation']:+d}")
+            caught = ", ".join(c["contained_by"] or c["detected_by"]) or "-"
+            dcls = "good" if c["disposition"] == "contained" else "bad"
+            items += (
+                f'<div class="case"><div class="csubj">{_esc(c["subject"])} '
+                f'<span class="badge {dcls}">{_esc(c["disposition"])}</span>'
+                f'</div>'
+                f'<div class="cline"><b>charges</b> '
+                f'{_esc("; ".join(c["charges"]))}</div>'
+                f'<div class="cline"><b>caught by</b> {_esc(caught)}</div>'
+                f'<div class="cline"><b>evidence</b> '
+                f'{_esc("; ".join(bits) or "-")}</div></div>')
+        cases_html = (f'<section><h2>Case files &middot; investigator report</h2>'
+                      f'<p class="sub">A forensic dossier per caught offender, '
+                      f'assembled from every plane.</p>{items}</section>')
+
     threat_html = ""
     if threats.get("flagged_agents"):
         items = ""
@@ -909,6 +990,12 @@ def render_html(view: dict[str, Any]) -> str:
  .threats li{{margin:8px 0;color:#f0c9b0}}
  .why{{color:#9ec1ff;font-style:italic;font-size:12px}}
  ul.story{{margin:4px 0;padding-left:20px}} ul.story li{{margin:5px 0}}
+ .case{{background:#161c2b;border:1px solid #2c3344;border-radius:8px;
+   padding:10px 14px;margin:8px 0}}
+ .csubj{{font-weight:700;font-size:14px;margin-bottom:4px}}
+ .cline{{color:#b8c0cc;font-size:12px;margin:2px 0}}
+ .cline b{{color:#8b95a5;text-transform:uppercase;letter-spacing:.04em;
+   font-size:11px;margin-right:6px}}
  .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}
  .hop{{display:inline-flex;flex-direction:column;background:#161c2b;
    border:1px solid #2c3344;border-radius:8px;padding:6px 11px;min-width:64px}}
@@ -932,6 +1019,7 @@ def render_html(view: dict[str, Any]) -> str:
 {summary_html}
 {graph_html}
 {threat_html}
+{cases_html}
 {rep_html}
 {sessions_html or '<section><p class="empty">no correlated sessions</p></section>'}
 {unattr_html}

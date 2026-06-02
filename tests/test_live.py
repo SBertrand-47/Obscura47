@@ -286,6 +286,33 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_live_investigator_files_cases(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveInvestigator
+
+    cap = _Capture()
+    inv = LiveInvestigator("investigator",
+                           observer=Observer("investigator", sink=cap),
+                           session_id="SI")
+    view = {
+        "threats": {"flagged_agents": [{
+            "agent": "seller-1", "reasons": ["scam"], "status": "contained",
+            "contained_by": ["escrow"], "detected_by": ["escrow"],
+            "response_reason": None}]},
+        "graph": {"edges": []},
+        "economy": {"scam_sellers": {"seller-1": {
+            "victims": ["buyer-1"], "amount": 50, "refunded": True}}},
+        "forum": {}, "reputation": {},
+    }
+    filed = inv.investigate(view)
+    assert any(c["subject"] == "seller-1" for c in filed)
+    kinds = {(e.kind, e.payload.get("subject"), e.payload.get("disposition"))
+             for e in cap.events}
+    assert ("investigation.case", "seller-1", "contained") in kinds
+    # Idempotent: a second pass files nothing new.
+    assert inv.investigate(view) == []
+
+
 def test_live_moderator_removes_abusive_posts(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     from src.range.live import LiveModerator

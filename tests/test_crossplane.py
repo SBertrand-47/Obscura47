@@ -304,6 +304,29 @@ def test_forum_abuse_is_flagged_and_removed():
     assert "forum post" in story and "removed for abuse" in story
 
 
+def test_investigator_builds_case_files():
+    # A scam produces a forensic case file: charges, who caught them, evidence.
+    events = [
+        _ev_actor("buyer-1", "escrow.open", "SB", 1.0, seller="seller-1",
+                  item="widget", amount=50),
+        _ev_actor("escrow", "escrow.refund", "SE", 2.0, buyer="buyer-1",
+                  seller="seller-1", item="widget", amount=50),
+        _ev_actor("escrow", "moderation.action", "SE", 2.1, target="seller-1",
+                  action="ban", reason="non-delivery"),
+    ]
+    view = cp.correlate("exp1", events=events, spans=[])
+    cases = {c["subject"]: c for c in view["case_files"]}
+    assert "seller-1" in cases
+    c = cases["seller-1"]
+    assert c["disposition"] == "contained"
+    assert any("scam" in ch for ch in c["charges"])
+    assert c["evidence"]["funds_taken"] == 50
+    assert c["evidence"]["victims"] == ["buyer-1"]
+    assert "escrow" in c["contained_by"]
+    assert "Case files" in cp.render_html(view)
+    assert "case files (investigator report)" in cp.render_text(view)
+
+
 def test_reputation_accumulates_and_renders():
     # Reputation is the running sum of trust.update deltas the escrow issues.
     events = [

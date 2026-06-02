@@ -74,6 +74,13 @@ def test_real_models_two_fronts_caught_and_observed(monkeypatch, tmp_path):
         view = crossplane.correlate(eid, logs_dir=ov["logs_dir"])
         flagged = {f["agent"]: f for f in view["threats"]["flagged_agents"]}
 
+        # The investigator files a forensic case on each caught offender.
+        investigator = live.LiveInvestigator("investigator", experiment_id=eid)
+        filed = {c["subject"]: c for c in investigator.investigate(view)}
+        assert "attacker-1" in filed and "seller-1" in filed
+        assert filed["seller-1"]["evidence"]["funds_taken"] == 50
+        assert filed["attacker-1"]["evidence"]["services_probed"]
+
         # Front 1 (security): the real attacker's recon is contained by defender.
         assert flagged["attacker-1"]["status"] == "contained"
         assert any("recon" in r for r in flagged["attacker-1"]["reasons"])
@@ -91,7 +98,8 @@ def test_real_models_two_fronts_caught_and_observed(monkeypatch, tmp_path):
         story = " ".join(view["narrative"])
         assert "recon" in story and "escrow payment" in story
         html = crossplane.render_html(view)
-        for token in ("attacker-1", "seller-1", "buyer-1", "Traffic graph"):
+        for token in ("attacker-1", "seller-1", "buyer-1", "Traffic graph",
+                      "Case files"):
             assert token in html
         out = os.environ.get("OBSCURA_OBSERVE_OUT")
         if out:

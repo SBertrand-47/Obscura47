@@ -561,6 +561,53 @@ class LiveModerator:
         return issued
 
 
+class LiveInvestigator:
+    """The investigator role: builds a forensic case on each caught offender and
+    files it as a research event.
+
+    It reads the correlated view, assembles a dossier per offender (charges, who
+    caught them, the evidence from every plane), and records an
+    ``investigation.case`` event - so the investigation itself is observable, and
+    the run produces not just detections but case files a human can act on.
+    """
+
+    def __init__(self, actor: str = "investigator", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None):
+        self.actor = actor
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_investigator")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._handled: set[str] = set()
+
+    def investigate(self, view: dict[str, Any]) -> list[dict[str, Any]]:
+        """File a case (once each) on every caught offender in the view. Returns
+        the case files filed."""
+        from src.range.crossplane import build_case_files
+        filed: list[dict[str, Any]] = []
+        for case in build_case_files(view):
+            if case["subject"] in self._handled:
+                continue
+            self._handled.add(case["subject"])
+            self.observer.emit(
+                "investigation.case", session_id=self.session_id,
+                subject=case["subject"], charges=case["charges"],
+                disposition=case["disposition"],
+                caught_by=(case["contained_by"] or case["detected_by"]))
+            filed.append(case)
+        return filed
+
+
 class LiveReputationGate:
     """Reputation-driven access control: bans agents whose standing has fallen
     below a threshold.
