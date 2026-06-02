@@ -79,14 +79,17 @@ def run_pipeline(
     defender: str = "weak", llm_roles: set[str] | None = None,
     make_dashboard: bool = False, record_path: str | None = None,
     replay_path: str | None = None,
+    model: str = _agents.DEFAULT_MODEL, model_for: dict | None = None,
 ) -> dict[str, Any]:
     """Run a scenario end to end and return the evidence package.
 
     Includes a dashboard path when the run was persisted (range mode) and
     ``make_dashboard`` is set. ``record_path`` captures an LLM run for replay;
-    ``replay_path`` re-runs a recording deterministically without a key. Both
-    apply to the ``agents`` kind with ``llm_roles``.
+    ``replay_path`` re-runs a recording deterministically without a key.
+    ``model`` is the default model for LLM roles; ``model_for`` overrides it per
+    role (e.g. {"attacker": "claude-opus-4-8"}). All apply to ``agents``.
     """
+    model_for = model_for or {}
     if kind == "readiness":
         result = _scenario.run_scenario(seed=seed)
     elif kind == "adaptive":
@@ -101,7 +104,8 @@ def run_pipeline(
         factory = None
         if llm_roles:
             factory = lambda role, goal: (  # noqa: E731
-                _agents.LLMPolicy(role, goal, client=shared)
+                _agents.LLMPolicy(role, goal, client=shared,
+                                  model=model_for.get(role, model))
                 if role in llm_roles else _agents.ScriptedPolicy())
         result = _agents.run_world(
             _agents.default_cast(factory), rounds=rounds, seed=seed)
@@ -124,6 +128,20 @@ def run_pipeline(
             "dashboard": dash_path}
 
 
+def _parse_model_for(items, valid_roles) -> dict:
+    """Parse repeated ROLE=MODEL overrides into a dict, validating roles."""
+    out = {}
+    for item in items or []:
+        if "=" not in item:
+            raise ValueError(f"--model-for expects ROLE=MODEL, got {item!r}")
+        role, model = item.split("=", 1)
+        role = role.strip()
+        if role not in valid_roles:
+            raise ValueError(f"--model-for unknown role {role!r}")
+        out[role] = model.strip()
+    return out
+
+
 def _run_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m src.range run",
@@ -136,7 +154,12 @@ def _run_main(argv: list[str]) -> int:
     parser.add_argument("--defender", choices=sorted(_adaptive.DEFENDERS),
                         default="weak", help="adaptive: defender model")
     parser.add_argument("--llm-roles", default="",
-                        help="agents: comma-separated roles driven by a model")
+                        help="agents: comma-separated roles driven by a model "
+                             "('all' / 'none')")
+    parser.add_argument("--model", default=_agents.DEFAULT_MODEL,
+                        help="default model for LLM roles")
+    parser.add_argument("--model-for", action="append", metavar="ROLE=MODEL",
+                        default=[], help="per-role model override (repeatable)")
     parser.add_argument("--dashboard", action="store_true",
                         help="write an HTML dashboard (range mode only)")
     parser.add_argument("--record", default=None,
@@ -155,10 +178,17 @@ def _run_main(argv: list[str]) -> int:
         llm_roles = {r.strip() for r in raw.split(",") if r.strip()}
 
     try:
+        model_for = _parse_model_for(args.model_for, _agents.CAST_ROLES)
+    except ValueError as e:
+        print(f"[range] {e}", file=sys.stderr)
+        return 2
+
+    try:
         out = run_pipeline(kind=args.kind, rounds=args.rounds, seed=args.seed,
                            defender=args.defender, llm_roles=llm_roles,
                            make_dashboard=args.dashboard,
-                           record_path=args.record, replay_path=args.replay)
+                           record_path=args.record, replay_path=args.replay,
+                           model=args.model, model_for=model_for)
     except (RuntimeError, FileNotFoundError) as e:  # no key, or bad recording
         print(f"[range] {e}", file=sys.stderr)
         return 1
@@ -171,6 +201,10 @@ def _run_main(argv: list[str]) -> int:
     eid = out["experiment_id"]
     s = ev["scores"]
     print(f"Range run  kind={args.kind}  experiment={eid}")
+    if llm_roles:
+        models = ", ".join(f"{r}={model_for.get(r, args.model)}"
+                           for r in sorted(llm_roles))
+        print(f"  llm-roles: {models}")
     print(f"  verdict={ev['verdict']}  threat={s['threat_level']}  "
           f"efficacy={s['defense_efficacy']}  residual={s['residual_risk']}")
     print(f"  {ev['executive_summary']}")
