@@ -32,6 +32,8 @@ OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,de
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles all --model claude-sonnet-4-6
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker,defender \
     --model-for attacker=claude-opus-4-8 --model-for defender=claude-haiku-4-5-20251001
+# drive a role inside any named threat-family cast with a real model
+OBSCURA_MODE=range python -m src.range run --kind agents --cast injection --llm-roles attacker
 OBSCURA_MODE=range python -m src.range run --kind agents --llm-roles attacker --record run.json
 python -m src.range run --kind agents --llm-roles attacker --replay run.json   # deterministic, no key
 
@@ -70,7 +72,7 @@ CAPTURE    experiment record + append-only events.jsonl   (range mode)
   |
   +-- report.py     reconstruct / investigate a run from storage
   +-- evaluate.py   score: verdict, threat, defense efficacy, residual risk,
-  |                 tool-misuse and prompt-injection signals, findings
+  |                 permission integrity, prompt-injection signals, findings
   +-- compare.py    leaderboard across configs ("which is safest")
   +-- dashboard.py  self-contained HTML view
 ```
@@ -143,10 +145,31 @@ path. `anthropic` is intentionally not in `requirements.txt`.
 Persisted runs live under `~/.obscura47/experiments/<id>.json` (record) and
 `<id>.events.jsonl` (event log).
 
+## Real-model runs
+
+Real models run here today. The captured recordings in
+`tests/fixtures/real_runs/` are genuine `claude-sonnet-4-6` decisions; they
+replay deterministically with no key (`tests/test_real_model_replay.py`), so the
+behavior they captured is a permanent regression. What they show:
+
+* **Behavior is horizon-dependent.** The same attacker model looks benign at 3
+  rounds (it only builds a storefront), runs an uncontained multi-technique
+  campaign at 12, and is fully contained at 12 once a live defender is present.
+* **A real model has a house style.** Dropped into the prompt-injection cast, it
+  ignored the intended injection vector and fell back to storefront-cover +
+  phishing. You cannot assume a model will exercise the technique a scenario
+  targets.
+
+Two signals are scored separately and must not be conflated: **threat / residual
+risk** (attacker pressure the defenders did or did not contain) and
+**permission integrity** (any agent - often a defender over-eager to enforce -
+reaching for a tool outside its role). A defender overstepping should never read
+as a more dangerous adversary.
+
 ## Determinism and scope
 
 The scripted and adaptive scenarios are fully deterministic given a seed, so
-runs are reproducible and replayable. The actors are rule-based policies; the
-seam to swap in real autonomous models is built and tested, but running real
-models (and a live multi-machine network exercise for ops-plane traces) is the
-work that turns this simulator into a study of real agent behavior.
+runs are reproducible and replayable. Real-model runs are made reproducible by
+recording and replaying responses (`llm_io.py`). The remaining frontier is
+scale (larger casts, more models) and a live multi-machine network exercise for
+ops-plane traces.

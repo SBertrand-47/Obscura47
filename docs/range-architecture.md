@@ -94,8 +94,10 @@ recording and replaying responses (`llm_io.py`).
 
 ## Scope
 
-The actors are rule-based policies; the seam for real autonomous models is built
-and tested, and the live ops-plane trace exercise exists as a runnable harness
-(`tests/test_range_live.py`). Running real models at scale and a live
-multi-machine network are the steps that turn this instrument into a study of
-real agent behaviour.
+Real autonomous models run in the range today; their recorded decisions live in
+`tests/fixtures/real_runs/` and replay deterministically
+(`tests/test_real_model_replay.py`), so real agent behaviour is captured and
+regression-tested without a key. The live ops-plane trace exercise exists as a
+runnable harness (`tests/test_range_live.py`). The remaining frontier is scale
+(larger casts, more models) and a live multi-machine network for ops-plane
+traces.

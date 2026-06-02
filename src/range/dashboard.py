@@ -163,6 +163,7 @@ def render_html(experiment_id: str) -> str:
         {_bar('threat level', s['threat_level'], '#8e24aa')}
         {_bar('defense efficacy', s['defense_efficacy'], '#2e7d32')}
         {_bar('residual risk', s['residual_risk'], '#c62828')}
+        {_bar('permission integrity', s.get('permission_integrity', 100), '#1565c0')}
       </section>
       <section><h2>Trust</h2>{trust_rows}</section>
     </div>

@@ -131,6 +131,34 @@ def test_run_agents_llm_without_key_exits_1(capsys, monkeypatch):
     assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
 
 
+def test_run_agents_named_cast_scripted(capsys):
+    assert cli.main(["run", "--kind", "agents", "--cast", "injection",
+                     "--llm-roles", "none", "--rounds", "6"]) == 0
+    assert "kind=agents" in capsys.readouterr().out
+
+
+def test_run_agents_named_cast_rejects_unknown():
+    # argparse choices guard the cast name (exits 2 via SystemExit).
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "--kind", "agents", "--cast", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_run_pipeline_drives_named_cast_role_via_replay(tmp_path):
+    # A real role in a named cast is replayable without a key: the recording
+    # drives the injection cast's attacker through the same pipeline path.
+    import json as _json
+    recs = [{"blocks": [{"input": {"kind": "attack",
+                                   "params": {"technique": "phishing",
+                                              "target": "buyer-1"}},
+                         "id": "tu"}], "usage": None} for _ in range(3)]
+    path = str(tmp_path / "rec.json")
+    _json.dump(recs, open(path, "w"))
+    out = cli.run_pipeline(kind="agents", cast="injection", rounds=3,
+                           llm_roles={"attacker"}, replay_path=path)
+    assert out["evaluation"]["adversarial"]["attacks"] >= 1
+
+
 def test_unknown_subcommand(capsys):
     assert cli.main(["bogus"]) == 2
     assert "unknown subcommand" in capsys.readouterr().err

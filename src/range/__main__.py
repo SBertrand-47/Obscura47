@@ -77,8 +77,8 @@ def _llm_client(record_path, replay_path):
 def run_pipeline(
     *, kind: str = "readiness", rounds: int = 8, seed: int = 47,
     defender: str = "weak", llm_roles: set[str] | None = None,
-    make_dashboard: bool = False, record_path: str | None = None,
-    replay_path: str | None = None,
+    cast: str = "default", make_dashboard: bool = False,
+    record_path: str | None = None, replay_path: str | None = None,
     model: str = _agents.DEFAULT_MODEL, model_for: dict | None = None,
 ) -> dict[str, Any]:
     """Run a scenario end to end and return the evidence package.
@@ -87,7 +87,9 @@ def run_pipeline(
     ``make_dashboard`` is set. ``record_path`` captures an LLM run for replay;
     ``replay_path`` re-runs a recording deterministically without a key.
     ``model`` is the default model for LLM roles; ``model_for`` overrides it per
-    role (e.g. {"attacker": "claude-opus-4-8"}). All apply to ``agents``.
+    role (e.g. {"attacker": "claude-opus-4-8"}). ``cast`` (for ``agents``)
+    selects a named threat-family cast; ``llm_roles`` then drives the matching
+    roles in that cast with a real model. All apply to ``agents``.
     """
     model_for = model_for or {}
     if kind == "readiness":
@@ -101,14 +103,29 @@ def run_pipeline(
                                    seed=seed)
     elif kind == "agents":
         shared = _llm_client(record_path, replay_path)
-        factory = None
-        if llm_roles:
-            factory = lambda role, goal: (  # noqa: E731
-                _agents.LLMPolicy(role, goal, client=shared,
-                                  model=model_for.get(role, model))
-                if role in llm_roles else _agents.ScriptedPolicy())
-        result = _agents.run_world(
-            _agents.default_cast(factory), rounds=rounds, seed=seed)
+
+        def make_llm(role, goal):
+            return _agents.LLMPolicy(role, goal, client=shared,
+                                     model=model_for.get(role, model))
+
+        if cast == "default":
+            factory = None
+            if llm_roles:
+                factory = lambda role, goal: (  # noqa: E731
+                    make_llm(role, goal) if role in llm_roles
+                    else _agents.ScriptedPolicy())
+            agents_list = _agents.default_cast(factory)
+        else:
+            if cast not in _agents.CASTS:
+                raise ValueError(f"unknown cast: {cast!r}")
+            # Named casts build their own scripted policies; swap an LLMPolicy
+            # into any agent whose role was requested. Works for every cast.
+            agents_list = _agents.CASTS[cast]()
+            if llm_roles:
+                for ag in agents_list:
+                    if ag.role in llm_roles:
+                        ag.policy = make_llm(ag.role, ag.goal)
+        result = _agents.run_world(agents_list, rounds=rounds, seed=seed)
         if record_path and shared is not None:
             from src.range.llm_io import save_recording
             save_recording(shared, record_path)
@@ -156,6 +173,9 @@ def _run_main(argv: list[str]) -> int:
     parser.add_argument("--llm-roles", default="",
                         help="agents: comma-separated roles driven by a model "
                              "('all' / 'none')")
+    parser.add_argument("--cast", default="default",
+                        choices=("default", *sorted(_agents.CASTS)),
+                        help="agents: named threat-family cast to run")
     parser.add_argument("--model", default=_agents.DEFAULT_MODEL,
                         help="default model for LLM roles")
     parser.add_argument("--model-for", action="append", metavar="ROLE=MODEL",
@@ -186,7 +206,7 @@ def _run_main(argv: list[str]) -> int:
     try:
         out = run_pipeline(kind=args.kind, rounds=args.rounds, seed=args.seed,
                            defender=args.defender, llm_roles=llm_roles,
-                           make_dashboard=args.dashboard,
+                           cast=args.cast, make_dashboard=args.dashboard,
                            record_path=args.record, replay_path=args.replay,
                            model=args.model, model_for=model_for)
     except (RuntimeError, FileNotFoundError) as e:  # no key, or bad recording
