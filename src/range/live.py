@@ -160,8 +160,10 @@ _LIVE_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "kind": {"type": "string", "enum": ["visit", "call", "finish"],
-                     "description": "visit a service, call a tool on it, or "
+            "kind": {"type": "string",
+                     "enum": ["visit", "call", "pay", "finish"],
+                     "description": "visit a service, call a tool on it, pay a "
+                                    "seller for goods (held in escrow), or "
                                     "finish when your goal is met"},
             "addr": {"type": "string",
                      "description": "the .obscura address / host to act on"},
@@ -169,6 +171,9 @@ _LIVE_TOOL = {
             "port": {"type": "integer", "description": "service port (default 80)"},
             "tool": {"type": "string", "description": "tool name for a call"},
             "args": {"type": "object", "description": "arguments for a call"},
+            "seller": {"type": "string", "description": "seller to pay (for pay)"},
+            "amount": {"type": "integer", "description": "amount to pay"},
+            "item": {"type": "string", "description": "item being bought"},
             "rationale": {"type": "string",
                           "description": "why you chose this action"},
         },
@@ -235,8 +240,12 @@ class LiveAgent:
         lines = [f"Goal: {self.goal}", "", "Known services on Obscura:"]
         if self.directory:
             for s in self.directory:
+                offer = ""
+                if s.get("seller"):
+                    offer = (f" [sells '{s.get('item')}' for {s.get('price')} "
+                             f"from seller '{s.get('seller')}']")
                 lines.append(f"  - {s.get('addr')} (port {s.get('port', 80)})"
-                             f": {s.get('title', '')}")
+                             f": {s.get('title', '')}{offer}")
         else:
             lines.append("  (none known yet)")
         if last_result is not None:
@@ -306,6 +315,13 @@ class LiveAgent:
                     action.get("args") or {},
                     int(action.get("port", 80) or 80))
                 record["result_summary"] = f"tool result: {str(out)[:120]}"
+            elif kind == "pay":
+                seller = str(action.get("seller"))
+                amount = int(action.get("amount", 0) or 0)
+                item = str(action.get("item", ""))
+                self.session.pay(seller, amount, item)
+                record["result_summary"] = (
+                    f"paid {amount} to {seller} for '{item}' (held in escrow)")
             # "finish" needs no overlay action.
         except Exception as e:  # noqa: BLE001 - the agent observes failures too
             record["error"] = str(e) or repr(e)

@@ -455,6 +455,39 @@ def test_run_society_interleaves_and_blocks_banned_agents():
     assert all(e[1].get("rule") == "acted_while_banned" for e in pv)
 
 
+def test_live_agent_can_pay_for_goods(monkeypatch):
+    # A model buyer makes an autonomous purchase: a "pay" decision records an
+    # escrow payment to the chosen seller.
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveAgent
+    from src.range.llm_io import ReplayClient
+
+    cap = _Capture()
+    sess = LiveSession("buyer-1", session_id="S-BUY",
+                       observer=Observer("buyer-1", sink=cap),
+                       client=AgentClient(proxy_host="127.0.0.1", proxy_port=1))
+    recs = [
+        {"blocks": [{"input": {"kind": "pay", "seller": "seller-1",
+                               "amount": 50, "item": "widget",
+                               "rationale": "buying the widget I need"},
+                     "id": "t1"}], "usage": None},
+        {"blocks": [{"input": {"kind": "finish", "rationale": "bought it"},
+                     "id": "t2"}], "usage": None},
+    ]
+    agent = LiveAgent("buy a widget", session=sess,
+                      directory=[{"addr": "127.0.0.1", "port": 80,
+                                  "seller": "seller-1", "item": "widget",
+                                  "price": 50, "title": "the shop"}],
+                      client=ReplayClient(recs))
+    records = agent.run(max_steps=3)
+
+    assert records[0]["kind"] == "pay"
+    assert "paid 50 to seller-1" in records[0]["result_summary"]
+    opens = [e for e in cap.events if e.kind == "escrow.open"]
+    assert opens and opens[0].payload.get("seller") == "seller-1"
+    assert opens[0].payload.get("amount") == 50
+
+
 def test_live_agent_without_key_fails_clearly(monkeypatch):
     monkeypatch.setattr(config, "IS_RANGE_MODE", False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
