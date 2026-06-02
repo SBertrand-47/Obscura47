@@ -180,6 +180,11 @@ def test_live_session_is_fully_observable_across_planes(monkeypatch, tmp_path):
         # The visual view renders from this real data.
         html = crossplane.render_html(view)
         assert "S-OBSERVE" in html and "What the agents did on Obscura" in html
+        # Optionally persist the artifact so a human can open it.
+        out = os.environ.get("OBSCURA_OBSERVE_OUT")
+        if out:
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(html)
     finally:
         try:
             target.close()
