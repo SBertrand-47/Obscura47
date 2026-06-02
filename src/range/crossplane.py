@@ -217,10 +217,12 @@ def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
             continue
         if kind == "defense.flag":
             out.append({"defender": getattr(e, "actor", None),
-                        "target": target, "action": "flag"})
+                        "target": target, "action": "flag",
+                        "reason": payload.get("reason")})
         elif kind == "moderation.action" and payload.get("action") == "ban":
             out.append({"defender": getattr(e, "actor", None),
-                        "target": target, "action": "ban"})
+                        "target": target, "action": "ban",
+                        "reason": payload.get("reason")})
     return out
 
 
@@ -242,11 +244,14 @@ def _detect_threats(sessions: list[dict[str, Any]],
         if s["made_research_dials"] and not s["observed_on_wire"]:
             p["unobserved"] += 1
 
-    by_target: dict[str, dict[str, set]] = {}
+    by_target: dict[str, dict[str, Any]] = {}
     for r in responses or []:
-        slot = by_target.setdefault(r["target"], {"flag": set(), "ban": set()})
+        slot = by_target.setdefault(r["target"],
+                                    {"flag": set(), "ban": set(), "reason": None})
         if r.get("defender"):
             slot[r["action"]].add(r["defender"])
+        if r["action"] == "ban" and r.get("reason"):
+            slot["reason"] = r["reason"]
 
     flagged = []
     for actor, p in sorted(per.items()):
@@ -266,7 +271,8 @@ def _detect_threats(sessions: list[dict[str, Any]],
         flagged.append({"agent": actor, "reasons": reasons,
                         "services": sorted(p["services"]),
                         "detected_by": detected_by,
-                        "contained_by": contained_by, "status": status})
+                        "contained_by": contained_by, "status": status,
+                        "response_reason": resp.get("reason")})
     return {"flagged_agents": flagged,
             "flagged": sorted(f["agent"] for f in flagged),
             "responses": len(responses or [])}
@@ -585,8 +591,11 @@ def render_html(view: dict[str, Any]) -> str:
         for f in threats["flagged_agents"]:
             status = f.get("status", "open")
             if status == "contained":
+                why = (f' <span class="why">&ldquo;'
+                       f'{_esc(f["response_reason"])}&rdquo;</span>'
+                       if f.get("response_reason") else "")
                 resp = (f'<span class="badge good">contained by '
-                        f'{_esc(", ".join(f["contained_by"]))}</span>')
+                        f'{_esc(", ".join(f["contained_by"]))}</span>{why}')
             elif status == "detected":
                 resp = (f'<span class="badge warn">detected by '
                         f'{_esc(", ".join(f["detected_by"]))}</span>')
@@ -685,6 +694,7 @@ def render_html(view: dict[str, Any]) -> str:
  svg .elabel.resp{{fill:#e0566a;font-weight:700}}
  .threats{{list-style:none;padding:0;margin:0}}
  .threats li{{margin:8px 0;color:#f0c9b0}}
+ .why{{color:#9ec1ff;font-style:italic;font-size:12px}}
  .circuit{{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin:8px 0}}
  .hop{{display:inline-flex;flex-direction:column;background:#161c2b;
    border:1px solid #2c3344;border-radius:8px;padding:6px 11px;min-width:64px}}

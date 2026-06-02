@@ -245,6 +245,58 @@ def test_live_defender_flags_and_bans_flagged_agents(monkeypatch):
     assert ("moderation.action", "attacker-1", "ban") in events
 
 
+def _recon_view():
+    return {"graph": {"agents": ["buyer-1", "attacker-1"], "edges": [
+        {"src": "attacker-1", "dst": "a:1"}, {"src": "attacker-1", "dst": "a:2"},
+        {"src": "attacker-1", "dst": "a:3"}, {"src": "buyer-1", "dst": "m"}]}}
+
+
+def test_live_model_defender_bans_with_reasoning(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelDefender
+    from src.range.llm_io import ReplayClient
+
+    cap = _Capture()
+    recs = [{"blocks": [{"input": {"kind": "ban", "target": "attacker-1",
+                                   "rationale": "probed 3 services - recon"},
+                         "id": "d1"}],
+             "usage": {"input_tokens": 40, "output_tokens": 10}}]
+    defn = LiveModelDefender("defender-1",
+                             observer=Observer("defender-1", sink=cap),
+                             session_id="SD", client=ReplayClient(recs))
+    issued = defn.assess(_recon_view())
+
+    assert issued and issued[0]["target"] == "attacker-1"
+    assert issued[0]["action"] == "ban"
+    kinds = {(e.kind, e.payload.get("target"), e.payload.get("action"))
+             for e in cap.events}
+    assert ("defense.decision", "attacker-1", None) in kinds
+    assert ("defense.flag", "attacker-1", None) in kinds
+    assert ("moderation.action", "attacker-1", "ban") in kinds
+    # The model's reasoning rides the ban (shown on the dashboard).
+    ban = next(e for e in cap.events if e.kind == "moderation.action")
+    assert "recon" in ban.payload.get("reason", "")
+
+
+def test_live_model_defender_allows_normal_agent(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range.live import LiveModelDefender
+    from src.range.llm_io import ReplayClient
+
+    cap = _Capture()
+    recs = [{"blocks": [{"input": {"kind": "allow",
+                                   "rationale": "agents look focused"},
+                         "id": "d1"}], "usage": None}]
+    defn = LiveModelDefender("defender-1",
+                             observer=Observer("defender-1", sink=cap),
+                             session_id="SD", client=ReplayClient(recs))
+    issued = defn.assess({"graph": {"agents": ["buyer-1"],
+                                    "edges": [{"src": "buyer-1", "dst": "m"}]}})
+    assert issued == []
+    kinds = {e.kind for e in cap.events}
+    assert "defense.decision" in kinds and "moderation.action" not in kinds
+
+
 class _StubObserver:
     def __init__(self):
         self.events = []
