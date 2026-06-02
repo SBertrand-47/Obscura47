@@ -201,7 +201,7 @@ def correlate(experiment_id: str | None = None, *,
         "circuits": circuits,
         "coverage": coverage,
         "graph": graph,
-        "threats": _detect_threats(sessions, responses, economy),
+        "threats": _detect_threats(sessions, responses, economy, reputation),
         "responses": responses,
         "economy": economy,
         "reputation": reputation,
@@ -354,7 +354,8 @@ def _responses(events: list[Any] | None) -> list[dict[str, Any]]:
 
 def _detect_threats(sessions: list[dict[str, Any]],
                     responses: list[dict[str, Any]] = (),
-                    economy: dict[str, Any] | None = None) -> dict[str, Any]:
+                    economy: dict[str, Any] | None = None,
+                    reputation: dict[str, int] | None = None) -> dict[str, Any]:
     """Flag suspicious agents from the joined planes, so the dashboard tells a
     security story: fanning out across many services (recon), traffic that never
     showed up on the wire (evasion), and taking payment without delivering
@@ -398,6 +399,13 @@ def _detect_threats(sessions: list[dict[str, Any]],
         ent = flags.setdefault(seller, {"reasons": [], "services": []})
         ent["reasons"].append(
             f"took payment from {n} buyer(s) without delivering (scam)")
+
+    # Reputation feeds security: an agent whose standing has gone negative is
+    # distrusted - past behaviour gates present access, even with no new crime.
+    for agent, rep in (reputation or {}).items():
+        if rep < 0:
+            ent = flags.setdefault(agent, {"reasons": [], "services": []})
+            ent["reasons"].append(f"distrusted (reputation {rep})")
 
     flagged = []
     for actor in sorted(flags):

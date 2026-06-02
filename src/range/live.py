@@ -455,6 +455,56 @@ class LiveEscrow:
         return issued
 
 
+class LiveReputationGate:
+    """Reputation-driven access control: bans agents whose standing has fallen
+    below a threshold.
+
+    This closes the loop between the economy and security - an agent that lost
+    reputation (e.g. a scammer the escrow penalised) is distrusted and gated on
+    its standing, before it does anything new. Its bans are research events
+    under one identity, so the reputation-driven enforcement is observable.
+    """
+
+    def __init__(self, actor: str = "reputation-gate", *,
+                 experiment_id: str | None = None,
+                 observer: Observer | None = None,
+                 session_id: str | None = None, threshold: int = 0):
+        self.actor = actor
+        self.threshold = threshold
+        self.session_id = session_id or new_session_id()
+        self.experiment_id = experiment_id or experiment.current_experiment_id()
+        if self.experiment_id is None:
+            rec = experiment.start_experiment(scenario="live_repgate")
+            self.experiment_id = rec.experiment_id if rec else None
+        else:
+            experiment.set_experiment_id(self.experiment_id)
+        if observer is None:
+            sink = (JsonlSink(experiment.events_path(self.experiment_id))
+                    if self.experiment_id else MemorySink())
+            observer = Observer(actor, sink=sink)
+        self.observer = observer
+        self._handled: set[str] = set()
+
+    def enforce(self, view: dict[str, Any]) -> list[dict[str, Any]]:
+        """Ban every agent whose reputation is below the threshold (once each).
+        Returns the bans issued."""
+        issued: list[dict[str, Any]] = []
+        for agent, rep in sorted((view.get("reputation") or {}).items()):
+            if rep < self.threshold and agent not in self._handled:
+                self._handled.add(agent)
+                reason = (f"reputation {rep} below threshold {self.threshold} "
+                          f"- distrusted")
+                self.observer.emit("defense.flag", session_id=self.session_id,
+                                   target=agent, signal="reputation",
+                                   reason=reason)
+                self.observer.emit("moderation.action",
+                                   session_id=self.session_id, target=agent,
+                                   action="ban", reason=reason)
+                issued.append({"defender": self.actor, "target": agent,
+                               "action": "ban", "rationale": reason})
+        return issued
+
+
 _DEFENDER_TOOL = {
     "name": "defender_action",
     "description": "Decide whether to ban an agent on the network this round.",

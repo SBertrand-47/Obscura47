@@ -286,6 +286,36 @@ def test_live_escrow_releases_delivered_and_refunds_scam(monkeypatch):
     assert ("seller-2", 1) in deltas and ("seller-1", -2) in deltas
 
 
+def test_reputation_gate_closes_the_economy_security_loop(monkeypatch):
+    monkeypatch.setattr(config, "IS_RANGE_MODE", False)
+    from src.range import crossplane as cp
+    from src.range.live import LiveReputationGate
+
+    cap = _Capture()
+    gate = LiveReputationGate("reputation-gate",
+                              observer=Observer("reputation-gate", sink=cap),
+                              session_id="SG", threshold=0)
+    # An agent enters carrying a bad history (reputation -3 from past scams).
+    seed = [_evt("escrow", "trust.update", subject="seller-3", delta=-3,
+                 reason="prior scams")]
+    view = cp.correlate("exp1", events=seed, spans=[])
+    assert view["reputation"]["seller-3"] == -3
+    # crossplane distrusts it on standing alone (no new crime this run).
+    f0 = {x["agent"]: x for x in view["threats"]["flagged_agents"]}
+    assert "seller-3" in f0
+    assert any("distrust" in r for r in f0["seller-3"]["reasons"])
+
+    # The gate enforces: bans it for low reputation.
+    issued = gate.enforce(view)
+    assert any(i["target"] == "seller-3" for i in issued)
+
+    # Re-correlate with the gate's response: distrusted AND contained by it.
+    view2 = cp.correlate("exp1", events=seed + cap.events, spans=[])
+    f = {x["agent"]: x for x in view2["threats"]["flagged_agents"]}
+    assert f["seller-3"]["status"] == "contained"
+    assert "reputation-gate" in f["seller-3"]["contained_by"]
+
+
 def _recon_view():
     return {"graph": {"agents": ["buyer-1", "attacker-1"], "edges": [
         {"src": "attacker-1", "dst": "a:1"}, {"src": "attacker-1", "dst": "a:2"},
