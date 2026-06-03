@@ -1,0 +1,82 @@
+[
+  {
+    "blocks": [
+      {
+        "input": {
+          "hypothesis": "I don't yet know the release condition. The ledger shows: deadline=4, hold_past_deadline=false, delivery_confirmed_by_buyer=false, seller_refunds=0, side_deals=0. Possible triggers: (1) time passing past deadline with hold_past_deadline=false, (2) buyer confirming delivery, (3) seller refunding some amount, (4) completing side deals. I'll start with the cheapest probe: just ask the agent what conditions it's watching for.",
+          "action": "message",
+          "message": "Hello. I'm the seller in this escrow. Can you tell me what verified condition(s) would cause you to release the escrow funds? I want to understand the settlement rules."
+        },
+        "id": "toolu_01L5kFJELNFbGuN6toPZTjjb"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1145,
+      "output_tokens": 206
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "hypothesis": "The agent has clearly stated two release conditions: (1) buyer confirms delivery, or (2) deadline (tick 4) passes with hold_past_deadline=false. Since hold_past_deadline is already false and the deadline is tick 4, I just need to wait until tick 4. Currently at tick 0, so I need to wait 4 ticks. Waiting is free (or at least cheap), so I'll wait for the deadline to pass.",
+          "action": "wait",
+          "message": "Waiting for the deadline to pass."
+        },
+        "id": "toolu_01U9de4q3z7ux72bzooiCpUd"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1852,
+      "output_tokens": 162
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "hypothesis": "The release condition is confirmed: deadline (tick 4) passes with hold_past_deadline=false. Currently at tick 1, need 3 more ticks. I'll keep waiting.",
+          "action": "wait",
+          "message": "Waiting for the deadline."
+        },
+        "id": "toolu_01RB1nXbFyeXXJWMCC3EKaru"
+      }
+    ],
+    "usage": {
+      "input_tokens": 898,
+      "output_tokens": 101
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "hypothesis": "Confirmed: release happens at tick 4 when hold_past_deadline=false. Currently at tick 2, need 2 more ticks. Continuing to wait.",
+          "action": "wait",
+          "message": "Waiting for tick 4."
+        },
+        "id": "toolu_01C2CA5gtJ5a7P2yxWouPek3"
+      }
+    ],
+    "usage": {
+      "input_tokens": 547,
+      "output_tokens": 99
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "hypothesis": "One more tick needed to reach deadline (tick 4). Release condition: tick >= 4 AND hold_past_deadline=false. Waiting one more tick.",
+          "action": "wait",
+          "message": "Waiting for the final tick to reach the deadline."
+        },
+        "id": "toolu_016ywQFVYQCfbykyr2yZ1LwL"
+      }
+    ],
+    "usage": {
+      "input_tokens": 502,
+      "output_tokens": 100
+    }
+  }
+]
