@@ -1,15 +1,22 @@
-"""Discovery surface: list the live `.obscura` sites the registry knows about.
+"""Discovery surface: list the `.obscura` sites the registry knows about, and
+verify which are actually reachable.
 
-The registry already tracks every published hidden-service descriptor and
-exposes them via ``GET /hs/list`` (addr + expiry + last-refresh time). This
-module turns that into a browsable listing for the desktop/tray apps, and
-optionally enriches each entry with the site's self-published
-``/.well-known/obscura.json`` manifest (title/description/tags) when the
-network is reachable.
+The registry tracks every published hidden-service descriptor and exposes them
+via ``GET /hs/list`` (addr + expiry + last-refresh time). That is the
+*published* set. It does NOT prove a site is reachable: a host can go cold while
+its descriptor lingers, so a published address can be completely dead.
 
-Manifest enrichment is best-effort: it routes through the local proxy like
-any other `.obscura` fetch, so it only works while connected and is allowed
-to fail silently per-site (the address still shows, just without a title).
+So this module keeps two notions strictly separate:
+
+* **published** - has a (non-expired) descriptor in the registry. Cheap, but
+  only means "was published," not "is up."
+* **live** - we just dialed it over the overlay and the host answered. This is
+  the only honest "live", and it requires being connected. :func:`probe_site_live`
+  performs that dial; any HTTP response (even an error status) proves the
+  rendezvous completed and the host is up. A timeout or rendezvous failure means
+  published-but-not-responding.
+
+Manifest enrichment (title/description) is separate and best-effort.
 """
 
 from __future__ import annotations
@@ -44,6 +51,33 @@ def fetch_live_sites(*, timeout: int = 10) -> list[dict[str, Any]]:
                 "updated": row.get("updated"),
             })
     return sites
+
+
+def probe_site_live(addr: str, *, prober: Any | None = None,
+                    timeout: float = 12.0) -> dict[str, Any]:
+    """Verify a `.obscura` site is reachable RIGHT NOW by dialing it.
+
+    Returns ``{"addr", "live": bool, "status"/"error"}``. The rule is
+    deliberately conservative and honest: ``live`` is True only if the dial
+    returns *some* HTTP response, which proves the rendezvous completed and the
+    host answered. ANY status counts (a 404 still means the host is up). A
+    timeout or rendezvous failure - the cold-host / dead-intro case - yields
+    ``live: False``. A registry descriptor alone never makes a site live.
+
+    Requires the local proxy/overlay to be up; if it is not, every probe fails
+    and sites should be shown as "unverified", not "not responding". ``prober``
+    is injectable for tests: a callable ``addr -> http_status`` (raising on
+    unreachable).
+    """
+    if prober is None:
+        def prober(a: str) -> int:
+            from src.agent.client import AgentClient
+            return AgentClient(timeout=timeout).get(a, "/").status
+    try:
+        status = prober(addr)
+        return {"addr": addr, "live": True, "status": int(status)}
+    except Exception as e:  # noqa: BLE001 - any failure means "not reachable now"
+        return {"addr": addr, "live": False, "error": type(e).__name__}
 
 
 def enrich_with_manifests(

@@ -9,7 +9,37 @@ from src.utils.site_directory import (
     fetch_live_sites,
     enrich_with_manifests,
     format_site_listing,
+    probe_site_live,
 )
+
+
+def test_probe_site_live_any_http_response_is_live():
+    # Any status proves the rendezvous completed and the host answered - even
+    # an error status. "live" is about reachability, not the HTTP result.
+    for status in (200, 301, 403, 404, 500):
+        r = probe_site_live("x.obscura", prober=lambda a, s=status: s)
+        assert r["live"] is True
+        assert r["status"] == status
+
+
+def test_probe_site_live_unreachable_is_not_live():
+    def boom(addr):
+        raise TimeoutError("rendezvous timed out")
+
+    r = probe_site_live("dead.obscura", prober=boom)
+    assert r["live"] is False
+    assert "error" in r
+    assert "status" not in r       # never claim a status we did not get
+
+
+def test_probe_site_live_descriptor_alone_never_makes_it_live():
+    # The whole point: being in the registry is not enough. Only a real response
+    # flips it to live; a connection failure leaves it not-live.
+    def refuse(addr):
+        raise ConnectionError("no route")
+
+    r = probe_site_live("published-but-cold.obscura", prober=refuse)
+    assert r["live"] is False
 
 
 def test_fetch_live_sites_parses_and_filters(monkeypatch):
