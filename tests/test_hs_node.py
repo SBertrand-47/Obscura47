@@ -69,6 +69,26 @@ def test_establish_registers_service(fake):
     assert fake._hs_services['svc.obscura'] == 'HOST1'
 
 
+def test_establish_acks_the_host(fake):
+    """The intro point confirms registration back to the host so the host can
+    safely publish this intro (and not advertise one it can't reach)."""
+    host_priv, host_pub = ecc_generate_keypair()
+    fake.register_channel('HOST1', host_pub)
+    fake._hs_terminal_establish({
+        'type': 'hs_establish', 'request_id': 'HOST1',
+        'service_addr': 'svc.obscura', 'pub': host_pub,
+    })
+    assert len(fake.sent) == 1
+    target, frame = fake.sent[0]
+    assert target == 'HOST1'
+    inner = _decode_reverse(frame, host_priv)
+    assert inner == {
+        'type': 'hs_establish_ack',
+        'service_addr': 'svc.obscura',
+        'request_id': 'HOST1',
+    }
+
+
 def test_introduce_is_relayed_to_host(fake):
     host_priv, host_pub = ecc_generate_keypair()
     fake.register_channel('HOST1', host_pub)
@@ -76,6 +96,7 @@ def test_introduce_is_relayed_to_host(fake):
         'type': 'hs_establish', 'request_id': 'HOST1',
         'service_addr': 'svc.obscura', 'pub': host_pub,
     })
+    fake.sent.clear()  # drop the establish ack; we assert on the introduce
     fake._hs_terminal_introduce({
         'type': 'hs_introduce', 'request_id': 'INTRO1',
         'service_addr': 'svc.obscura',
