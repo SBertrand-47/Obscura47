@@ -141,6 +141,36 @@ def test_operated_site_observable_through_crossplane():
     assert "operated website" in txt
 
 
+def test_operated_site_chart_data_and_rendering():
+    """The operated-site lens carries the aggregates the dashboard charts need
+    (served/refused split, per-visitor rollup with probe flags, timestamps),
+    and the charts strip renders them."""
+    view = run_demo_site()
+    op = view["operated_site"]
+
+    # Served vs refused: The Stacks serves 4 readers and refuses 2 probes.
+    assert op["served"] == 4
+    assert op["refused"] == 2
+    assert op["served"] + op["refused"] == op["request_count"]
+    assert sum(c for s, c in op["by_status"].items() if s < 400) == 4
+    assert {400, 403} <= set(op["by_status"])
+
+    # Per-visitor rollup flags the probe source (visitor 'cy', 2 refused).
+    probed = [v for v in op["visitor_stats"] if v["probed"]]
+    assert len(probed) == 1
+    assert probed[0]["refused"] == 2
+
+    # Every request carries a timestamp for the timeline.
+    assert all(r["ts"] is not None for r in op["requests"])
+
+    html = crossplane.render_html(view)
+    assert "request timeline" in html
+    assert 'svg class="rtl"' in html
+    assert "requests per visitor" in html
+    # The probe source is badged in the per-visitor bars.
+    assert "probed" in html
+
+
 def test_builtin_demo_renders_and_catches_a_probe():
     """The key-free demo replays deterministically: the operator serves
     genuine readers and refuses a path-traversal / admin probe, all visible."""

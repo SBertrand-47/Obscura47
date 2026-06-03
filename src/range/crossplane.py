@@ -337,40 +337,72 @@ def _operated_site(events: list[Any] | None) -> dict[str, Any]:
     a live `.obscura` site whose every served response is attributable to a
     decision, so visitors and the operator's reasoning sit side by side."""
     requests: list[dict[str, Any]] = []
-    visitors: dict[str, int] = {}
+    visitors: dict[str, dict[str, int]] = {}
     operators: dict[str, int] = {}
-    remembered = 0
+    by_status: dict[int, int] = {}
+    remembered = served = refused = 0
+    timestamps: list[float] = []
     for e in events or []:
         if getattr(e, "kind", None) != "site.serve":
             continue
         p = getattr(e, "payload", {}) or {}
         visitor = p.get("visitor")
         operator = getattr(e, "actor", None)
+        status = int(p.get("status") or 0)
+        ts = getattr(e, "ts", None)
         rec = {
             "operator": operator,
             "session": getattr(e, "session_id", None),
             "visitor": visitor,
             "method": p.get("method"),
             "path": p.get("path"),
-            "status": p.get("status"),
+            "status": status,
             "rationale": p.get("rationale"),
             "remembered": bool(p.get("remembered")),
             "bytes_out": p.get("bytes_out"),
+            "ts": ts,
         }
         requests.append(rec)
+        if ts is not None:
+            timestamps.append(float(ts))
+        # A refused request (4xx/5xx) is the operator turning someone away -
+        # the "it caught a probe" signal worth charting separately.
+        is_refused = status >= 400
+        if is_refused:
+            refused += 1
+        elif status:
+            served += 1
+        by_status[status] = by_status.get(status, 0) + 1
         key = (visitor or "local/unknown")
-        visitors[key] = visitors.get(key, 0) + 1
+        v = visitors.setdefault(key, {"count": 0, "refused": 0})
+        v["count"] += 1
+        if is_refused:
+            v["refused"] += 1
         if operator:
             operators[operator] = operators.get(operator, 0) + 1
         if rec["remembered"]:
             remembered += 1
+    # Per-visitor rollup; a visitor with any refused request is flagged as a
+    # probe source (the repeat-offender story).
+    visitor_stats = [
+        {"visitor": k, "count": v["count"], "refused": v["refused"],
+         "probed": v["refused"] > 0}
+        for k, v in sorted(visitors.items(),
+                           key=lambda kv: (-kv[1]["count"], kv[0]))
+    ]
     return {
         "requests": requests,
         "request_count": len(requests),
         "unique_visitors": len([v for v in visitors if v != "local/unknown"]),
-        "visitors": visitors,
+        "visitors": {k: v["count"] for k, v in visitors.items()},
+        "visitor_stats": visitor_stats,
         "operators": sorted(operators),
         "remembered": remembered,
+        "served": served,
+        "refused": refused,
+        "by_status": by_status,
+        "first_ts": min(timestamps) if timestamps else None,
+        "last_ts": max(timestamps) if timestamps else None,
     }
 
 
@@ -940,6 +972,103 @@ def _svg_graph(graph: dict, flagged: set[str],
     return "".join(parts)
 
 
+def _svg_request_timeline(site: dict[str, Any]) -> str:
+    """A horizontal timeline of an operated site's requests: one dot per
+    request, green for served and red for refused, placed by time when the run
+    spans real wall-clock and by sequence otherwise (e.g. a tight replay)."""
+    reqs = site.get("requests") or []
+    if not reqs:
+        return ""
+    W, H, pad = 920, 64, 16
+    y = H / 2
+    first, last = site.get("first_ts"), site.get("last_ts")
+    span = (last - first) if (first is not None and last is not None) else 0
+    time_mode = bool(span and span > 1.0)
+    n = len(reqs)
+
+    def xpos(i: int, r: dict) -> float:
+        if time_mode and r.get("ts") is not None:
+            return pad + (W - 2 * pad) * (float(r["ts"]) - first) / span
+        if n == 1:
+            return W / 2
+        return pad + (W - 2 * pad) * (i / (n - 1))
+
+    parts = [f'<svg class="rtl" viewBox="0 0 {W} {H}" '
+             f'preserveAspectRatio="xMidYMid meet">',
+             f'<line x1="{pad}" y1="{y}" x2="{W - pad}" y2="{y}" '
+             f'stroke="#2c3344" stroke-width="1"/>']
+    for i, r in enumerate(reqs):
+        x = xpos(i, r)
+        refused = (r.get("status") or 0) >= 400
+        col = "#f85149" if refused else "#3fb950"
+        rad = 6 if refused else 5
+        tip = (f'{r.get("method") or ""} {r.get("path") or ""} '
+               f'[{r.get("status")}]')
+        parts.append(
+            f'<circle cx="{x:.1f}" cy="{y}" r="{rad}" fill="{col}" '
+            f'stroke="#0b0d12" stroke-width="1.5"><title>{_esc(tip)}</title>'
+            f'</circle>')
+    parts.append("</svg>")
+    mode = "by time" if time_mode else "in sequence"
+    return (f'<div class="rtlcap">request timeline ({mode}) '
+            f'&middot; green served, red refused</div>{"".join(parts)}')
+
+
+def _site_charts_html(site: dict[str, Any]) -> str:
+    """A compact, self-contained charts strip for an operated site: stat tiles,
+    a served-vs-refused split, a per-visitor bar list, and a request timeline.
+    Inline HTML + SVG, no JS - so it survives being saved to a single file."""
+    total = site.get("request_count", 0)
+    if not total:
+        return ""
+    served = site.get("served", 0)
+    refused = site.get("refused", 0)
+
+    tiles = [
+        ("requests", total, "#9ec1ff"),
+        ("served", served, "#3fb950"),
+        ("refused", refused, "#f85149" if refused else "#8b95a5"),
+        ("visitors", site.get("unique_visitors", 0), "#9ec1ff"),
+        ("remembered", site.get("remembered", 0), "#9ec1ff"),
+    ]
+    tile_html = "".join(
+        f'<div class="stile"><span class="sv" style="color:{c}">{v}</span>'
+        f'<span class="sk">{k}</span></div>' for k, v, c in tiles)
+
+    bar_html = ""
+    if served or refused:
+        sp = round(100 * served / total) if total else 0
+        segs = ""
+        if served:
+            segs += (f'<div class="sseg" style="width:{max(sp, 1)}%;'
+                     f'background:#2e7d32">{served} served</div>')
+        if refused:
+            segs += (f'<div class="sseg" style="width:{max(100 - sp, 1)}%;'
+                     f'background:#c62828">{refused} refused</div>')
+        bar_html = f'<div class="sbar">{segs}</div>'
+
+    vstats = site.get("visitor_stats") or []
+    maxc = max((v["count"] for v in vstats), default=1)
+    vrows = ""
+    for v in vstats[:8]:
+        name = v["visitor"]
+        label = "local" if name == "local/unknown" else name[:10]
+        w = max(6, round(100 * v["count"] / maxc))
+        flag = ' <span class="badge bad">probed</span>' if v["probed"] else ""
+        vrows += (f'<div class="vrow"><span class="vname">{_esc(label)}{flag}'
+                  f'</span><div class="vbar"><div class="vfill" '
+                  f'style="width:{w}%"></div></div>'
+                  f'<span class="vct">{v["count"]}</span></div>')
+    visitors_html = (f'<div class="vlist"><div class="ccap">requests per visitor'
+                     f'</div>{vrows}</div>') if vrows else ""
+
+    return (
+        f'<div class="stiles">{tile_html}</div>'
+        f'{bar_html}'
+        f'<div class="chartrow">{visitors_html}'
+        f'<div class="tlbox">{_svg_request_timeline(site)}</div></div>')
+
+
 def render_html(view: dict[str, Any]) -> str:
     """Render the correlated cross-plane view as a polished, self-contained
     dashboard: a node-link traffic graph, a threat panel, and per-session
@@ -1024,6 +1153,8 @@ def render_html(view: dict[str, Any]) -> str:
             f'{site["request_count"]} request(s) to '
             f'{site["unique_visitors"]} visitor(s) - every response is a '
             f'recorded decision with the operator\'s rationale.</p>'
+            f'{_site_charts_html(site)}'
+            f'<h3>decisions</h3>'
             f'<table class="tl"><thead><tr><th>request</th><th>visitor</th>'
             f'<th>status</th><th>operator rationale</th></tr></thead>'
             f'<tbody>{rows}</tbody></table></section>')
@@ -1203,6 +1334,28 @@ def render_html(view: dict[str, Any]) -> str:
  .tl th{{color:#8b95a5}} .tl td.pl{{font-weight:700;width:84px}}
  .tl tr.r td.pl{{color:#7aa2f7}} .tl tr.o td.pl{{color:#9ece6a}}
  .empty{{color:#5a6473;font-style:italic}}
+ .stiles{{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 12px}}
+ .stile{{background:#0d1422;border:1px solid #243049;border-radius:9px;
+   padding:8px 16px;min-width:84px}}
+ .stile .sv{{display:block;font-size:21px;font-weight:700}}
+ .stile .sk{{display:block;font-size:10px;color:#8b95a5;text-transform:uppercase;
+   letter-spacing:.04em}}
+ .sbar{{display:flex;height:24px;border-radius:6px;overflow:hidden;margin:6px 0
+   12px;border:1px solid #222838}}
+ .sseg{{display:flex;align-items:center;justify-content:center;color:#fff;
+   font-size:11px;font-weight:700;min-width:0}}
+ .chartrow{{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}}
+ .vlist{{flex:1;min-width:240px}}
+ .tlbox{{flex:2;min-width:300px}}
+ .ccap,.rtlcap{{color:#8b95a5;font-size:11px;text-transform:uppercase;
+   letter-spacing:.04em;margin:6px 0 6px}}
+ .vrow{{display:flex;align-items:center;gap:8px;margin:5px 0}}
+ .vname{{width:120px;font:12px ui-monospace,Menlo,monospace;color:#cdd6e6;
+   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+ .vbar{{flex:1;height:9px;background:#161c2b;border-radius:5px;overflow:hidden}}
+ .vfill{{height:100%;background:#3fae5a;border-radius:5px}}
+ .vct{{width:24px;text-align:right;color:#9aa6b8;font-size:12px}}
+ svg.rtl{{display:block;width:100%;height:auto}}
 </style></head><body>
 <div class="hero"><div class="wrap">
 <h1>What the agents did on Obscura</h1>
