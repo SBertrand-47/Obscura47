@@ -379,6 +379,7 @@ def _site_card(
     enabled: bool | None = None,
     on_toggle=None,
     on_delete=None,
+    on_badge=None,
 ) -> QFrame:
     """One result/listing row: title, mono address, info, Copy + Open.
 
@@ -401,10 +402,14 @@ def _site_card(
     name.setObjectName("CardTitle")
     name.setWordWrap(True)
     top.addWidget(name, 1)
-    if badge:
-        chip = QLabel(badge)
+    if badge or on_badge is not None:
+        chip = QLabel(badge or "")
         chip.setStyleSheet(f"color: {badge_color}; font-size: 11px; font-weight: 600;")
         top.addWidget(chip, 0, Qt.AlignTop)
+        # Hand the chip back so the caller can update it later (e.g. Discover
+        # flipping a card from "checking" to "live" as its probe completes).
+        if on_badge is not None:
+            on_badge(chip)
     lay.addLayout(top)
 
     # Show (and copy) a browser-ready URL so users do not have to add a scheme.
@@ -469,6 +474,8 @@ class _DiscoverDialog(QDialog):
 
     # sites, ok, error_text - emitted from the worker thread, handled on UI thread.
     _loaded = Signal(list, bool, str)
+    # addr, live - emitted per site as its liveness probe (a real dial) returns.
+    _liveness = Signal(str, bool)
 
     def __init__(self, parent, *, connected: bool, on_open, on_copy, on_log):
         super().__init__(parent)
@@ -478,17 +485,24 @@ class _DiscoverDialog(QDialog):
         self._on_open = on_open
         self._on_copy = on_copy
         self._on_log = on_log
+        self._chips: dict[str, QLabel] = {}   # addr -> status chip label
+        self._published = 0
+        self._live = 0
+        self._probe_gen = 0                   # invalidates stale probe threads
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(22, 20, 22, 18)
         outer.setSpacing(14)
 
-        header = QLabel("Live .obscura sites")
+        header = QLabel("Discover .obscura sites")
         header.setObjectName("CardTitle")
         header.setStyleSheet("font-size: 16px; font-weight: 700;")
         outer.addWidget(header)
-        sub = QLabel("Every site currently published to the network registry.")
+        sub = QLabel("Every address published to the registry. 'Live' means we "
+                     "just reached it; 'not responding' means it is published "
+                     "but its host is down.")
         sub.setObjectName("CardSub")
+        sub.setWordWrap(True)
         outer.addWidget(sub)
 
         self._stack = QStackedWidget()
@@ -546,12 +560,15 @@ class _DiscoverDialog(QDialog):
         outer.addLayout(footer)
 
         self._loaded.connect(self._on_loaded)
+        self._liveness.connect(self._on_liveness)
         self._start()
 
     def _start(self):
         self._stack.setCurrentIndex(0)
         self._count.setText("")
         self._refresh_btn.setEnabled(False)
+        self._chips.clear()
+        self._probe_gen += 1                  # cancel any in-flight probes
         threading.Thread(target=self._fetch, daemon=True).start()
 
     def _fetch(self):
@@ -571,6 +588,20 @@ class _DiscoverDialog(QDialog):
         except Exception as exc:
             self._loaded.emit([], False, str(exc))
 
+    def _probe_liveness(self, addrs: list, gen: int):
+        """Dial each published site to verify it is actually reachable, emitting
+        a result per site so its card flips from 'checking' to live / not
+        responding. Sequential to avoid opening many circuits at once; a newer
+        Refresh (higher gen) abandons this run."""
+        from src.utils.site_directory import probe_site_live
+        for addr in addrs:
+            if gen != self._probe_gen:
+                return
+            result = probe_site_live(addr)
+            if gen != self._probe_gen:
+                return
+            self._liveness.emit(addr, bool(result.get("live")))
+
     def _on_loaded(self, sites: list, ok: bool, err: str):
         self._refresh_btn.setEnabled(True)
         # Clear previous cards (keep the trailing stretch at the end).
@@ -589,19 +620,50 @@ class _DiscoverDialog(QDialog):
             self._on_log("Site discovery failed.")
             return
         if not sites:
-            self._count.setText("0 sites")
+            self._published = self._live = 0
+            self._count.setText("0 published")
             self._results.insertWidget(0, _hint_card(
-                "No live .obscura sites are currently published to the "
-                "registry.\n\nIf you're hosting one, make sure it's running "
-                "and connected."))
-            self._on_log("Site discovery complete: no live sites.")
+                "No .obscura sites are currently published to the registry.\n\n"
+                "If you're hosting one, make sure it's running and connected."))
+            self._on_log("Site discovery complete: nothing published.")
             return
 
-        self._count.setText(f"{len(sites)} live site(s)")
+        self._published = len(sites)
+        self._live = 0
+        self._update_count()
         now = time.time()
         for i, site in enumerate(sites):
             self._results.insertWidget(i, self._build_card(site, now))
-        self._on_log(f"Site discovery complete: {len(sites)} live site(s).")
+        # Verify reachability with real dials - only honest way to call a site
+        # live. Needs the overlay up; otherwise everything stays "unverified".
+        if self._connected:
+            addrs = [s.get("addr") for s in sites if s.get("addr")]
+            self._on_log(f"{len(sites)} published; dialing to verify which are "
+                         f"live…")
+            threading.Thread(target=self._probe_liveness,
+                             args=(addrs, self._probe_gen), daemon=True).start()
+        else:
+            self._on_log(f"{len(sites)} published (connect to verify which are "
+                         f"live).")
+
+    def _update_count(self):
+        if self._connected:
+            self._count.setText(f"{self._published} published · {self._live} live")
+        else:
+            self._count.setText(f"{self._published} published · connect to verify")
+
+    def _on_liveness(self, addr: str, live: bool):
+        chip = self._chips.get(addr)
+        if chip is None:
+            return
+        if live:
+            chip.setText("● live")
+            chip.setStyleSheet(f"color: {GREEN}; font-size: 11px; font-weight: 700;")
+            self._live += 1
+        else:
+            chip.setText("● not responding")
+            chip.setStyleSheet(f"color: {RED}; font-size: 11px; font-weight: 600;")
+        self._update_count()
 
     def _build_card(self, site: dict, now: float) -> QFrame:
         addr = site.get("addr", "?")
@@ -613,12 +675,16 @@ class _DiscoverDialog(QDialog):
         updated = site.get("updated")
         if isinstance(updated, (int, float)):
             info_lines.append(f"Last seen: {_format_age(now - updated)}")
+        badge = "● checking…" if self._connected else "● unverified"
         return _site_card(
             title=title or addr,
             address=addr,
             info_lines=info_lines,
+            badge=badge,
+            badge_color=TEXT_DIM,
             on_open=self._on_open,
             on_copy=self._on_copy,
+            on_badge=lambda lbl, a=addr: self._chips.__setitem__(a, lbl),
         )
 
 
