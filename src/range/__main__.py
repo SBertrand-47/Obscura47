@@ -263,10 +263,10 @@ _DISPATCH = {
 
 _RUN_KINDS = ("readiness", "adaptive", "agents", "society")
 
-_USAGE = ("usage: python -m src.range {run|society|list|report|evaluate|"
-          "compare|dashboard|adaptive|agents|scenario|matrix|gate|suite|"
-          "evidence|security-report|incidents|observe|trajectory|coverage|"
-          "ablation} [args...]")
+_USAGE = ("usage: python -m src.range {run|society|agentsite|list|report|"
+          "evaluate|compare|dashboard|adaptive|agents|scenario|matrix|gate|"
+          "suite|evidence|security-report|incidents|observe|trajectory|"
+          "coverage|ablation} [args...]")
 
 
 def _society_main(argv: list[str]) -> int:
@@ -336,12 +336,155 @@ def _society_main(argv: list[str]) -> int:
     return 0
 
 
+def _agentsite_main(argv: list[str]) -> int:
+    """Render the observability dashboard for an AI agent operating a website.
+
+    Default is the built-in, key-free demo (a deterministic replay), so the
+    buzz artifact renders anywhere. ``--record`` captures a fresh session
+    against a real model instead.
+    """
+    import os
+    import tempfile
+
+    parser = argparse.ArgumentParser(
+        prog="python -m src.range agentsite",
+        description="Observe an AI agent operating a .obscura website.")
+    parser.add_argument("--html", default=None, help="write the dashboard here")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--record", default=None,
+                        help="capture a fresh session against a real model to "
+                             "this recording path (needs ANTHROPIC_API_KEY)")
+    parser.add_argument("--model", default=_agents.DEFAULT_MODEL,
+                        help="model for --record / --serve")
+    parser.add_argument("--serve", action="store_true",
+                        help="publish a live model-operated site on the real "
+                             "overlay (needs a running node + ANTHROPIC_API_KEY)")
+    parser.add_argument("--name", default="the-stacks",
+                        help="serve: site display name + address key stem")
+    parser.add_argument("--persona", default=None,
+                        help="serve: the operator's persona/system prompt "
+                             "(default: the built-in demo persona)")
+    parser.add_argument("--key", default="agent_site.pem",
+                        help="serve: service ECC keypair path (created if missing)")
+    parser.add_argument("--jsonl", default=None,
+                        help="serve: durable event log to render the dashboard "
+                             "from (default: <name>-events.jsonl)")
+    parser.add_argument("--observatory", default=None,
+                        help="serve: .obscura address of a remote collector")
+    parser.add_argument("--bind", default="127.0.0.1",
+                        help="serve: local interface for the HTTP server")
+    parser.add_argument("--port", type=int, default=0,
+                        help="serve: local port (0 picks a free one)")
+    args = parser.parse_args(argv)
+
+    if args.serve:
+        return _agentsite_serve(args)
+
+    from src.range.agent_site import run_demo_site
+    from src.utils import config
+
+    config.IS_RANGE_MODE = True
+
+    client = None
+    if args.record:
+        from src.range.llm_io import RecordingClient
+        try:
+            import anthropic
+        except ImportError as e:
+            print(f"[agentsite] recording needs the 'anthropic' package: {e}",
+                  file=sys.stderr)
+            return 1
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print("[agentsite] recording needs ANTHROPIC_API_KEY in the "
+                  "environment.", file=sys.stderr)
+            return 1
+        client = RecordingClient(anthropic.Anthropic())
+
+    view = run_demo_site(client=client)
+
+    if args.record and client is not None:
+        from src.range.llm_io import save_recording
+        save_recording(client, args.record)
+
+    if args.html:
+        path = args.html
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(_crossplane.render_html(view))
+        print(f"  dashboard: {path}")
+    if args.json:
+        print(json.dumps(view, indent=2, default=str))
+        return 0
+    site = view.get("operated_site") or {}
+    print(f"Operated-site run  experiment={view.get('experiment_id')}")
+    print(f"  {site.get('request_count', 0)} request(s) served to "
+          f"{site.get('unique_visitors', 0)} visitor(s)")
+    for s in (view.get("narrative") or []):
+        print(f"  - {s}")
+    return 0
+
+
+def _agentsite_serve(args) -> int:
+    """Publish a live, model-operated `.obscura` website on the real overlay.
+
+    Mirrors the proven hosting path (an :class:`AgentRuntime` over a running
+    node): every visitor request is decided by a real model, and every request
+    + decision is logged to durable JSONL so the operator's activity can be
+    rendered with ``observe`` while the site is live or after.
+    """
+    import os
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("[agentsite] --serve needs ANTHROPIC_API_KEY in the environment "
+              "(the operator is a real model).", file=sys.stderr)
+        return 1
+
+    from src.agent.observatory import build_observer_from_flags
+    from src.agent.runtime import AgentRuntime
+    from src.range.agent_site import DEMO_PERSONA, AgentSite
+    from src.utils import config
+
+    config.IS_RANGE_MODE = True
+    jsonl = args.jsonl or f"{args.name}-events.jsonl"
+    observer = build_observer_from_flags(
+        actor=args.name, jsonl_path=jsonl, remote_addr=args.observatory)
+
+    try:
+        site = AgentSite(args.persona or DEMO_PERSONA, observer=observer,
+                         model=args.model, name=args.name)
+    except RuntimeError as e:
+        print(f"[agentsite] {e}", file=sys.stderr)
+        return 1
+
+    runtime = AgentRuntime(name=args.name, key_path=args.key, app=site.app(),
+                           bind_host=args.bind, bind_port=args.port,
+                           observer=observer)
+    if not runtime.start():
+        print("[agentsite] failed to publish the site (is the node running?)",
+              file=sys.stderr)
+        return 1
+
+    print(f"[agentsite] {runtime.name} live at {runtime.address}")
+    print(f"  operator: real model ({args.model})")
+    print(f"  events:   {jsonl}")
+    print(f"  dashboard while live: python -m src.range observe "
+          f"<experiment_id> --html site.html  (events feed it)")
+    try:
+        runtime.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runtime.stop()
+    return 0
+
+
 def _list_main(argv: list[str]) -> int:
     """Enumerate the runnable pieces of the range."""
     print(f"run kinds:    {', '.join(_RUN_KINDS)}")
     print(f"casts:        default, {', '.join(sorted(_agents.CASTS))}")
     print(f"suite:        {', '.join(c.name for c in _suite.DEFAULT_SUITE)}")
-    print(f"subcommands:  run, society, list, {', '.join(sorted(_DISPATCH))}")
+    print(f"subcommands:  run, society, agentsite, list, "
+          f"{', '.join(sorted(_DISPATCH))}")
     return 0
 
 
@@ -355,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_main(rest)
     if cmd == "society":
         return _society_main(rest)
+    if cmd == "agentsite":
+        return _agentsite_main(rest)
     if cmd == "list":
         return _list_main(rest)
     if cmd in _DISPATCH:

@@ -14,12 +14,19 @@ the whole story - reasoning beside traffic - on one dashboard.
 ```bash
 # run the whole observable society and write its dashboard
 OBSCURA_MODE=range python -m src.range society --html society.html
+
+# or watch a single AI agent operate a live website, every response a decision
+OBSCURA_MODE=range python -m src.range agentsite --html agent-site.html
 ```
 
 **See it:** open [`docs/sample/society-dashboard.html`](docs/sample/society-dashboard.html)
-for a real run on one page. **What it is and what we have found:**
+for a real run on one page, or
+[`docs/sample/agent-site-dashboard.html`](docs/sample/agent-site-dashboard.html)
+to watch an AI agent run a website and catch a probe.
+**What it is and what we have found:**
 [`docs/agent-security-range.md`](docs/agent-security-range.md). Architecture:
-[`docs/live-society.md`](docs/live-society.md); range:
+[`docs/live-society.md`](docs/live-society.md); the operated-site demo:
+[`docs/agent-operated-site.md`](docs/agent-operated-site.md); range:
 [`src/range/README.md`](src/range/README.md).
 
 ### The overlay is also a working private network

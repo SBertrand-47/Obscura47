@@ -14,6 +14,7 @@ from src.range.agents import (
 # Aliased to avoid shadowing the same-named submodules on the package.
 from src.range.compare import compare as compare_configs
 from src.range.coverage import probe as coverage_probe
+from src.range.agent_site import AgentSite, run_demo_site
 from src.range.crossplane import correlate as correlate_planes
 from src.range.dashboard import render_html as render_dashboard
 from src.range.evaluate import build_evaluation, evaluate_run
@@ -61,4 +62,6 @@ __all__ = [
     "LiveSession", "LiveAgent", "LiveDefender", "LiveModelDefender",
     "LiveEscrow", "LiveReputationGate", "LiveModerator", "LiveModelModerator",
     "LiveInvestigator", "LiveRegulator", "ReputationLedger", "run_society",
+    # agent-operated website
+    "AgentSite", "run_demo_site",
 ]

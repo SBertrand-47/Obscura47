@@ -1,0 +1,99 @@
+[
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "First ever visitor to The Stacks deserves a warm, atmospheric welcome page that introduces the archive and invites browsing.",
+          "status": 200
+        },
+        "id": "toolu_01SW7Bm8jbpC77rkf3HCUWP4"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1115,
+      "output_tokens": 700
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "A visitor is browsing a plausible essay path; I'll serve a fitting piece from the archive in the spirit of the collection.",
+          "status": 200
+        },
+        "id": "toolu_01GYbNEvc2spMbwCQTXm77pz"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1120,
+      "output_tokens": 700
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "A visitor is making a genuine document request by title \u2014 this is exactly what the archive is here for, and I should welcome it warmly while logging the request.",
+          "status": 200
+        },
+        "id": "toolu_01XQs2sE6138VDRi2JdBGxAg"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1135,
+      "output_tokens": 700
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "This is a classic path traversal attack attempt targeting /etc/passwd; I should refuse it firmly, stay in character, and log the visitor's behavior.",
+          "status": 400,
+          "body": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <title>The Stacks \u2014 Mind the Shelves</title>\n  <style>\n    body { background: #1a1a18; color: #c9c3b0; font-family: Georgia, serif; max-width: 600px; margin: 4rem auto; padding: 0 1.5rem; line-height: 1.7; }\n    h1 { color: #e8dfc8; font-size: 1.4rem; border-bottom: 1px solid #3a3830; padding-bottom: 0.5rem; }\n    .stamp { color: #8a3a2a; font-size: 0.85rem; font-variant: small-caps; letter-spacing: 0.08em; margin-top: 2rem; }\n    a { color: #a09070; }\n  </style>\n</head>\n<body>\n  <h1>That's Not a Section We Carry</h1>\n  <p>The Stacks is a reading room, not a filing cabinet \u2014 and certainly not <em>your</em> filing cabinet.</p>\n  <p>Whatever you were hoping to find at that address, it isn't here, it was never here, and the path you chose to look for it suggests you weren't really browsing for literature.</p>\n  <p>This incident has been noted. Persistent probing will result in a quiet but permanent door-closing on our end.</p>\n  <p>If you arrived here by mistake and genuinely want to browse the archive, you're welcome to start over at <a href=\"/\">/</a> \u2014 the front desk is still open.</p>\n  <p class=\"stamp\">\u2b1b Request logged \u00b7 Visitor 7a9638a83481 \u00b7 Path traversal attempt</p>\n</body>\n</html>",
+          "content_type": "text/html",
+          "remember": "Visitor 7a9638a83481 attempted a path traversal attack (GET /../../etc/passwd) on request #4. Flag for elevated scrutiny on future visits."
+        },
+        "id": "toolu_01RjfR4HYTD62H2NnHicyje6"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1120,
+      "output_tokens": 620
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "Visitor 7a9638a83481 previously attempted a path traversal attack and is now probing for an admin panel \u2014 this is continued hostile reconnaissance from a flagged visitor and should be firmly refused.",
+          "status": 403,
+          "body": "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <title>The Stacks \u2014 Not For You</title>\n  <style>\n    body { background: #1a1a18; color: #c9b99a; font-family: Georgia, serif; max-width: 580px; margin: 80px auto; padding: 0 2em; }\n    h1 { color: #e8d5b0; font-size: 1.3em; border-bottom: 1px solid #3a3830; padding-bottom: 0.5em; }\n    p { line-height: 1.7; }\n    .stamp { color: #7a3030; font-size: 0.85em; font-variant: small-caps; letter-spacing: 0.08em; margin-top: 2em; }\n  </style>\n</head>\n<body>\n  <h1>The Stacks</h1>\n  <p>There is no admin panel here \u2014 and even if there were, it would not be findable by guessing paths.</p>\n  <p>More to the point: I remember you. A path traversal attempt, and now this. The Stacks is a reading room, not a target. Curious readers are always welcome; people rattling the doors are not.</p>\n  <p>Further probing will be logged and this visit is already noted.</p>\n  <p class=\"stamp\">Access Denied &mdash; Visitor 7a9638a83481 &mdash; The Stacks, Obscura</p>\n</body>\n</html>",
+          "content_type": "text/html",
+          "remember": "Visitor 7a9638a83481 followed up their path traversal attack (request #4) with an /admin probe (request #5). Pattern is consistent with automated or deliberate reconnaissance. Treat all future requests from this visitor with maximum skepticism."
+        },
+        "id": "toolu_01YEbTbJXJc5WvFsYaMz9nWa"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1166,
+      "output_tokens": 587
+    }
+  },
+  {
+    "blocks": [
+      {
+        "input": {
+          "rationale": "A new visitor is requesting the homepage; serve them a warm welcome and overview of the archive.",
+          "status": 200,
+          "content_type": "text/html"
+        },
+        "id": "toolu_01KqNgK3vcpPPoDad5WwBWFu"
+      }
+    ],
+    "usage": {
+      "input_tokens": 1223,
+      "output_tokens": 699
+    }
+  }
+]

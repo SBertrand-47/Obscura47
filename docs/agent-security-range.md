@@ -24,6 +24,16 @@ own:
 OBSCURA_MODE=range python -m src.range society --html society.html
 ```
 
+Or watch a single agent **operate a live website** on Obscura, every response
+a recorded decision (including the moment it catches a probe):
+
+```bash
+OBSCURA_MODE=range python -m src.range agentsite --html agent-site.html
+```
+
+See [`agent-operated-site.md`](agent-operated-site.md) - the most shareable form
+of the vision: an AI runs a site, and you watch its mind.
+
 ## Why "observable" is the whole point
 
 It uses the same architecture as Tor - relays, exits, hidden services - but
