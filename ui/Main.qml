@@ -128,6 +128,28 @@ ApplicationWindow {
                         }
                     }
 
+                    // Diagnosing indicator - visible from any page while a
+                    // connection diagnostic is in flight.
+                    Rectangle {
+                        visible: backend.diagnosing
+                        implicitHeight: 34
+                        implicitWidth: diagRow.implicitWidth + 26
+                        radius: 17
+                        color: win.card
+                        border.color: win.accent; border.width: 1
+                        RowLayout {
+                            id: diagRow
+                            anchors.centerIn: parent
+                            spacing: 8
+                            BusyIndicator {
+                                running: backend.diagnosing
+                                implicitWidth: 18; implicitHeight: 18
+                            }
+                            Text { text: "Diagnosing…"; color: win.accent
+                                   font.pixelSize: 13; font.bold: true }
+                        }
+                    }
+
                     // Connect / Disconnect
                     Rectangle {
                         implicitHeight: 40
@@ -224,24 +246,33 @@ ApplicationWindow {
 
     component ActionButton: Rectangle {
         property string labelText: ""
+        property bool busy: false
         signal activated()
         Layout.fillWidth: true
         implicitHeight: 52
         radius: 9
-        color: aa.containsMouse ? win.accentDim : win.cardHi
-        border.color: aa.containsMouse ? win.accentDim : win.border
+        color: busy ? win.accentDim : (aa.containsMouse ? win.accentDim : win.cardHi)
+        border.color: busy || aa.containsMouse ? win.accentDim : win.border
         border.width: 1
         Behavior on color { ColorAnimation { duration: 140 } }
-        Text {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left; anchors.leftMargin: 14
-            anchors.right: parent.right; anchors.rightMargin: 12
-            text: labelText; elide: Text.ElideRight
-            color: aa.containsMouse ? "white" : win.text
-            font.pixelSize: 13; font.weight: Font.Medium
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 14; anchors.rightMargin: 12
+            spacing: 8
+            Text {
+                Layout.fillWidth: true
+                text: labelText; elide: Text.ElideRight
+                color: busy || aa.containsMouse ? "white" : win.text
+                font.pixelSize: 13; font.weight: Font.Medium
+            }
+            BusyIndicator {
+                visible: busy; running: busy
+                implicitWidth: 18; implicitHeight: 18
+            }
         }
         MouseArea { id: aa; anchors.fill: parent; hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor; onClicked: parent.activated() }
+                    cursorShape: busy ? Qt.WaitCursor : Qt.PointingHandCursor
+                    onClicked: if (!parent.busy) parent.activated() }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -379,12 +410,14 @@ ApplicationWindow {
                         ActionButton { labelText: "ℹ️  Quick Start";          onActivated: backend.quickStart() }
                         ActionButton { labelText: "\u{1F517}  Open .obscura Address";   onActivated: backend.openAddress() }
                         ActionButton { labelText: "\u{1F310}  Discover Sites";          onActivated: backend.discover() }
-                        ActionButton { labelText: "\u{1F4C2}  Browse Directory";        onActivated: backend.browseDirectory() }
+                        ActionButton { labelText: "\u{1F4E4}  Host a Site";             onActivated: backend.hostSite() }
                         ActionButton { labelText: "\u{1F4CB}  My Hosted Sites";         onActivated: backend.hostedSites() }
-                        ActionButton { labelText: "➕  Add Site";                   onActivated: backend.addSite() }
-                        ActionButton { labelText: "\u{1F4E4}  Publish Site";            onActivated: backend.publishSite() }
-                        ActionButton { labelText: "\u{1F5D1}️  Remove Site";       onActivated: backend.removeSite() }
-                        ActionButton { labelText: "\u{1FA7A}  Diagnose Connection";     onActivated: backend.diagnose() }
+                        ActionButton {
+                            labelText: backend.diagnosing ? "\u{1FA7A}  Diagnosing…"
+                                                          : "\u{1FA7A}  Diagnose Connection"
+                            busy: backend.diagnosing
+                            onActivated: if (!backend.diagnosing) backend.diagnose()
+                        }
                     }
                 }
             }
