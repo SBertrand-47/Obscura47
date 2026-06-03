@@ -192,6 +192,12 @@ def test_hidden_service_round_trip(isolated_env, monkeypatch, tmp_path):
         def owned_by_host(req_id: str) -> bool:
             if req_id in host._intro_circuits:
                 return True
+            # An intro-establish ack arrives while establish() is still
+            # waiting, before the circuit is committed to _intro_circuits;
+            # the host registers the pending req_id in _intro_acks first.
+            with host._intro_acks_lock:
+                if req_id in host._intro_acks:
+                    return True
             with host._sessions_lock:
                 return req_id in host._sessions
 

@@ -376,11 +376,19 @@ def _site_card(
     badge_color: str = TEXT_DIM,
     on_open,
     on_copy,
+    enabled: bool | None = None,
+    on_toggle=None,
+    on_delete=None,
 ) -> QFrame:
     """One result/listing row: title, mono address, info, Copy + Open.
 
     ``on_open`` / ``on_copy`` are called with the address string. Shared by
     the Discover and My Hosted Sites dialogs so both look and behave alike.
+
+    When ``on_toggle`` / ``on_delete`` are supplied (the My Hosted Sites case),
+    the card also gets management controls: a Turn on/off button (label driven
+    by ``enabled``) and a Delete button. Both take no arguments - the caller
+    binds the site name. Discover passes neither, so its cards are unchanged.
     """
     card = QFrame()
     card.setObjectName("Card")
@@ -416,6 +424,19 @@ def _site_card(
         lay.addWidget(info)
 
     btns = QHBoxLayout()
+    # Management controls (left) - only on hosted-site cards.
+    if on_toggle is not None:
+        toggle_btn = QPushButton("Turn off" if enabled else "Turn on")
+        toggle_btn.setObjectName("Mini")
+        toggle_btn.setCursor(Qt.PointingHandCursor)
+        toggle_btn.clicked.connect(lambda: on_toggle())
+        btns.addWidget(toggle_btn)
+    if on_delete is not None:
+        delete_btn = QPushButton("Delete")
+        delete_btn.setObjectName("MiniDanger")
+        delete_btn.setCursor(Qt.PointingHandCursor)
+        delete_btn.clicked.connect(lambda: on_delete())
+        btns.addWidget(delete_btn)
     btns.addStretch(1)
     copy_btn = QPushButton("Copy address")
     copy_btn.setObjectName("Mini")
@@ -616,16 +637,26 @@ def _format_age(seconds: float) -> str:
 
 
 class _HostedSitesDialog(QDialog):
-    """A proper scrollable list of the user's hosted .obscura sites.
+    """A scrollable, manageable list of the user's hosted .obscura sites.
 
-    Replaces the old single message box dump - each site is a card showing
-    its address, target, and background/manual mode, with Copy and Open.
+    Each site is a card showing its address, target, and on/off state, with
+    controls to Open, Copy, **Turn on/off** (publish or unpublish without
+    losing the address), and **Delete** (stop, unpublish, and remove the key
+    permanently). The list refreshes in place after each action, so the user
+    never types a site name to manage it.
     """
 
-    def __init__(self, parent, *, sites: list, background_for, on_open, on_copy):
+    def __init__(self, parent, *, load_sites, background_for, on_open, on_copy,
+                 on_toggle, on_delete):
         super().__init__(parent)
         self.setWindowTitle("My Hosted Sites")
-        self.setMinimumSize(560, 540)
+        self.setMinimumSize(560, 560)
+        self._load_sites = load_sites
+        self._background_for = background_for
+        self._on_open = on_open
+        self._on_copy = on_copy
+        self._on_toggle = on_toggle      # (name, target, new_enabled) -> None
+        self._on_delete = on_delete       # (name) -> None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(22, 20, 22, 18)
@@ -635,34 +666,14 @@ class _HostedSitesDialog(QDialog):
         header.setObjectName("CardTitle")
         header.setStyleSheet("font-size: 16px; font-weight: 700;")
         outer.addWidget(header)
-        sub = QLabel(f"{len(sites)} site(s) on this machine.")
-        sub.setObjectName("CardSub")
-        outer.addWidget(sub)
+        self._sub = QLabel("")
+        self._sub.setObjectName("CardSub")
+        self._sub.setWordWrap(True)
+        outer.addWidget(self._sub)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        body = QWidget()
-        lay = QVBoxLayout(body)
-        lay.setContentsMargins(2, 2, 2, 2)
-        lay.setSpacing(10)
-        for site in sites:
-            try:
-                background = bool(background_for(site.name))
-            except Exception:
-                background = False
-            target = getattr(site, "target", None) or "(target not saved yet)"
-            lay.addWidget(_site_card(
-                title=site.name,
-                address=site.address,
-                info_lines=[f"Target: {target}"],
-                badge="● background" if background else "● manual",
-                badge_color=GREEN if background else TEXT_DIM,
-                on_open=on_open,
-                on_copy=on_copy,
-            ))
-        lay.addStretch(1)
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        outer.addWidget(self._scroll, 1)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -673,11 +684,72 @@ class _HostedSitesDialog(QDialog):
         footer.addWidget(close_btn)
         outer.addLayout(footer)
 
+        self._reload()
+
+    def _reload(self):
+        try:
+            sites = list(self._load_sites())
+        except Exception:
+            sites = []
+        if sites:
+            self._sub.setText(
+                f"{len(sites)} site(s) on this machine. Turn a site off to "
+                "unpublish it (keeps the address), or delete it to remove it "
+                "permanently.")
+        else:
+            self._sub.setText("No hosted sites. Use Host a Site to create one.")
+
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(10)
+        for site in sites:
+            try:
+                enabled = bool(self._background_for(site.name))
+            except Exception:
+                enabled = False
+            target = getattr(site, "target", None)
+            target_line = target or "(target not saved yet)"
+            name = site.name
+            lay.addWidget(_site_card(
+                title=name,
+                address=site.address,
+                info_lines=[f"Target: {target_line}"],
+                badge="● On (published)" if enabled else "● Off (unpublished)",
+                badge_color=GREEN if enabled else TEXT_DIM,
+                on_open=self._on_open,
+                on_copy=self._on_copy,
+                enabled=enabled,
+                on_toggle=(lambda n=name, t=target, e=enabled:
+                           self._toggle(n, t, e)),
+                on_delete=(lambda n=name: self._delete(n)),
+            ))
+        lay.addStretch(1)
+        self._scroll.setWidget(body)
+
+    def _toggle(self, name, target, enabled):
+        # enabled is the CURRENT state; the new state is its inverse.
+        self._on_toggle(name, target, not enabled)
+        self._reload()
+
+    def _delete(self, name):
+        if QMessageBox.warning(
+            self, "Delete Site",
+            f"Delete '{name}' permanently?\n\n"
+            "This stops the site, withdraws it from discovery, and deletes its "
+            "key. The .obscura address is lost forever - this cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        self._on_delete(name)
+        self._reload()
+
 
 class _Worker(QObject):
     """Signal hub so background threads can update the UI thread safely."""
     log = Signal(str)
     diagnostic = Signal(str, bool)
+    diagnosing = Signal(bool)   # True when a diagnostic starts, False when done
 
 
 class ObscuraApp(QMainWindow):
@@ -1349,6 +1421,9 @@ class ObscuraApp(QMainWindow):
             return
         address = address.strip()
         self._log("Running connection diagnostic…")
+        # Tell the UI a diagnostic is in flight so it can show a busy sign;
+        # cleared in _show_diagnostic_result when the result arrives.
+        self._signals.diagnosing.emit(True)
 
         def _worker():
             from src.utils.diagnose import run_diagnostics, format_report_text
@@ -1364,6 +1439,7 @@ class ObscuraApp(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _show_diagnostic_result(self, text: str, ok: bool):
+        self._signals.diagnosing.emit(False)
         if ok:
             QMessageBox.information(self, "Diagnose Connection", text)
         else:
@@ -1378,12 +1454,10 @@ class ObscuraApp(QMainWindow):
         return v.split("/", 1)[0]
 
     def _show_hosted_sites(self):
-        hosted = self._get_hosted_sites()
-        if not hosted:
+        if not self._get_hosted_sites():
             QMessageBox.information(
                 self, "My Hosted Sites",
-                "No hosted sites yet.\n\nUse Add Site or Publish Site to "
-                "create one.",
+                "No hosted sites yet.\n\nUse Host a Site to create one.",
             )
             return
 
@@ -1395,12 +1469,85 @@ class ObscuraApp(QMainWindow):
 
         dlg = _HostedSitesDialog(
             self,
-            sites=hosted,
+            load_sites=self._get_hosted_sites,
             background_for=daemon_installed,
             on_open=self._open_site_address,
             on_copy=self._copy_to_clipboard,
+            on_toggle=self._set_hosted_site_enabled,
+            on_delete=self._delete_hosted_site,
         )
         dlg.exec()
+
+    def _set_hosted_site_enabled(self, name: str, target: str | None,
+                                 enabled: bool):
+        """Turn a hosted site on (publish) or off (unpublish) without losing
+        its key. Off stops the background host and withdraws the descriptor so
+        Discover no longer lists it; On re-installs the host from saved config."""
+        try:
+            if enabled:
+                from src.utils.daemon import install_daemon
+                from src.utils.sites import load_site_config, resolve_key_path
+
+                cfg = load_site_config(name)
+                tgt = (cfg.target if cfg else None) or target
+                if not tgt:
+                    QMessageBox.warning(
+                        self, "Turn On Site",
+                        f"Cannot turn on {name!r}: no saved target. Re-create "
+                        "it with Host a Site.",
+                    )
+                    return
+                key_path = (cfg.key_path if cfg else None) or \
+                    resolve_key_path(name=name)
+                install_daemon(name, tgt, key_path=key_path)
+                self._log(f"Turned on hosted site {name} (publishing).")
+            else:
+                from src.utils.daemon import uninstall_daemon
+                uninstall_daemon(name)
+                try:
+                    from src.core.hidden_service import withdraw_descriptor_by_name
+                    withdraw_descriptor_by_name(name)
+                except Exception as exc:
+                    self._log(f"Could not withdraw descriptor for {name}: {exc}")
+                self._log(f"Turned off hosted site {name} (unpublished).")
+        except Exception as exc:
+            QMessageBox.critical(self, "My Hosted Sites", str(exc))
+            self._log(f"Could not change hosted site {name}: {exc}")
+
+    def _delete_hosted_site(self, name: str):
+        """Permanently remove a hosted site: stop it, withdraw its descriptor,
+        and delete its key + config. The address is gone for good."""
+        problems = []
+        try:
+            from src.utils.daemon import uninstall_daemon
+            uninstall_daemon(name)
+        except Exception as exc:
+            problems.append(f"stop: {exc}")
+        try:
+            from src.core.hidden_service import withdraw_descriptor_by_name
+            withdraw_descriptor_by_name(name)
+        except Exception as exc:
+            problems.append(f"withdraw: {exc}")
+        # Delete the key + config files (the key IS the address - removing it
+        # is what makes deletion permanent).
+        try:
+            from src.utils.sites import (
+                config_path_for_name, key_path_for_name, load_site_config,
+            )
+            paths = {key_path_for_name(name), config_path_for_name(name)}
+            cfg = load_site_config(name)
+            if cfg and cfg.key_path:
+                paths.add(os.path.expanduser(cfg.key_path))
+            for p in paths:
+                if p and os.path.isfile(p):
+                    os.remove(p)
+        except Exception as exc:
+            problems.append(f"delete files: {exc}")
+
+        if problems:
+            self._log(f"Delete {name}: {'; '.join(problems)}")
+        else:
+            self._log(f"Deleted hosted site {name} (unpublished, key removed).")
 
     def _add_hosted_site(self):
         name = self._prompt_text("Add .obscura Site", "Site name:")
@@ -1794,6 +1941,7 @@ class Backend(QObject):
     changed = Signal()          # connection / metric / role state changed
     settingsChanged = Signal()  # autostart / start-minimized changed
     logLine = Signal(str)       # one formatted activity-log line
+    diagnosingChanged = Signal()  # a diagnostic started or finished
 
     def __init__(self, logic: "ObscuraApp"):
         super().__init__()
@@ -1806,9 +1954,12 @@ class Backend(QObject):
         self._status = "Disconnected"
         self._role = "Not connected"
         self._proxy = self._node = False
+        self._diagnosing = False
 
         # Forward the logic engine's log stream into the QML activity page.
         logic._signals.log.connect(self._forward_log)
+        # Surface diagnostic in-flight state so the QML shell can show a sign.
+        logic._signals.diagnosing.connect(self._on_diagnosing)
         self.logLine.emit(self._stamp(
             "Welcome to Obscura47. Connect, then use Sites to visit or publish."))
 
@@ -1825,6 +1976,11 @@ class Backend(QObject):
     def _forward_log(self, msg: str):
         self.logLine.emit(self._stamp(msg))
 
+    def _on_diagnosing(self, active: bool):
+        if bool(active) != self._diagnosing:
+            self._diagnosing = bool(active)
+            self.diagnosingChanged.emit()
+
     # ── read-only state properties ────────────────────────────────────
     def _g_connected(self):  return self._connected
     def _g_relays(self):     return self._relays
@@ -1834,7 +1990,9 @@ class Backend(QObject):
     def _g_role(self):       return self._role
     def _g_proxy(self):      return self._proxy
     def _g_node(self):       return self._node
+    def _g_diagnosing(self): return self._diagnosing
 
+    diagnosing    = Property(bool, _g_diagnosing, notify=diagnosingChanged)
     connected     = Property(bool, _g_connected, notify=changed)
     relays        = Property(int,  _g_relays,    notify=changed)
     healthy       = Property(int,  _g_healthy,   notify=changed)
@@ -1859,15 +2017,11 @@ class Backend(QObject):
     @Slot()
     def discover(self):        self._logic._discover_sites()
     @Slot()
-    def browseDirectory(self): self._logic._browse_directory()
-    @Slot()
     def hostedSites(self):     self._logic._show_hosted_sites()
     @Slot()
-    def addSite(self):         self._logic._add_hosted_site()
-    @Slot()
-    def publishSite(self):     self._logic._publish_hosted_site()
-    @Slot()
-    def removeSite(self):      self._logic._remove_hosted_site_daemon()
+    def hostSite(self):
+        # Create + publish in one step (the former Add Site + Publish Site).
+        self._logic._publish_hosted_site()
     @Slot()
     def diagnose(self):        self._logic._diagnose_connection()
     @Slot()

@@ -358,6 +358,17 @@ class ObscuraNode:
             self._hs_services[service_addr] = req_id
             self._hs_pubs[req_id] = host_pub
         log.info("HS intro registered: %s (req=%s)", service_addr, req_id)
+        # Acknowledge back along the host's intro circuit so the host knows
+        # this intro point is reachable through the circuit and can safely
+        # publish it. Without this the host can only assume success from a
+        # fire-and-forget send and may advertise an intro it can't use.
+        if not self._hs_send_reverse(req_id, {
+                'type': 'hs_establish_ack',
+                'service_addr': service_addr,
+                'request_id': req_id,
+        }):
+            log.debug("HS intro ack send failed for %s (req=%s)",
+                      service_addr, req_id)
 
     def _hs_terminal_introduce(self, layer: dict):
         """Intro point: relay the client's introduce blob to the host.

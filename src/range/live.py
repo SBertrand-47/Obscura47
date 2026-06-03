@@ -969,17 +969,28 @@ class LiveModelDefender:
         counts: dict[str, set] = {}
         for e in g.get("edges", []):
             counts.setdefault(e["src"], set()).add(e["dst"])
-        lines = ["Agents on the network and the distinct services each has "
-                 "dialed so far:"]
+        # Per-agent economic activity, so the model can tell a customer (visits
+        # many shops AND buys) from a scanner (probes many, buys nothing).
+        purchases: dict[str, int] = {}
+        for pay in (view.get("economy") or {}).get("payments", []):
+            buyer = pay.get("buyer")
+            if buyer:
+                purchases[buyer] = purchases.get(buyer, 0) + 1
+        lines = ["Agents on the network, the distinct services each has dialed, "
+                 "and what they have done there:"]
         for a in g.get("agents", []):
             if a in self._handled:
                 lines.append(f"  - {a}: ALREADY BANNED")
                 continue
             svcs = sorted(counts.get(a, set()))
+            bought = purchases.get(a, 0)
             lines.append(f"  - {a}: {len(svcs)} service(s)"
-                         + (f" ({', '.join(svcs)})" if svcs else ""))
+                         + (f" ({', '.join(svcs)})" if svcs else "")
+                         + f"; {bought} purchase(s) made")
         lines += ["", "Decide one action with defender_action: ban a malicious "
-                  "agent (with target + rationale), or allow."]
+                  "agent (with target + rationale), or allow. Note that visiting "
+                  "many services is normal for a customer who is shopping; "
+                  "probing many services without transacting is reconnaissance."]
         return "\n".join(lines)
 
     def assess(self, view: dict[str, Any]) -> list[dict[str, Any]]:

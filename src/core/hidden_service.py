@@ -76,6 +76,13 @@ log = get_logger(__name__)
 
 INTRO_POINT_COUNT = 3
 
+# How long establish() waits for an intro point to confirm (ack) that it
+# registered the service before the host will advertise that intro in its
+# descriptor. A fire-and-forget send only proves the frame reached the first
+# relay, not that the intro point is actually reachable through the circuit -
+# the ack closes that gap so a host never publishes an intro it can't use.
+INTRO_ACK_TIMEOUT = 6.0
+
 
 def _post_descriptor_delete(address: str, priv) -> bool:
     """Sign ``hs-delete:{addr}:{ts}`` and ask the registry to drop the
@@ -144,6 +151,12 @@ class HiddenServiceHost:
         # Relay pool used to pad both intro and rv circuits with middle hops.
         self._relay_pool: list[dict[str, Any]] = []
 
+        # Pending intro-establish acks: req_id -> Event, set when the intro
+        # point confirms it registered the service. establish() waits on these
+        # so it only publishes intros the intro point actually acknowledged.
+        self._intro_acks: dict[str, threading.Event] = {}
+        self._intro_acks_lock = threading.Lock()
+
         # Rendezvous session state:
         # rv_req_id (host's circuit to the rv point) -> {
         #   'sock': local TCP socket,
@@ -191,7 +204,9 @@ class HiddenServiceHost:
         except Exception:
             return
         typ = inner.get('type')
-        if typ == 'hs_introduce':
+        if typ == 'hs_establish_ack':
+            self._handle_establish_ack(inner)
+        elif typ == 'hs_introduce':
             self._handle_introduce(inner)
         elif typ == 'rv_ready':
             self._handle_rv_ready(inner)
@@ -199,6 +214,20 @@ class HiddenServiceHost:
             self._handle_data(inner)
         elif typ == 'hs_close':
             self._handle_close(inner)
+
+    def _handle_establish_ack(self, inner: dict):
+        """An intro point confirmed it registered our service for a circuit.
+
+        Wakes the establish() waiter for this request_id so that intro can be
+        published. An intro whose circuit never reaches a live intro point
+        never produces this ack, so it is left out of the descriptor."""
+        req_id = inner.get('request_id')
+        if not req_id:
+            return
+        with self._intro_acks_lock:
+            ev = self._intro_acks.get(req_id)
+        if ev is not None:
+            ev.set()
 
     # ── Intro → rendezvous ────────────────────────────────────────
 
@@ -499,12 +528,23 @@ class HiddenServiceHost:
             # would strand the descriptor and let it expire into a 404.
             return bool(self._intro_peers) if refresh else False
 
-        # Build the new intro set into locals and only commit it if at
-        # least one establish succeeds. A transient all-fail refresh then
-        # leaves the previous working intros in place instead of clearing
-        # them, so publish_descriptor() keeps the registry entry alive.
-        new_circuits: dict[str, dict[str, Any]] = {}
-        new_peers: list[dict[str, Any]] = []
+        # Send an establish to each candidate, then wait for the intro point
+        # to ACK that it registered the service. A successful send only proves
+        # the frame reached the first relay - not that it traversed the circuit
+        # to a live intro point. Publishing on send alone advertises intros the
+        # host can't actually use (a client then reads the descriptor, dials
+        # that dead intro, and the rendezvous fails). The ack closes that gap.
+        #
+        # Two tiers of result are tracked: `acked_*` (the intro point
+        # confirmed - the set we want to publish) and `sent_*` (the send
+        # succeeded but no ack arrived - a fallback used only if nothing acks,
+        # e.g. against older relays that don't send acks, so a host is never
+        # stranded by the stricter rule).
+        acked_circuits: dict[str, dict[str, Any]] = {}
+        acked_peers: list[dict[str, Any]] = []
+        sent_circuits: dict[str, dict[str, Any]] = {}
+        sent_peers: list[dict[str, Any]] = []
+        pending: list[tuple[str, dict, list, threading.Event]] = []
         for peer in intros:
             req_id = f"H{time.time_ns()}"
             route = build_hs_route(self._relay_pool, peer, HS_CIRCUIT_HOPS)
@@ -514,24 +554,64 @@ class HiddenServiceHost:
                 'service_addr': self.address,
                 'pub': self.pub_pem,
             }
+            ev = threading.Event()
+            with self._intro_acks_lock:
+                self._intro_acks[req_id] = ev
             if send_hs_frame(route, envelope):
-                new_circuits[req_id] = {'peer': peer, 'route': route}
-                new_peers.append(peer)
-                log.info("HS %s established at intro %s:%s via %d hop(s)",
-                         self.address, peer.get('host'), peer.get('port'),
-                         len(route))
+                sent_circuits[req_id] = {'peer': peer, 'route': route}
+                sent_peers.append(peer)
+                pending.append((req_id, peer, route, ev))
+                log.info("HS %s sent establish to intro %s:%s via %d hop(s); "
+                         "awaiting ack", self.address, peer.get('host'),
+                         peer.get('port'), len(route))
             else:
-                log.warning("Intro establish failed at %s:%s",
+                with self._intro_acks_lock:
+                    self._intro_acks.pop(req_id, None)
+                log.warning("Intro establish send failed at %s:%s",
                             peer.get('host'), peer.get('port'))
 
-        if not new_peers:
-            log.warning("HS %s established no intro points this cycle", self.address)
-            return bool(self._intro_peers) if refresh else False
+        # Wait for acks up to a shared deadline. Acks arrive concurrently on
+        # the reverse channel, so a per-entry wait against one deadline lets
+        # them all land within INTRO_ACK_TIMEOUT total.
+        deadline = time.time() + INTRO_ACK_TIMEOUT
+        for req_id, peer, route, ev in pending:
+            if ev.wait(max(0.0, deadline - time.time())):
+                acked_circuits[req_id] = {'peer': peer, 'route': route}
+                acked_peers.append(peer)
+                log.info("HS %s intro confirmed at %s:%s",
+                         self.address, peer.get('host'), peer.get('port'))
+            else:
+                log.warning("HS %s intro at %s:%s did not confirm within %.0fs; "
+                            "excluding it from the descriptor", self.address,
+                            peer.get('host'), peer.get('port'), INTRO_ACK_TIMEOUT)
+            with self._intro_acks_lock:
+                self._intro_acks.pop(req_id, None)
 
-        # Atomically swap in the freshly-established intro set.
-        self._intro_circuits = new_circuits
-        self._intro_peers = new_peers
-        return True
+        if acked_peers:
+            # The intended path: publish only intros the intro point confirmed.
+            self._intro_circuits = acked_circuits
+            self._intro_peers = acked_peers
+            return True
+
+        # Nothing confirmed this cycle.
+        if refresh and self._intro_peers:
+            # Keep the last confirmed intro set alive rather than swapping to
+            # unconfirmed peers - the existing descriptor still works.
+            log.info("HS %s: no new intro confirmations; keeping existing intros",
+                     self.address)
+            return True
+        if sent_peers:
+            # Initial publish with no acks at all - likely relays on an older
+            # build that don't ack. Fall back to the send-succeeded set so the
+            # descriptor isn't empty (no regression vs. the old behaviour).
+            log.warning("HS %s: no intro confirmations; publishing %d "
+                        "unconfirmed intro(s)", self.address, len(sent_peers))
+            self._intro_circuits = sent_circuits
+            self._intro_peers = sent_peers
+            return True
+
+        log.warning("HS %s established no intro points this cycle", self.address)
+        return bool(self._intro_peers) if refresh else False
 
     def delete_descriptor(self) -> bool:
         """Tell the registry to drop our descriptor immediately.

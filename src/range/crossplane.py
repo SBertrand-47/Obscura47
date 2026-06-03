@@ -203,6 +203,7 @@ def correlate(experiment_id: str | None = None, *,
         reputation = merged
     forum = _forum(events)
     hosted = _hosted_services(events)
+    operated_site = _operated_site(events)
     graph = traffic_graph(sessions, hosts=hosts, responses=responses)
     view = {
         "experiment_id": experiment_id,
@@ -217,6 +218,7 @@ def correlate(experiment_id: str | None = None, *,
         "reputation": reputation,
         "forum": forum,
         "hosted_services": hosted,
+        "operated_site": operated_site,
     }
     view["narrative"] = build_narrative(view)
     view["case_files"] = build_case_files(view)
@@ -324,6 +326,52 @@ def _hosted_services(events: list[Any] | None) -> list[dict[str, Any]]:
             out.append({"host": getattr(e, "actor", None),
                         "address": p.get("address"), "target": p.get("target")})
     return out
+
+
+def _operated_site(events: list[Any] | None) -> dict[str, Any]:
+    """Reconstruct the operation of a model-run website (site.serve events).
+
+    Each event is one request the site's model operator decided: which visitor,
+    what path, the status it returned, the rationale behind it, and whether it
+    chose to remember something. This is the agent-operating-a-website layer -
+    a live `.obscura` site whose every served response is attributable to a
+    decision, so visitors and the operator's reasoning sit side by side."""
+    requests: list[dict[str, Any]] = []
+    visitors: dict[str, int] = {}
+    operators: dict[str, int] = {}
+    remembered = 0
+    for e in events or []:
+        if getattr(e, "kind", None) != "site.serve":
+            continue
+        p = getattr(e, "payload", {}) or {}
+        visitor = p.get("visitor")
+        operator = getattr(e, "actor", None)
+        rec = {
+            "operator": operator,
+            "session": getattr(e, "session_id", None),
+            "visitor": visitor,
+            "method": p.get("method"),
+            "path": p.get("path"),
+            "status": p.get("status"),
+            "rationale": p.get("rationale"),
+            "remembered": bool(p.get("remembered")),
+            "bytes_out": p.get("bytes_out"),
+        }
+        requests.append(rec)
+        key = (visitor or "local/unknown")
+        visitors[key] = visitors.get(key, 0) + 1
+        if operator:
+            operators[operator] = operators.get(operator, 0) + 1
+        if rec["remembered"]:
+            remembered += 1
+    return {
+        "requests": requests,
+        "request_count": len(requests),
+        "unique_visitors": len([v for v in visitors if v != "local/unknown"]),
+        "visitors": visitors,
+        "operators": sorted(operators),
+        "remembered": remembered,
+    }
 
 
 def _forum(events: list[Any] | None) -> dict[str, Any]:
@@ -434,6 +482,14 @@ def build_narrative(view: dict[str, Any]) -> list[str]:
     if hosted:
         bits = ", ".join(f"{h['host']} hosts {h['address']}" for h in hosted)
         lines.append(f"{len(hosted)} hidden service(s) published: {bits}.")
+    site = view.get("operated_site") or {}
+    if site.get("request_count"):
+        ops = ", ".join(site.get("operators", [])) or "an agent"
+        lines.append(
+            f"{ops} operated a website: served {site['request_count']} "
+            f"request(s) to {site['unique_visitors']} visitor(s), each "
+            f"response a recorded decision ({site.get('remembered', 0)} kept "
+            f"to memory).")
     forum = view.get("forum") or {}
     if forum.get("post_count"):
         rm = len(forum.get("removed", []))
@@ -736,6 +792,18 @@ def render_text(view: dict[str, Any]) -> str:
             lines.append(f"  {e['src']} -> {dst}  "
                          f"({e['dials']} dial(s), {flag})")
         lines.append("")
+    site = view.get("operated_site") or {}
+    if site.get("request_count"):
+        ops = ", ".join(site.get("operators", [])) or "an agent"
+        lines.append(f"operated website ({ops}): {site['request_count']} "
+                     f"request(s), {site['unique_visitors']} visitor(s):")
+        for r in site["requests"]:
+            vis = r.get("visitor")
+            vtxt = (vis[:10] if vis else "local")
+            lines.append(f"  {r.get('method') or ''} {r.get('path') or ''} "
+                         f"<- {vtxt}  [{r.get('status')}]  "
+                         f"{r.get('rationale') or ''}")
+        lines.append("")
     cases = view.get("case_files") or []
     if cases:
         lines.append("case files (investigator report):")
@@ -931,6 +999,35 @@ def render_html(view: dict[str, Any]) -> str:
             f'{legend}{_svg_graph(graph, flagged, view.get("reputation"))}'
             f'</section>')
 
+    site = view.get("operated_site") or {}
+    site_html = ""
+    if site.get("request_count"):
+        rows = ""
+        for r in site["requests"]:
+            scol = ("#2e7d32" if (r.get("status") or 0) < 400
+                    else "#c62828")
+            vis = r.get("visitor")
+            vtxt = (vis[:10] if vis else "local")
+            mem = (' <span class="badge good">remembered</span>'
+                   if r.get("remembered") else "")
+            rows += (
+                f'<tr><td class="pl">{_esc(r.get("method") or "")} '
+                f'{_esc(r.get("path") or "")}</td>'
+                f'<td>{_esc(vtxt)}</td>'
+                f'<td style="color:{scol};font-weight:700">'
+                f'{_esc(str(r.get("status") or ""))}</td>'
+                f'<td>{_esc(r.get("rationale") or "")}{mem}</td></tr>')
+        ops = ", ".join(site.get("operators", [])) or "an agent"
+        site_html = (
+            f'<section><h2>Operated website &middot; an agent runs a site</h2>'
+            f'<p class="sub">{_esc(ops)} served '
+            f'{site["request_count"]} request(s) to '
+            f'{site["unique_visitors"]} visitor(s) - every response is a '
+            f'recorded decision with the operator\'s rationale.</p>'
+            f'<table class="tl"><thead><tr><th>request</th><th>visitor</th>'
+            f'<th>status</th><th>operator rationale</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></section>')
+
     reputation = view.get("reputation") or {}
     rep_html = ""
     if reputation:
@@ -1117,6 +1214,7 @@ def render_html(view: dict[str, Any]) -> str:
 {compliance_html}
 {summary_html}
 {graph_html}
+{site_html}
 {threat_html}
 {cases_html}
 {rep_html}

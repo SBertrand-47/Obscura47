@@ -58,6 +58,10 @@ exit_health.json
 # Admin private key (NEVER commit)
 admin_key.pem
 admin_pub.pem
+
+# agentsite --serve deploy artifacts (private service key + live event log)
+agent_site.pem
+*-events.jsonl
 *.pyc
 *.pyo
 *.pyd
