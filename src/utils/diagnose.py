@@ -23,6 +23,16 @@ class DiagnosticStep:
     detail: str | None = None
 
 
+# The diagnostic step name for the vantage-dependent topology gap: this
+# machine has no rendezvous relay distinct from the host's intro point. A
+# failure here does NOT prove the site is unreachable for everyone - a
+# dialer on a different network (e.g. one sharing the host's LAN, or one
+# that sees a public relay this machine self-filters) may still reach it,
+# as a real visitor did. So it is treated as "inconclusive from here",
+# not a hard down verdict.
+RENDEZVOUS_POINT_STEP = "Rendezvous point"
+
+
 @dataclass
 class DiagnosticReport:
     registry_url: str
@@ -39,6 +49,17 @@ class DiagnosticReport:
             if not s.ok:
                 return s
         return None
+
+    @property
+    def inconclusive(self) -> bool:
+        """True when the only failure is the vantage-dependent rv-point gap.
+
+        The site published correctly and its intro is live, but THIS machine
+        has no rendezvous relay distinct from the intro, so it cannot dial.
+        That is a property of where the check runs, not of the site, so the
+        verdict should not be recorded as a hard "unreachable"."""
+        fail = self.first_failure
+        return fail is not None and fail.name == RENDEZVOUS_POINT_STEP
 
 
 def _probe_ws_reachable(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
@@ -283,6 +304,37 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
         ))
         return report
 
+    # 4c. Rendezvous-point availability.
+    #
+    # A dial needs a rendezvous relay DISTINCT from the host's intro point,
+    # and reachable from this dialer (public, not this machine). On a small
+    # network where the only other public relay is this machine - or there
+    # is no other public relay at all - the dialer is forced to reuse the
+    # intro as the rendezvous point, and a node cannot splice a session to
+    # itself, so the dial below would just time out for ~12s for a reason
+    # that has nothing to do with the host. Detect that topology gap up
+    # front and report the actual fix (add a public relay) instead.
+    if not _has_distinct_rendezvous_point(peers, intros):
+        report.steps.append(DiagnosticStep(
+            name=RENDEZVOUS_POINT_STEP,
+            ok=False,
+            summary="no relay available distinct from the host's intro point",
+            detail=(
+                "A dial needs a rendezvous relay separate from the intro "
+                "point, publicly reachable, and not this machine. Right now "
+                "the only such relay is the intro point itself (or this "
+                "machine), so the dialer would reuse the intro as the "
+                "rendezvous point - which cannot splice a session to itself "
+                "and times out. This is a network-size limit, not a problem "
+                "with the host: it is publishing correctly and its intro is "
+                "live. Bring at least one more public relay node online "
+                "(distinct from the intro and from this machine, with a "
+                "publicly-reachable WebSocket port) and the dial will "
+                "succeed."
+            ),
+        ))
+        return report
+
     # 5. End-to-end rendezvous dial.
     #
     # The descriptor-level checks above only confirm the host is *publishing*
@@ -298,6 +350,46 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
     # those failures explicitly.
     _append_rendezvous_step(report, address, intros)
     return report
+
+
+def _has_distinct_rendezvous_point(
+    peers: list[dict],
+    intros: list[dict],
+) -> bool:
+    """Is a usable rendezvous relay available, distinct from the intros?
+
+    Mirrors the eligibility filter in
+    :func:`src.core.rendezvous._pick_rendezvous_point` so the diagnostic
+    agrees with the real dial path: a candidate must be a node relay, not
+    this machine, not one of the descriptor's intro points, and either
+    publicly routable or - when LAN peers are allowed - a private relay on
+    a reachable LAN. If none qualify, every dial is forced to reuse an
+    intro as its rendezvous point and will time out.
+
+    Being a private-peer-tolerant check matters: when ``allow_lan_peers``
+    is on, a same-LAN relay is a perfectly good rendezvous point and the
+    dial succeeds, so reporting "no rendezvous relay" in that case would
+    be a false negative for a site that is actually reachable.
+    """
+    from src.core.internet_discovery import (
+        allow_lan_peers,
+        is_private_peer,
+        is_self_peer,
+    )
+
+    lan_ok = allow_lan_peers()
+    intro_keys = {(p.get("host"), p.get("port")) for p in intros}
+    for p in peers:
+        if p.get("role") not in (None, "node"):
+            continue
+        if (p.get("host"), p.get("port")) in intro_keys:
+            continue
+        if is_self_peer(p):
+            continue
+        if not lan_ok and is_private_peer(p):
+            continue
+        return True
+    return False
 
 
 def _append_rendezvous_step(
