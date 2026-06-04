@@ -14,6 +14,9 @@ Usage:
     python join_network.py host ./mysite --name myblog   # Named site (key at ~/.obscura47/sites/myblog.pem)
     python join_network.py host ./mysite --key /path.pem # Explicit key path
     python join_network.py host list          # List all hosted sites and their addresses
+    python join_network.py host published     # Show what this agent published, and reachability
+    python join_network.py host status        # Verify every published site is reachable on the network
+    python join_network.py host status --name myblog  # Verify one site end to end (real rendezvous dial)
     python join_network.py host enable ./mysite --name myblog   # Install per-site background service
     python join_network.py host disable --name myblog           # Remove background service
     python join_network.py host publish ./mysite --name myblog  # Write manifest, optionally register, and host
@@ -167,6 +170,16 @@ def _run_host(arg: str | None, site_name: str | None = None, key_path: str | Non
     host = HiddenServiceHost(target_host, target_port, resolved_key)
 
     label = site_name or os.path.basename(resolved_key).removesuffix(".pem")
+
+    # Record what we're publishing so the operator can later answer
+    # "what have I put on the network, and is it still up?" - see
+    # `host published` / `host status`.
+    try:
+        from src.utils import publications
+        publications.record_publish(host.address, name=label, target=arg)
+    except Exception as e:
+        print(f"  [!] could not record publication: {e}")
+
     print()
     print(f"  site name:         {label}")
     print(f"  .obscura address:  {host.address}")
@@ -213,6 +226,7 @@ def _resolve_host_target(arg: str) -> tuple[str, int]:
 
 def _host_list():
     """Print all `.obscura` sites in the sites directory."""
+    from src.utils import publications
     from src.utils.daemon import daemon_installed
     from src.utils.sites import list_sites, SITES_DIR
 
@@ -222,17 +236,150 @@ def _host_list():
         print("  Host a site first:  python join_network.py host ./mydir --name mysite\n")
         return
 
+    pubs = {p.address: p for p in publications.all_publications()}
     print(f"\n  Sites in {SITES_DIR}:\n")
     for s in sites:
         print(f"    {s.name:<20s} {s.address}")
         print(f"    {'':20s} key: {s.key_path}")
         if s.target:
             print(f"    {'':20s} target: {s.target}")
+        pub = pubs.get(s.address)
+        if pub is not None:
+            if pub.reachable is True:
+                reach = "reachable"
+            elif pub.reachable is False:
+                reach = "UNREACHABLE"
+            else:
+                reach = "unchecked"
+            print(
+                f"    {'':20s} reachability: {reach} "
+                f"(checked {_fmt_age(pub.last_checked_at)})"
+            )
         print(
             f"    {'':20s} background service: "
             f"{'installed' if daemon_installed(s.name) else 'not installed'}"
         )
         print()
+
+
+def _fmt_age(ts: float | None) -> str:
+    """Human 'time ago' for a unix timestamp, or 'never'."""
+    if not ts:
+        return "never"
+    delta = max(0, int(time.time() - ts))
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def _host_published():
+    """Print the publication ledger - what this agent put on the network."""
+    from src.utils import publications
+
+    pubs = publications.all_publications()
+    if not pubs:
+        print(f"\n  No publications recorded in {publications.PUBLICATIONS_PATH}")
+        print("  Publish a site first:  python join_network.py host ./mydir --name mysite")
+        print("  then re-run this command to see it tracked.\n")
+        return
+
+    print(f"\n  Publications ({publications.PUBLICATIONS_PATH}):\n")
+    for p in pubs:
+        if p.reachable is True:
+            reach = "reachable"
+        elif p.reachable is False:
+            reach = "UNREACHABLE"
+        else:
+            reach = "unchecked"
+        print(f"    {(p.name or '(unnamed)'):<20s} {p.address}")
+        if p.title:
+            print(f"    {'':20s} {p.title}")
+        if p.target:
+            print(f"    {'':20s} target:    {p.target}")
+        print(f"    {'':20s} published: {_fmt_age(p.last_published_at)}")
+        print(f"    {'':20s} reachable: {reach} (checked {_fmt_age(p.last_checked_at)})")
+        if p.directories:
+            addrs = ", ".join(d.address for d in p.directories)
+            print(f"    {'':20s} listed in: {addrs}")
+        print()
+    print("  Re-verify reachability with:  python join_network.py host status\n")
+
+
+def _host_status(argv: list[str]):
+    """Actively verify a published site is reachable and record the result.
+
+    Resolution order: an explicit `.obscura` address argument, then
+    ``--name`` (resolved to its address), then - with no target - every
+    tracked publication. Runs the real registry -> descriptor -> live-intro
+    -> rendezvous-dial walk, so a pass means an outside client could dial
+    the site right now, not merely that a descriptor is published.
+    """
+    from src.utils import publications
+    from src.utils.diagnose import format_report_text
+    from src.utils.onion_addr import is_obscura_address
+
+    name, _ = _parse_host_flags(argv)
+    loop_raw = _single_flag_value(argv, "--loop")
+    loop_seconds = int(loop_raw) if loop_raw else 0
+    quiet = "--quiet" in argv
+    positional = _strip_flags(argv, ("--name", "--key", "--loop"))
+    addr_arg = next((a for a in positional if is_obscura_address(a)), None)
+
+    def _targets() -> list[tuple[str, str]]:
+        # Re-resolved each round so a site published mid-loop gets picked up.
+        if addr_arg:
+            rec = publications.get(addr_arg)
+            return [(rec.name if rec and rec.name else addr_arg, addr_arg)]
+        if name:
+            site_addr, _key = _site_address_for_name(name)
+            return [(name, site_addr)]
+        return [(p.name or p.address, p.address)
+                for p in publications.all_publications()]
+
+    if not _targets():
+        print("\n  Nothing to check.")
+        print("  Publish a site first, or pass a .obscura address / --name.\n")
+        return
+
+    def _check_round() -> bool:
+        any_unreachable = False
+        for label, address in _targets():
+            reachable, report = publications.check_reachability(address)
+            verdict = "REACHABLE" if reachable else "UNREACHABLE"
+            if quiet:
+                first = report.first_failure
+                tail = f" - {first.name}: {first.summary}" if first else ""
+                print(f"  [{time.strftime('%H:%M:%S')}] {label}: {verdict}{tail}")
+            else:
+                print(f"\n  Checking {label} ({address}) ...")
+                print(f"  {verdict}\n")
+                print(format_report_text(report))
+            if not reachable:
+                any_unreachable = True
+        return any_unreachable
+
+    if loop_seconds > 0:
+        # Ongoing self-verification: a published host can't probe itself in
+        # its own process (the reverse-frame channel is single-owner), so
+        # this runs as its own process and re-checks on an interval,
+        # stamping each verdict into the ledger.
+        print(f"\n  Watching reachability every {loop_seconds}s (Ctrl+C to stop)...")
+        try:
+            while True:
+                _check_round()
+                time.sleep(loop_seconds)
+        except KeyboardInterrupt:
+            print("\n  Stopped.")
+        return
+
+    any_unreachable = _check_round()
+    print()
+    if any_unreachable:
+        sys.exit(1)
 
 
 def _host_export_key(argv: list[str]):
@@ -448,6 +595,17 @@ def _host_write_manifest(argv: list[str]):
         print(f"  [!] {e}")
         sys.exit(1)
 
+    # Track the advertised manifest against the address so `host published`
+    # shows the title/description/tags the agent put on the network.
+    try:
+        from src.utils import publications
+        publications.record_publish(
+            address, name=(name or ""), target=site_dir,
+            title=title, description=description, tags=tags,
+        )
+    except Exception as e:
+        print(f"  [!] could not record publication: {e}")
+
     print()
     print(f"  Wrote manifest for {address}")
     print(f"  site directory:    {site_dir}")
@@ -574,6 +732,16 @@ def _host_register_directory(argv: list[str], *, unregister: bool = False):
     except Exception as e:
         print(f"  [!] {e}")
         sys.exit(1)
+
+    # Keep the publication ledger's directory listings in sync.
+    try:
+        from src.utils import publications
+        if unregister:
+            publications.record_unregister(site_addr, directory_addr)
+        else:
+            publications.record_directory(site_addr, directory_addr)
+    except Exception:
+        pass
 
     print()
     print(
@@ -815,6 +983,12 @@ def main():
             if sub == "list":
                 _host_list()
                 return
+            if sub == "published":
+                _host_published()
+                return
+            if sub == "status":
+                _host_status(sys.argv[3:])
+                return
             if sub == "enable":
                 _host_enable(sys.argv[3:])
                 return
@@ -846,6 +1020,8 @@ def main():
                 print("  [!] host mode needs a target argument")
                 print("      e.g.  python join_network.py host ./mysite")
                 print("            python join_network.py host list")
+                print("            python join_network.py host published")
+                print("            python join_network.py host status [--name mysite | <addr>.obscura]")
                 print("            python join_network.py host enable ./mysite --name mysite")
                 print("            python join_network.py host disable --name mysite")
                 print("            python join_network.py host publish ./mysite --name mysite")
