@@ -28,6 +28,13 @@ LAN_PEER = {
     "host": "192.168.1.86", "port": 5001, "role": "node",
     "pub": "PUB-LAN", "ws_port": 5002,
 }
+# A public node registered with NO ws_port - exactly how the gateway peer
+# (142.56.46.175) appeared in the registry. It cannot be reachability-probed
+# or maintained as an intro circuit, so it must be excluded.
+NO_WS_PEER = {
+    "host": "142.56.46.175", "port": 5001, "role": "node",
+    "pub": "PUB-NOWS", "ws_port": None,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +81,23 @@ def test_pick_intro_skips_private_peer_by_default(monkeypatch):
 
     assert LAN_PEER["host"] not in picked_hosts
     assert picked_hosts == {PUBLIC_A["host"], PUBLIC_B["host"]}
+
+
+def test_pick_intro_skips_peer_without_ws_port(monkeypatch):
+    """A public peer with no ws_port must be excluded: it cannot be probed for
+    reachability nor maintained as a live intro circuit, so advertising it
+    strands every dial. probe_tcp is stubbed to PASS here, so the old code
+    (which skipped the probe for ws-less peers and appended them) would wrongly
+    include it - this guards that regression."""
+    from src.core import internet_discovery as disc
+    monkeypatch.setattr(disc, "is_self_peer", lambda p: False)
+
+    host = _fake_host()
+    picked = host._pick_intro_points([NO_WS_PEER, PUBLIC_A], count=3)
+    picked_hosts = {p["host"] for p in picked}
+
+    assert NO_WS_PEER["host"] not in picked_hosts
+    assert picked_hosts == {PUBLIC_A["host"]}
 
 
 def test_pick_intro_falls_back_to_lan_when_no_public(monkeypatch):

@@ -466,23 +466,31 @@ class HiddenServiceHost:
         for p in candidates:
             ws_port = p.get('ws_port')
             host = p.get('host')
-            if ws_port and host:
-                # Always probe - the probe is the source of truth for
-                # reachability. Skipping just because peer_health is in
-                # cooldown would let one transient failure black-hole
-                # an otherwise-fine peer for 120s, and on small networks
-                # that means the host has nothing left to publish.
-                ok, why = peer_health.probe_tcp(host, int(ws_port), timeout=3.0)
-                if ok:
-                    # mark_success clears any prior cooldown so the rest
-                    # of the system stops avoiding this peer too.
-                    peer_health.mark_success(host, int(ws_port))
-                else:
-                    peer_health.mark_failure(host, int(ws_port),
-                                             reason=f"host intro probe: {why}")
-                    log.info("HS skip intro candidate %s:%s (probe failed: %s)",
-                             host, p.get('port'), why)
-                    continue
+            if not (ws_port and host):
+                # No WS port means we can neither probe its reachability nor
+                # maintain an intro circuit to it - publishing it as an intro
+                # strands every client dial. (A gateway peer registered without
+                # a ws_port did exactly this: it bypassed the probe below and
+                # got advertised as a dead intro.) Exclude it.
+                log.info("HS skip intro candidate %s: no ws_port to verify or "
+                         "maintain an intro circuit", host or p.get('port'))
+                continue
+            # Always probe - the probe is the source of truth for
+            # reachability. Skipping just because peer_health is in
+            # cooldown would let one transient failure black-hole
+            # an otherwise-fine peer for 120s, and on small networks
+            # that means the host has nothing left to publish.
+            ok, why = peer_health.probe_tcp(host, int(ws_port), timeout=3.0)
+            if ok:
+                # mark_success clears any prior cooldown so the rest
+                # of the system stops avoiding this peer too.
+                peer_health.mark_success(host, int(ws_port))
+            else:
+                peer_health.mark_failure(host, int(ws_port),
+                                         reason=f"host intro probe: {why}")
+                log.info("HS skip intro candidate %s:%s (probe failed: %s)",
+                         host, p.get('port'), why)
+                continue
             reachable.append(p)
         if not reachable:
             log.warning(
