@@ -283,6 +283,37 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
         ))
         return report
 
+    # 4c. Rendezvous-point availability.
+    #
+    # A dial needs a rendezvous relay DISTINCT from the host's intro point,
+    # and reachable from this dialer (public, not this machine). On a small
+    # network where the only other public relay is this machine - or there
+    # is no other public relay at all - the dialer is forced to reuse the
+    # intro as the rendezvous point, and a node cannot splice a session to
+    # itself, so the dial below would just time out for ~12s for a reason
+    # that has nothing to do with the host. Detect that topology gap up
+    # front and report the actual fix (add a public relay) instead.
+    if not _has_distinct_rendezvous_point(peers, intros):
+        report.steps.append(DiagnosticStep(
+            name="Rendezvous point",
+            ok=False,
+            summary="no relay available distinct from the host's intro point",
+            detail=(
+                "A dial needs a rendezvous relay separate from the intro "
+                "point, publicly reachable, and not this machine. Right now "
+                "the only such relay is the intro point itself (or this "
+                "machine), so the dialer would reuse the intro as the "
+                "rendezvous point - which cannot splice a session to itself "
+                "and times out. This is a network-size limit, not a problem "
+                "with the host: it is publishing correctly and its intro is "
+                "live. Bring at least one more public relay node online "
+                "(distinct from the intro and from this machine, with a "
+                "publicly-reachable WebSocket port) and the dial will "
+                "succeed."
+            ),
+        ))
+        return report
+
     # 5. End-to-end rendezvous dial.
     #
     # The descriptor-level checks above only confirm the host is *publishing*
@@ -298,6 +329,37 @@ def run_diagnostics(address: str | None = None) -> DiagnosticReport:
     # those failures explicitly.
     _append_rendezvous_step(report, address, intros)
     return report
+
+
+def _has_distinct_rendezvous_point(
+    peers: list[dict],
+    intros: list[dict],
+) -> bool:
+    """Is a usable rendezvous relay available, distinct from the intros?
+
+    Mirrors the eligibility filter in
+    :func:`src.core.rendezvous._pick_rendezvous_point`: a candidate must be
+    a node relay, publicly routable, not this machine, and not one of the
+    descriptor's intro points. If none qualify, every dial is forced to
+    reuse an intro as its rendezvous point and will time out.
+    """
+    from src.core.internet_discovery import (
+        is_public_internet_host,
+        is_self_peer,
+    )
+
+    intro_keys = {(p.get("host"), p.get("port")) for p in intros}
+    for p in peers:
+        if p.get("role") not in (None, "node"):
+            continue
+        if (p.get("host"), p.get("port")) in intro_keys:
+            continue
+        if not is_public_internet_host(p.get("host")):
+            continue
+        if is_self_peer(p):
+            continue
+        return True
+    return False
 
 
 def _append_rendezvous_step(

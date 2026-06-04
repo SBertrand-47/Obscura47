@@ -98,3 +98,42 @@ def test_run_diagnostics_rejects_malformed_address(monkeypatch):
     report = run_diagnostics("not-an-obscura-addr")
     assert report.ok is False
     assert any(s.name == "Address shape" for s in report.steps)
+
+
+class TestDistinctRendezvousPoint:
+    """The topology check that catches 'only public relay is the intro/self'."""
+
+    def _peer(self, host, role="node", port=5001):
+        return {"host": host, "port": port, "role": role, "pub": "x",
+                "ws_port": 5002}
+
+    def test_true_when_a_distinct_public_relay_exists(self, monkeypatch):
+        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
+        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        intros = [self._peer("1.1.1.1")]
+        peers = [self._peer("1.1.1.1"), self._peer("2.2.2.2")]
+        assert diag_mod._has_distinct_rendezvous_point(peers, intros) is True
+
+    def test_false_when_only_other_public_relay_is_self(self, monkeypatch):
+        # 2.2.2.2 is this machine; 1.1.1.1 is the intro -> nothing distinct.
+        monkeypatch.setattr(net_mod, "is_self_peer",
+                            lambda p: p.get("host") == "2.2.2.2")
+        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        intros = [self._peer("1.1.1.1")]
+        peers = [self._peer("1.1.1.1"), self._peer("2.2.2.2")]
+        assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False
+
+    def test_false_when_only_other_relay_is_private(self, monkeypatch):
+        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
+        monkeypatch.setattr(net_mod, "is_public_internet_host",
+                            lambda h: not h.startswith("192.168."))
+        intros = [self._peer("1.1.1.1")]
+        peers = [self._peer("1.1.1.1"), self._peer("192.168.1.33")]
+        assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False
+
+    def test_exit_relays_are_not_rendezvous_candidates(self, monkeypatch):
+        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
+        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        intros = [self._peer("1.1.1.1")]
+        peers = [self._peer("1.1.1.1"), self._peer("3.3.3.3", role="exit")]
+        assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False
