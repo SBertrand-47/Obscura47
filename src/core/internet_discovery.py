@@ -333,6 +333,17 @@ def is_self_peer(peer: dict | None) -> bool:
     # check above silently fail. Routing through our own WAN IP is
     # never useful and tends to be unreachable anyway (no port forward).
     if host and _my_public_ip and host == _my_public_ip:
+        # Exception for a same-NAT fleet (OBSCURA_ALLOW_LAN_PEERS): a
+        # SIBLING - a different machine sharing our WAN IP, advertising its
+        # own distinct service pubkey - is a real relay reachable over the
+        # LAN, and is in fact the normal rendezvous/intro path here. We have
+        # already returned True above if this peer matched our own
+        # (host, port) or our own pubkey, so a peer that reaches this point
+        # carrying a non-empty, distinct pubkey is a sibling, not us; keep it
+        # usable instead of NAT-loop-filtering it. A pubkey-less collapsed
+        # entry stays filtered (we cannot prove it is not us).
+        if allow_lan_peers() and peer.get("pub"):
+            return False
         return True
     return False
 

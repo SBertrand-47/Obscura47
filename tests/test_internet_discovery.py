@@ -123,3 +123,44 @@ def test_allow_lan_peers_env_override(monkeypatch):
     assert disc.allow_lan_peers() is True
     monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "0")
     assert disc.allow_lan_peers() is False
+
+
+class TestIsSelfPeerSibling:
+    """A same-WAN-IP sibling (distinct port + pubkey) is usable in LAN mode.
+
+    In a same-NAT fleet the rendezvous/intro path normally runs through such
+    a sibling, but the WAN-IP self-filter would NAT-loop-filter it. With
+    OBSCURA_ALLOW_LAN_PEERS on, a distinct-pubkey sibling is kept usable.
+    """
+
+    def _isolate(self, monkeypatch):
+        monkeypatch.setattr(disc, "_my_public_ip", "203.0.113.10")
+        monkeypatch.setattr(disc, "get_self_peer_keys", lambda: set())
+        monkeypatch.setattr(disc, "get_self_peer_pubs", lambda: set())
+
+    def test_sibling_filtered_by_default(self, monkeypatch):
+        self._isolate(monkeypatch)
+        monkeypatch.delenv("OBSCURA_ALLOW_LAN_PEERS", raising=False)
+        sibling = {"host": "203.0.113.10", "port": 9999, "pub": "sibling-pub"}
+        assert disc.is_self_peer(sibling) is True
+
+    def test_sibling_usable_in_lan_mode(self, monkeypatch):
+        self._isolate(monkeypatch)
+        monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
+        sibling = {"host": "203.0.113.10", "port": 9999, "pub": "sibling-pub"}
+        assert disc.is_self_peer(sibling) is False
+
+    def test_publess_collapsed_entry_stays_self_in_lan_mode(self, monkeypatch):
+        self._isolate(monkeypatch)
+        monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
+        entry = {"host": "203.0.113.10", "port": 9999}  # no pubkey to prove identity
+        assert disc.is_self_peer(entry) is True
+
+    def test_own_hostport_always_self_even_in_lan_mode(self, monkeypatch):
+        monkeypatch.setattr(disc, "_my_public_ip", "203.0.113.10")
+        monkeypatch.setattr(disc, "get_self_peer_keys",
+                            lambda: {("203.0.113.10", 5001)})
+        monkeypatch.setattr(disc, "get_self_peer_pubs", lambda: set())
+        monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
+        me = {"host": "203.0.113.10", "port": 5001, "pub": "sibling-pub"}
+        assert disc.is_self_peer(me) is True
