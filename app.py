@@ -593,6 +593,7 @@ class _DiscoverDialog(QDialog):
         a result per site so its card flips from 'checking' to live / not
         responding. Sequential to avoid opening many circuits at once; a newer
         Refresh (higher gen) abandons this run."""
+        from src.utils import publications
         from src.utils.site_directory import probe_site_live
         for addr in addrs:
             if gen != self._probe_gen:
@@ -600,7 +601,16 @@ class _DiscoverDialog(QDialog):
             result = probe_site_live(addr)
             if gen != self._probe_gen:
                 return
-            self._liveness.emit(addr, bool(result.get("live")))
+            live = bool(result.get("live"))
+            # Persist the verdict, but only for addresses this machine
+            # actually published - record_reachability no-ops on anything
+            # not in the publication ledger, so dialing a stranger's site
+            # never writes a phantom entry.
+            try:
+                publications.record_reachability(addr, live)
+            except Exception:
+                pass
+            self._liveness.emit(addr, live)
 
     def _on_loaded(self, sites: list, ok: bool, err: str):
         self._refresh_btn.setEnabled(True)

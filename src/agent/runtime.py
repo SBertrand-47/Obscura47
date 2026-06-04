@@ -66,6 +66,7 @@ class AgentRuntime:
         bind_port: int = 0,
         observer: "Observer | None" = None,
         policy: SandboxPolicy | None = None,
+        track_publication: bool = True,
     ):
         self.name = name
         self.key_path = key_path
@@ -73,6 +74,7 @@ class AgentRuntime:
         self.bind_port = int(bind_port)
         self.observer = observer
         self.policy = policy
+        self.track_publication = track_publication
 
         self._http_server = None
         self._http_thread: threading.Thread | None = None
@@ -162,6 +164,19 @@ class AgentRuntime:
                 return False
 
         self._started_at = time.time()
+
+        # Record what this agent put on the network so it can answer
+        # "what have I published, and is it reachable?" later, even when
+        # publishing programmatically rather than via the host CLI.
+        if self.track_publication:
+            try:
+                from src.utils import publications
+                publications.record_publish(
+                    self._host.address, name=self.name, target=self.local_url,
+                )
+            except Exception:
+                log.debug("publication tracking failed", exc_info=True)
+
         self._republish_thread = threading.Thread(
             target=self._republish_loop,
             name=f"agent-republish-{self.name}",
