@@ -349,7 +349,15 @@ def _host_status(argv: list[str]):
         any_unreachable = False
         for label, address in _targets():
             reachable, report = publications.check_reachability(address)
-            verdict = "REACHABLE" if reachable else "UNREACHABLE"
+            if reachable:
+                verdict = "REACHABLE"
+            elif report.inconclusive:
+                # This machine can't dial (no rendezvous relay distinct from
+                # the intro), but the site may be reachable elsewhere - don't
+                # call it down. Verify from another node to be sure.
+                verdict = "INCONCLUSIVE (verify from another node)"
+            else:
+                verdict = "UNREACHABLE"
             if quiet:
                 first = report.first_failure
                 tail = f" - {first.name}: {first.summary}" if first else ""
@@ -358,7 +366,7 @@ def _host_status(argv: list[str]):
                 print(f"\n  Checking {label} ({address}) ...")
                 print(f"  {verdict}\n")
                 print(format_report_text(report))
-            if not reachable:
+            if not reachable and not report.inconclusive:
                 any_unreachable = True
         return any_unreachable
 

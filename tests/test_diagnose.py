@@ -101,39 +101,53 @@ def test_run_diagnostics_rejects_malformed_address(monkeypatch):
 
 
 class TestDistinctRendezvousPoint:
-    """The topology check that catches 'only public relay is the intro/self'."""
+    """The topology check that catches 'only relay is the intro/self'.
+
+    Mirrors src.core.rendezvous._pick_rendezvous_point, so it monkeypatches
+    the same eligibility predicates: allow_lan_peers / is_self_peer /
+    is_private_peer.
+    """
 
     def _peer(self, host, role="node", port=5001):
         return {"host": host, "port": port, "role": role, "pub": "x",
                 "ws_port": 5002}
 
+    def _patch(self, monkeypatch, *, lan_ok=False, self_hosts=(), private_hosts=()):
+        monkeypatch.setattr(net_mod, "allow_lan_peers", lambda: lan_ok)
+        monkeypatch.setattr(net_mod, "is_self_peer",
+                            lambda p: p.get("host") in self_hosts)
+        monkeypatch.setattr(net_mod, "is_private_peer",
+                            lambda p: p.get("host") in private_hosts)
+
     def test_true_when_a_distinct_public_relay_exists(self, monkeypatch):
-        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
-        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        self._patch(monkeypatch)
         intros = [self._peer("1.1.1.1")]
         peers = [self._peer("1.1.1.1"), self._peer("2.2.2.2")]
         assert diag_mod._has_distinct_rendezvous_point(peers, intros) is True
 
     def test_false_when_only_other_public_relay_is_self(self, monkeypatch):
         # 2.2.2.2 is this machine; 1.1.1.1 is the intro -> nothing distinct.
-        monkeypatch.setattr(net_mod, "is_self_peer",
-                            lambda p: p.get("host") == "2.2.2.2")
-        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        self._patch(monkeypatch, self_hosts=("2.2.2.2",))
         intros = [self._peer("1.1.1.1")]
         peers = [self._peer("1.1.1.1"), self._peer("2.2.2.2")]
         assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False
 
-    def test_false_when_only_other_relay_is_private(self, monkeypatch):
-        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
-        monkeypatch.setattr(net_mod, "is_public_internet_host",
-                            lambda h: not h.startswith("192.168."))
+    def test_false_when_only_other_relay_is_private_and_lan_off(self, monkeypatch):
+        self._patch(monkeypatch, lan_ok=False, private_hosts=("192.168.1.33",))
         intros = [self._peer("1.1.1.1")]
         peers = [self._peer("1.1.1.1"), self._peer("192.168.1.33")]
         assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False
 
+    def test_true_when_private_relay_and_lan_allowed(self, monkeypatch):
+        # With LAN peers allowed a same-LAN relay is a valid rendezvous
+        # point, so the dial would succeed - the check must agree.
+        self._patch(monkeypatch, lan_ok=True, private_hosts=("192.168.1.33",))
+        intros = [self._peer("1.1.1.1")]
+        peers = [self._peer("1.1.1.1"), self._peer("192.168.1.33")]
+        assert diag_mod._has_distinct_rendezvous_point(peers, intros) is True
+
     def test_exit_relays_are_not_rendezvous_candidates(self, monkeypatch):
-        monkeypatch.setattr(net_mod, "is_self_peer", lambda p: False)
-        monkeypatch.setattr(net_mod, "is_public_internet_host", lambda h: True)
+        self._patch(monkeypatch)
         intros = [self._peer("1.1.1.1")]
         peers = [self._peer("1.1.1.1"), self._peer("3.3.3.3", role="exit")]
         assert diag_mod._has_distinct_rendezvous_point(peers, intros) is False

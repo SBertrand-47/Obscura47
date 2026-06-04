@@ -304,11 +304,17 @@ def check_reachability(
     ``record`` is set the verdict is written to the ledger so a later
     ``host published`` reflects it. Returns ``(reachable, report)`` so the
     caller can also surface *why* a probe failed.
+
+    An *inconclusive* report (``report.inconclusive`` - this machine has no
+    rendezvous relay distinct from the host's intro point) is never
+    recorded as a hard failure: the site may well be reachable from another
+    vantage, so stamping ``reachable=False`` would be a lie. The prior
+    verdict is left untouched.
     """
     from src.utils.diagnose import run_diagnostics
 
     report = run_diagnostics(address)
     reachable = report.ok
-    if record:
+    if record and not report.inconclusive:
         record_reachability(address, reachable, path=path)
     return reachable, report

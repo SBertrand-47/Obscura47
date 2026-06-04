@@ -100,12 +100,30 @@ class TestReachability:
 
         class _FakeReport:
             ok = True
+            inconclusive = False
 
         monkeypatch.setattr(
             "src.utils.diagnose.run_diagnostics", lambda a: _FakeReport()
         )
         reachable, report = publications.check_reachability(ADDR, path=ledger)
         assert reachable is True
+        assert publications.get(ADDR, path=ledger).reachable is True
+
+    def test_inconclusive_report_does_not_record_a_failure(self, ledger, monkeypatch):
+        # A prior good verdict must survive a later inconclusive probe.
+        publications.record_publish(ADDR, path=ledger)
+        publications.record_reachability(ADDR, True, path=ledger)
+
+        class _Inconclusive:
+            ok = False
+            inconclusive = True
+
+        monkeypatch.setattr(
+            "src.utils.diagnose.run_diagnostics", lambda a: _Inconclusive()
+        )
+        reachable, _ = publications.check_reachability(ADDR, path=ledger)
+        assert reachable is False
+        # The ledger keeps the earlier REACHABLE rather than flipping to False.
         assert publications.get(ADDR, path=ledger).reachable is True
 
 
