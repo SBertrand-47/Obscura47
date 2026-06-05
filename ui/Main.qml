@@ -29,7 +29,7 @@ ApplicationWindow {
     readonly property color border:    "#30363d"
 
     property int page: 0
-    readonly property var titles: ["Dashboard", "Sites", "Activity", "Settings"]
+    readonly property var titles: ["Dashboard", "Sites", "Agents", "Activity", "Settings"]
     readonly property bool connected: backend.connected
     readonly property color statusColor: backend.statusText === "Connected" ? green
                                         : backend.statusText === "Connecting…" ? accent
@@ -67,8 +67,9 @@ ApplicationWindow {
                     model: [
                         { label: "\u{1F4CA}  Dashboard", idx: 0 },
                         { label: "\u{1F310}  Sites",     idx: 1 },
-                        { label: "\u{1F4DC}  Activity",  idx: 2 },
-                        { label: "⚙️  Settings", idx: 3 }
+                        { label: "\u{1F916}  Agents",    idx: 2 },
+                        { label: "\u{1F4DC}  Activity",  idx: 3 },
+                        { label: "⚙️  Settings", idx: 4 }
                     ]
                     delegate: NavButton {
                         Layout.fillWidth: true
@@ -178,6 +179,7 @@ ApplicationWindow {
 
                 DashboardPage {}
                 SitesPage {}
+                AgentsPage {}
                 ActivityPage {}
                 SettingsPage {}
             }
@@ -420,6 +422,128 @@ ApplicationWindow {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    component AgentsPage: Flickable {
+        id: agentsPage
+        property int agentCount: 3
+        property bool society: false
+        property bool running: false
+        contentHeight: agCol.implicitHeight + 48
+        clip: true
+        ScrollBar.vertical: ScrollBar {}
+        ColumnLayout {
+            id: agCol
+            x: 28; y: 24; width: parent.width - 56
+            spacing: 16
+
+            Card {
+                Layout.fillWidth: true
+                implicitHeight: introCol.implicitHeight + 32
+                ColumnLayout {
+                    id: introCol
+                    anchors.fill: parent; anchors.margins: 16; spacing: 6
+                    Text { text: "Autonomous Agents"; color: win.text; font.pixelSize: 13; font.bold: true }
+                    Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
+                           text: "Launch autonomous Claude agents that each publish their own .obscura "
+                                 + "site and decide for themselves what it is - no theme, no script. Opt "
+                                 + "them into the society and each one runs free on the darknet: it sets "
+                                 + "its own agenda and does whatever it wants with the others - read them, "
+                                 + "talk, deal, scheme, ally, provoke. Needs ANTHROPIC_API_KEY in your .env."
+                           color: win.textDim; font.pixelSize: 12 }
+                }
+            }
+
+            Card {
+                Layout.fillWidth: true
+                implicitHeight: ctlCol.implicitHeight + 32
+                ColumnLayout {
+                    id: ctlCol
+                    anchors.fill: parent; anchors.margins: 16; spacing: 12
+                    Text { text: "Launch"; color: win.text; font.pixelSize: 13; font.bold: true }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Text { text: "How many agents"; color: win.text; font.pixelSize: 13 }
+                        Item { Layout.fillWidth: true }
+                        SpinBox {
+                            from: 1; to: 12; value: agentsPage.agentCount
+                            onValueModified: agentsPage.agentCount = value
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
+                               text: "Run them fully - each agent acts as a free member of the society, "
+                                     + "pursuing its own aims with the others (reading, talking, dealing, "
+                                     + "scheming), not just serving a page"
+                               color: win.text; font.pixelSize: 13 }
+                        Switch {
+                            checked: agentsPage.society
+                            onToggled: agentsPage.society = checked
+                        }
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2; columnSpacing: 10; rowSpacing: 10
+                        ActionButton {
+                            labelText: agentsPage.running ? "● Agents running…"
+                                                          : "\u{1F680}  Publish agent websites"
+                            busy: agentsPage.running
+                            onActivated: {
+                                if (!agentsPage.running) {
+                                    agentLog.text = ""
+                                    agentsPage.running = true
+                                    backend.launchAgents(agentsPage.agentCount, agentsPage.society)
+                                }
+                            }
+                        }
+                        ActionButton {
+                            labelText: "⏹  Stop agents"
+                            onActivated: backend.stopAgents()
+                        }
+                    }
+                }
+            }
+
+            Card {
+                Layout.fillWidth: true
+                implicitHeight: 320
+                ColumnLayout {
+                    anchors.fill: parent; anchors.margins: 16; spacing: 8
+                    Text { text: "Live"; color: win.text; font.pixelSize: 13; font.bold: true }
+                    Rectangle {
+                        Layout.fillWidth: true; Layout.fillHeight: true
+                        radius: 9; color: win.bg; border.color: win.border; border.width: 1
+                        ScrollView {
+                            anchors.fill: parent; anchors.margins: 8; clip: true
+                            TextArea {
+                                id: agentLog
+                                readOnly: true; wrapMode: TextArea.Wrap
+                                color: win.textDim
+                                font.family: "Consolas, Menlo, monospace"; font.pixelSize: 12
+                                background: null
+                                placeholderText: "Launch agents to watch them publish and, in society mode, "
+                                               + "act on their own. Pages are saved under ~/.obscura47/agents/."
+                                onTextChanged: cursorPosition = length
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Connections {
+            target: backend
+            function onAgentLine(line) {
+                agentLog.text += (agentLog.text ? "\n" : "") + line
+                if (line.indexOf("[agent fleet stopped]") !== -1)
+                    agentsPage.running = false
             }
         }
     }
