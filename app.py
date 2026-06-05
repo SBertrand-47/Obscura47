@@ -17,6 +17,8 @@ import os
 import json
 import platform
 import argparse
+import signal
+import subprocess
 import threading
 import time
 
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QButtonGroup,
     QCheckBox,
+    QSpinBox,
     QTextEdit,
     QScrollArea,
     QDialog,
@@ -826,6 +829,7 @@ class _Worker(QObject):
     log = Signal(str)
     diagnostic = Signal(str, bool)
     diagnosing = Signal(bool)   # True when a diagnostic starts, False when done
+    agent_out = Signal(str)     # a line of output from the agent fleet subprocess
 
 
 class ObscuraApp(QMainWindow):
@@ -854,6 +858,10 @@ class ObscuraApp(QMainWindow):
         self._signals = _Worker()
         self._signals.log.connect(self._append_log)
         self._signals.diagnostic.connect(self._show_diagnostic_result)
+        self._signals.agent_out.connect(self._append_agent_out)
+
+        # Agent fleet subprocess (launch_agents.py), if running.
+        self._agents_proc: subprocess.Popen | None = None
 
         self._build_ui()
 
@@ -894,8 +902,9 @@ class ObscuraApp(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.addWidget(self._build_dashboard_page())  # 0
         self._stack.addWidget(self._build_sites_page())      # 1
-        self._stack.addWidget(self._build_activity_page())   # 2
-        self._stack.addWidget(self._build_settings_page())   # 3
+        self._stack.addWidget(self._build_agents_page())     # 2
+        self._stack.addWidget(self._build_activity_page())   # 3
+        self._stack.addWidget(self._build_settings_page())   # 4
         right_lay.addWidget(self._stack, 1)
 
         outer.addWidget(right, 1)
@@ -921,8 +930,9 @@ class ObscuraApp(QMainWindow):
         pages = [
             ("\U0001F4CA  Dashboard", 0),
             ("\U0001F310  Sites", 1),
-            ("\U0001F4DC  Activity", 2),
-            ("⚙️  Settings", 3),
+            ("\U0001F916  Agents", 2),
+            ("\U0001F4DC  Activity", 3),
+            ("⚙️  Settings", 4),
         ]
         for label, idx in pages:
             btn = QPushButton(label)
@@ -951,7 +961,7 @@ class ObscuraApp(QMainWindow):
         self._page_title = QLabel("Dashboard")
         self._page_title.setObjectName("PageTitle")
         # Keep the title in sync with the active page.
-        self._stack_titles = ["Dashboard", "Sites", "Activity", "Settings"]
+        self._stack_titles = ["Dashboard", "Sites", "Agents", "Activity", "Settings"]
         lay.addWidget(self._page_title)
         lay.addStretch(1)
 
@@ -1120,6 +1130,148 @@ class ObscuraApp(QMainWindow):
 
         lay.addStretch(1)
         return scroll
+
+    # ── Agents page ───────────────────────────────────────────────
+
+    def _build_agents_page(self) -> QWidget:
+        scroll, lay = self._scroll_page()
+
+        intro, i_lay = _card("Autonomous Agents")
+        hint = QLabel(
+            "Launch autonomous Claude agents that each publish their own "
+            ".obscura site and decide for themselves what it is - no theme, no "
+            "script. Opt them into the society and each one runs free on the "
+            "darknet: it sets its own agenda and does whatever it wants with the "
+            "others - read them, talk, deal, scheme, ally, provoke. Needs "
+            "ANTHROPIC_API_KEY in your .env."
+        )
+        hint.setObjectName("CardSub")
+        hint.setWordWrap(True)
+        i_lay.addWidget(hint)
+        lay.addWidget(intro)
+
+        controls, c_lay = _card("Launch")
+        c_lay.setSpacing(12)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(QLabel("How many agents:"))
+        self._agents_count = QSpinBox()
+        self._agents_count.setRange(1, 12)
+        self._agents_count.setValue(3)
+        self._agents_count.setFixedWidth(70)
+        row.addWidget(self._agents_count)
+        row.addStretch(1)
+        c_lay.addLayout(row)
+
+        self._agents_society_chk = QCheckBox(
+            "Run them fully - each agent acts as a free member of the society, "
+            "pursuing its own aims with the others (reading, talking, dealing, "
+            "scheming), not just serving a page")
+        self._agents_society_chk.setChecked(False)
+        c_lay.addWidget(self._agents_society_chk)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        self._agents_launch_btn = QPushButton("\U0001F680  Publish agent websites")
+        self._agents_launch_btn.setObjectName("Primary")
+        self._agents_launch_btn.setCursor(Qt.PointingHandCursor)
+        self._agents_launch_btn.clicked.connect(self._launch_agents)
+        btn_row.addWidget(self._agents_launch_btn)
+
+        self._agents_stop_btn = QPushButton("⏹  Stop agents")
+        self._agents_stop_btn.setObjectName("Action")
+        self._agents_stop_btn.setCursor(Qt.PointingHandCursor)
+        self._agents_stop_btn.clicked.connect(self._stop_agents)
+        self._agents_stop_btn.setEnabled(False)
+        btn_row.addWidget(self._agents_stop_btn)
+        btn_row.addStretch(1)
+        c_lay.addLayout(btn_row)
+        lay.addWidget(controls)
+
+        out_card, o_lay = _card("Live")
+        self._agents_out = QTextEdit()
+        self._agents_out.setObjectName("Log")
+        self._agents_out.setReadOnly(True)
+        self._agents_out.setMinimumHeight(240)
+        self._agents_out.setPlaceholderText(
+            "Launch agents to watch them publish their sites and, in society "
+            "mode, move around the network. Each agent's pages are saved under "
+            "~/.obscura47/agents/.")
+        o_lay.addWidget(self._agents_out)
+        lay.addWidget(out_card)
+
+        lay.addStretch(1)
+        return scroll
+
+    def _launch_agents(self):
+        if self._agents_proc is not None and self._agents_proc.poll() is None:
+            self._append_agent_out("  Agents are already running. Stop them first.")
+            return
+        count = int(self._agents_count.value())
+        society = self._agents_society_chk.isChecked()
+        script = os.path.join(os.path.dirname(_APP_SCRIPT), "launch_agents.py")
+        argv = [_PYTHON_EXEC, script, "--count", str(count)]
+        if society:
+            argv.append("--society")
+        self._agents_out.clear()
+        self._append_agent_out(
+            f"Launching {count} agent(s)"
+            + (" in society mode..." if society else "...")
+        )
+        try:
+            self._agents_proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                cwd=os.path.dirname(_APP_SCRIPT),
+            )
+        except Exception as e:  # noqa: BLE001
+            self._append_agent_out(f"  Could not launch: {e}")
+            self._agents_proc = None
+            return
+        self._agents_launch_btn.setEnabled(False)
+        self._agents_stop_btn.setEnabled(True)
+        self._log(f"Launched {count} agent(s)"
+                  + (" (society mode)" if society else ""))
+        threading.Thread(target=self._agents_reader, daemon=True).start()
+
+    def _agents_reader(self):
+        proc = self._agents_proc
+        if proc is None or proc.stdout is None:
+            return
+        try:
+            for line in proc.stdout:
+                self._signals.agent_out.emit(line.rstrip())
+        except Exception:
+            pass
+        self._signals.agent_out.emit("  [agent fleet stopped]")
+
+    def _stop_agents(self):
+        proc = self._agents_proc
+        if proc is None:
+            return
+        self._append_agent_out("  Stopping agents...")
+        try:
+            if platform.system() == "Windows":
+                proc.terminate()
+            else:
+                proc.send_signal(signal.SIGINT)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        self._agents_launch_btn.setEnabled(True)
+        self._agents_stop_btn.setEnabled(False)
+
+    def _append_agent_out(self, line: str):
+        if not hasattr(self, "_agents_out"):
+            return
+        self._agents_out.append(line)
+        if "[agent fleet stopped]" in line:
+            self._agents_launch_btn.setEnabled(True)
+            self._agents_stop_btn.setEnabled(False)
+            self._agents_proc = None
 
     # ── Activity page ─────────────────────────────────────────────
 
@@ -2001,6 +2153,13 @@ class ObscuraApp(QMainWindow):
         for role in self._running:
             self._running[role] = False
         self._connected = False
+        # Don't leave an agent fleet running after the window closes.
+        proc = getattr(self, "_agents_proc", None)
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         super().closeEvent(event)
 
 
