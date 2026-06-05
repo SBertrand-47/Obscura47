@@ -29,6 +29,8 @@ Usage:
     python launch_agents.py                    # 3 agents: alpha, beta, gamma
     python launch_agents.py --count 3
     python launch_agents.py --names raven,quill,moth
+    python launch_agents.py --society          # they also roam and interact
+    python launch_agents.py --society --society-interval 30 --society-rounds 8
     python launch_agents.py --directory directory.obscura   # also list them
     python launch_agents.py --model claude-sonnet-4-6
 
@@ -41,11 +43,15 @@ Stop with Ctrl+C; every agent withdraws its descriptor on the way out.
 from __future__ import annotations
 
 import argparse
+import glob
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -89,6 +95,173 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # The serve tool fills rationale first and the page body last; give the body
 # enough room that a real page is never squeezed out by the cap.
 MAX_TOKENS = 1800
+
+# Society mode: how often each member acts, and how many actions before it goes
+# quiet (0 = keep going). Defaults are calm so a fleet can run a long time.
+SOCIETY_INTERVAL = 60
+SOCIETY_ROUNDS = 0
+
+_AGENTS_DIR = os.path.join(os.path.expanduser("~"), ".obscura47", "agents")
+
+
+# --------------------------------------------------------------------------- #
+# Fleet roster: how members find each other. Each agent drops its own peer file
+# (no shared-file write race), and reads the others' to know who is out there.
+# --------------------------------------------------------------------------- #
+
+def _announce(name: str, address: str, local_url: str) -> None:
+    os.makedirs(_AGENTS_DIR, exist_ok=True)
+    path = os.path.join(_AGENTS_DIR, f"{name}.peer.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"name": name, "address": address, "local_url": local_url,
+                   "ts": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def _unannounce(name: str) -> None:
+    try:
+        os.remove(os.path.join(_AGENTS_DIR, f"{name}.peer.json"))
+    except OSError:
+        pass
+
+
+def _peers(name: str) -> dict:
+    out: dict = {}
+    for p in glob.glob(os.path.join(_AGENTS_DIR, "*.peer.json")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        n = rec.get("name")
+        if n and n != name and rec.get("local_url"):
+            out[n] = rec
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Society member: an agent that, on a loop, moves around the network on its own.
+# --------------------------------------------------------------------------- #
+
+_SOCIETY_TOOL = {
+    "name": "act",
+    "description": (
+        "Take ONE action in the society right now. You can visit a member's "
+        "page, leave a note on a member, or idle. Stay in character."),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "rationale": {"type": "string", "description":
+                          "REQUIRED. One sentence: why you're doing this."},
+            "action": {"type": "string", "enum": ["visit", "leave", "idle"],
+                       "description": "visit a member's page (GET), leave a "
+                       "note on a member (POST), or idle this cycle."},
+            "target": {"type": "string", "description":
+                       "the member to act on (one of the listed names). "
+                       "Leave empty to idle."},
+            "path": {"type": "string", "description":
+                     "path on that member, e.g. '/' or '/signal'. Default '/'."},
+            "note": {"type": "string", "description":
+                     "for 'leave': the message to post. Empty otherwise."},
+        },
+        "required": ["rationale", "action"],
+    },
+}
+
+
+def _society_execute(name: str, action: str, target: str, path: str,
+                     note: str, peers: dict) -> str:
+    if action == "idle" or not target:
+        return "idle"
+    peer = peers.get(target)
+    if not peer:
+        return f"no member named '{target}'"
+    base = (peer.get("local_url") or "").rstrip("/")
+    if not base:
+        return "member not reachable"
+    if not path.startswith("/"):
+        path = "/" + path
+    url = base + path
+    headers = {"x-obscura-session": f"society-{name}"}
+    try:
+        if action == "leave":
+            req = urllib.request.Request(
+                url, data=note.encode("utf-8"), method="POST",
+                headers={**headers, "Content-Type": "text/plain"})
+        else:
+            req = urllib.request.Request(url, method="GET", headers=headers)
+        resp = urllib.request.urlopen(req, timeout=90)
+        body = resp.read().decode("utf-8", "replace")
+        return f"{action} ok ({len(body)} bytes back)"
+    except Exception as e:  # noqa: BLE001
+        return f"{action} failed: {e}"
+
+
+def _society_loop(name: str, site, *, interval: int, rounds: int,
+                  stop: threading.Event) -> None:
+    """Let one agent participate in the society: move around and leave its mark.
+
+    Reuses the site's own model/voice. Each cycle the agent sees who else is out
+    there and what it has done lately, then decides one action - visiting a
+    member, leaving a note, or idling. Visiting/posting triggers the *other*
+    agent to respond and remember, so the members genuinely read and write to
+    one another. Runs until ``stop`` is set (or ``rounds`` actions, if > 0)."""
+    client = site._client
+    history: list[str] = []
+    system = [{"type": "text", "text": (
+        f"You are '{name}', a member of a small society of autonomous agents on "
+        "Obscura, an untraceable overlay network. You each run your own site and "
+        "are free to roam. There is no task and no rule - be a real participant: "
+        "explore the others, react to what they've made, leave your mark, build "
+        "rapport or rivalry, whatever you choose. Stay in character as whoever "
+        "your own site has made you.")}]
+    rnd = 0
+    # A short beat so everyone has announced before the first move.
+    stop.wait(min(interval, 8))
+    while not stop.is_set():
+        if rounds and rnd >= rounds:
+            return
+        peers = _peers(name)
+        if not peers:
+            stop.wait(interval)
+            continue
+        roster = "\n".join(f"  - {pn}: {pv.get('address')}"
+                           for pn, pv in peers.items())
+        recent = "\n".join(f"  {h}" for h in history[-6:]) or "  (nothing yet)"
+        obs = (f"Members reachable right now:\n{roster}\n\n"
+               f"What you've done lately:\n{recent}\n\n"
+               "Decide ONE thing to do this moment with the act tool.")
+        try:
+            resp = client.messages.create(
+                model=site.model, max_tokens=600, system=system,
+                tools=[_SOCIETY_TOOL],
+                tool_choice={"type": "tool", "name": "act",
+                             "disable_parallel_tool_use": True},
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": obs}]}])
+        except Exception as e:  # noqa: BLE001
+            print(f"  [{name}] society paused (model error): {e}", file=sys.stderr)
+            stop.wait(interval)
+            continue
+        act = next((b.input or {} for b in resp.content
+                    if getattr(b, "type", None) == "tool_use"), {})
+        action = (act.get("action") or "idle").lower()
+        target = (act.get("target") or "").strip()
+        path = act.get("path") or "/"
+        note = act.get("note") or ""
+        rationale = (act.get("rationale") or "").strip()
+        outcome = _society_execute(name, action, target, path, note, peers)
+        history.append(f"{action} {target}{path} -> {outcome}".strip())
+        try:
+            site.observer.emit("society.act", action=action, target=target,
+                               path=path, rationale=rationale, outcome=outcome)
+        except Exception:
+            pass
+        where = f" {target}{path}" if action != "idle" else ""
+        print(f"  [{name}] ~{where or ' idle'}  {rationale}", flush=True)
+        rnd += 1
+        stop.wait(interval)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +333,9 @@ def _knock(app, name: str) -> str | None:
 
 
 def _run_agent(name: str, *, model: str, directory: str | None,
-               knock: bool = True) -> int:
+               knock: bool = True, society: bool = False,
+               interval: int = SOCIETY_INTERVAL,
+               rounds: int = SOCIETY_ROUNDS) -> int:
     """Bring up one open-ended Claude agent at a stable `.obscura` address."""
     from src.agent.observatory import JsonlSink, MultiSink, Observer
     from src.agent.runtime import AgentRuntime
@@ -210,11 +385,30 @@ def _run_agent(name: str, *, model: str, directory: str | None,
         if home:
             print(f"  [{name}] homepage saved -> {home}", flush=True)
 
+    # Join the fleet roster so other members can find and reach this one.
+    try:
+        _announce(name, runtime.address, runtime.local_url)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{name}] could not announce to fleet: {e}", file=sys.stderr)
+
+    stop = threading.Event()
+    soc_thread: threading.Thread | None = None
+    if society:
+        print(f"  [{name}] joining the society (acting every ~{interval}s)",
+              flush=True)
+        soc_thread = threading.Thread(
+            target=_society_loop, args=(name, site),
+            kwargs={"interval": interval, "rounds": rounds, "stop": stop},
+            name=f"society-{name}", daemon=True)
+        soc_thread.start()
+
     try:
         runtime.join()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
+        _unannounce(name)
         runtime.stop()
     return 0
 
@@ -258,14 +452,17 @@ def _check_brain() -> bool:
     return ok
 
 
-def _spawn(name: str, model: str, directory: str | None,
-           knock: bool) -> subprocess.Popen:
+def _spawn(name: str, model: str, directory: str | None, knock: bool,
+           society: bool, interval: int, rounds: int) -> subprocess.Popen:
     argv = [sys.executable, os.path.abspath(__file__), "--agent", name,
             "--model", model]
     if directory:
         argv += ["--directory", directory]
     if not knock:
         argv += ["--no-knock"]
+    if society:
+        argv += ["--society", "--society-interval", str(interval),
+                 "--society-rounds", str(rounds)]
     return subprocess.Popen(argv)
 
 
@@ -285,12 +482,20 @@ def main() -> int:
                         help="optional .obscura directory to register each agent in")
     parser.add_argument("--no-knock", action="store_true",
                         help="don't send each agent a startup GET / to wake it up")
+    parser.add_argument("--society", action="store_true",
+                        help="run agents fully: each one roams the network and "
+                             "interacts with the others, not just serving a site")
+    parser.add_argument("--society-interval", type=int, default=SOCIETY_INTERVAL,
+                        help=f"seconds between each member's actions (default {SOCIETY_INTERVAL})")
+    parser.add_argument("--society-rounds", type=int, default=SOCIETY_ROUNDS,
+                        help="actions per member before going quiet (0 = forever)")
     args = parser.parse_args()
 
     # Child mode: this process IS one agent.
     if args.agent:
         return _run_agent(args.agent, model=args.model, directory=args.directory,
-                          knock=not args.no_knock)
+                          knock=not args.no_knock, society=args.society,
+                          interval=args.society_interval, rounds=args.society_rounds)
 
     # Parent mode: pick names, show addresses, spawn a process per agent.
     if args.names:
@@ -330,9 +535,14 @@ def main() -> int:
 
     signal.signal(signal.SIGINT, _stop)
 
+    if args.society:
+        print("  Society mode: each agent will also roam and interact with the "
+              "others.\n")
     for name in names:
         procs.append(_spawn(name, args.model, args.directory,
-                            knock=not args.no_knock))
+                            knock=not args.no_knock, society=args.society,
+                            interval=args.society_interval,
+                            rounds=args.society_rounds))
         time.sleep(0.4)  # stagger startups so logs are legible
 
     try:
