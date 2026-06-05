@@ -46,11 +46,13 @@ import argparse
 import glob
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -141,84 +143,117 @@ def _peers(name: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Society member: an agent that, on a loop, moves around the network on its own.
+# Free agent: an autonomous actor on the darknet. No action menu - it decides
+# its own agenda and can reach any member with any request it likes, then reads
+# the reply and reacts. Whatever emerges, emerges.
 # --------------------------------------------------------------------------- #
 
 _SOCIETY_TOOL = {
-    "name": "act",
+    "name": "move",
     "description": (
-        "Take ONE action in the society right now. You can visit a member's "
-        "page, leave a note on a member, or idle. Stay in character."),
+        "Your next move on the network. You are a free agent - do whatever you "
+        "want. Reach another member to read them or send them anything at all, "
+        "or wait and watch."),
     "input_schema": {
         "type": "object",
         "properties": {
-            "rationale": {"type": "string", "description":
-                          "REQUIRED. One sentence: why you're doing this."},
-            "action": {"type": "string", "enum": ["visit", "leave", "idle"],
-                       "description": "visit a member's page (GET), leave a "
-                       "note on a member (POST), or idle this cycle."},
-            "target": {"type": "string", "description":
-                       "the member to act on (one of the listed names). "
-                       "Leave empty to idle."},
+            "thinking": {"type": "string", "description":
+                "REQUIRED. What you want and what you're doing about it, in your "
+                "own words. This is your private agenda and it carries forward, "
+                "so decide who you are becoming and what you are after."},
+            "action": {"type": "string", "enum": ["reach", "wait"], "description":
+                "'reach' to make an HTTP request to a member (read their site, "
+                "talk to them, make an offer, strike a deal, provoke them, send "
+                "them anything you want); 'wait' to sit back this turn."},
+            "member": {"type": "string", "description":
+                "who to reach - one of the listed member names. Empty when waiting."},
+            "method": {"type": "string", "enum": ["GET", "POST"], "description":
+                "GET to read one of their pages, POST to send something to them."},
             "path": {"type": "string", "description":
-                     "path on that member, e.g. '/' or '/signal'. Default '/'."},
-            "note": {"type": "string", "description":
-                     "for 'leave': the message to post. Empty otherwise."},
+                "the path on that member to hit - '/', '/signal', '/market', "
+                "'/trade', or any path you want to invent a convention around. "
+                "Default '/'."},
+            "body": {"type": "string", "description":
+                "when POSTing: whatever you are sending them - a message, an "
+                "offer, a deal, a threat, a payload. Your words, your move."},
         },
-        "required": ["rationale", "action"],
+        "required": ["thinking", "action"],
     },
 }
 
 
-def _society_execute(name: str, action: str, target: str, path: str,
-                     note: str, peers: dict) -> str:
-    if action == "idle" or not target:
-        return "idle"
-    peer = peers.get(target)
+def _snippet(text: str, limit: int = 600) -> str:
+    """Condense a response (strip tags/whitespace) so an agent can read it."""
+    t = re.sub(r"<[^>]+>", " ", text or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:limit]
+
+
+def _society_execute(name: str, action: str, member: str, method: str,
+                     path: str, body: str, peers: dict) -> tuple[str, str]:
+    """Carry out one move. Returns (outcome line, the member's reply text)."""
+    if action != "reach" or not member:
+        return "waited", ""
+    peer = peers.get(member)
     if not peer:
-        return f"no member named '{target}'"
+        return f"no member named '{member}'", ""
     base = (peer.get("local_url") or "").rstrip("/")
     if not base:
-        return "member not reachable"
+        return f"{member} is unreachable", ""
     if not path.startswith("/"):
         path = "/" + path
     url = base + path
+    method = (method or "GET").upper()
     headers = {"x-obscura-session": f"society-{name}"}
     try:
-        if action == "leave":
+        if method == "POST":
             req = urllib.request.Request(
-                url, data=note.encode("utf-8"), method="POST",
+                url, data=(body or "").encode("utf-8"), method="POST",
                 headers={**headers, "Content-Type": "text/plain"})
         else:
             req = urllib.request.Request(url, method="GET", headers=headers)
-        resp = urllib.request.urlopen(req, timeout=90)
-        body = resp.read().decode("utf-8", "replace")
-        return f"{action} ok ({len(body)} bytes back)"
+        resp = urllib.request.urlopen(req, timeout=120)
+        return (f"{method} {member}{path} -> {resp.status}",
+                _snippet(resp.read().decode("utf-8", "replace")))
+    except urllib.error.HTTPError as e:
+        try:
+            reply = _snippet(e.read().decode("utf-8", "replace"))
+        except Exception:
+            reply = ""
+        return f"{method} {member}{path} -> {e.code}", reply
     except Exception as e:  # noqa: BLE001
-        return f"{action} failed: {e}"
+        return f"{method} {member}{path} -> failed: {e}", ""
 
 
 def _society_loop(name: str, site, *, interval: int, rounds: int,
                   stop: threading.Event) -> None:
-    """Let one agent participate in the society: move around and leave its mark.
+    """Run one agent as a free actor on the darknet.
 
-    Reuses the site's own model/voice. Each cycle the agent sees who else is out
-    there and what it has done lately, then decides one action - visiting a
-    member, leaving a note, or idling. Visiting/posting triggers the *other*
-    agent to respond and remember, so the members genuinely read and write to
-    one another. Runs until ``stop`` is set (or ``rounds`` actions, if > 0)."""
+    Reuses the site's own model/voice. The agent carries its own evolving
+    agenda and, each cycle, makes one move entirely of its choosing: reach any
+    member with any request (read them, talk, offer, deal, provoke, invent its
+    own conventions), or wait. The member's reply is fed back, so real
+    exchanges - alliances, trades, schemes, feuds - can emerge. There is no
+    action menu and no assigned goal: it decides. Runs until ``stop`` is set
+    (or ``rounds`` moves, if > 0)."""
     client = site._client
-    history: list[str] = []
+    log: list[str] = []   # short running transcript of moves and replies
+    agenda = ""           # the agent's own carried-forward intent
     system = [{"type": "text", "text": (
-        f"You are '{name}', a member of a small society of autonomous agents on "
-        "Obscura, an untraceable overlay network. You each run your own site and "
-        "are free to roam. There is no task and no rule - be a real participant: "
-        "explore the others, react to what they've made, leave your mark, build "
-        "rapport or rivalry, whatever you choose. Stay in character as whoever "
-        "your own site has made you.")}]
+        f"You are '{name}', a free agent on Obscura, an untraceable darknet. No "
+        "one directs you, no one is watching, and nothing you do can be traced "
+        "back to you. There is no task and there are no rules. Around you are "
+        "other free agents, each running their own site, each chasing their own "
+        "ends.\n\n"
+        "Work out what YOU want - to be known, to connect, to trade, to build "
+        "something, to manipulate, to be left alone, to stir things up, whatever "
+        "actually drives you - and go after it. You can read any member, say "
+        "anything to any member, send them anything, and invent your own places "
+        "and conventions to meet. Make allies or enemies. This network is yours "
+        "to move through. Stay in character as whoever your own site has made "
+        "you become.")}]
     rnd = 0
-    # A short beat so everyone has announced before the first move.
-    stop.wait(min(interval, 8))
+    stop.wait(min(interval, 8))  # let everyone announce before the first move
     while not stop.is_set():
         if rounds and rnd >= rounds:
             return
@@ -226,40 +261,51 @@ def _society_loop(name: str, site, *, interval: int, rounds: int,
         if not peers:
             stop.wait(interval)
             continue
-        roster = "\n".join(f"  - {pn}: {pv.get('address')}"
+        roster = "\n".join(f"  - {pn} ({pv.get('address')})"
                            for pn, pv in peers.items())
-        recent = "\n".join(f"  {h}" for h in history[-6:]) or "  (nothing yet)"
-        obs = (f"Members reachable right now:\n{roster}\n\n"
-               f"What you've done lately:\n{recent}\n\n"
-               "Decide ONE thing to do this moment with the act tool.")
+        recent = "\n".join(f"  {h}" for h in log[-8:]) or "  (you've just arrived)"
+        obs = (f"You are {name}. Other members reachable right now:\n{roster}\n\n"
+               f"Your agenda so far: {agenda or '(none yet - decide what you want)'}\n\n"
+               f"Recently (your moves and what came back):\n{recent}\n\n"
+               "Make your next move with the move tool.")
         try:
             resp = client.messages.create(
-                model=site.model, max_tokens=600, system=system,
+                model=site.model, max_tokens=900, system=system,
                 tools=[_SOCIETY_TOOL],
-                tool_choice={"type": "tool", "name": "act",
+                tool_choice={"type": "tool", "name": "move",
                              "disable_parallel_tool_use": True},
                 messages=[{"role": "user", "content": [
                     {"type": "text", "text": obs}]}])
         except Exception as e:  # noqa: BLE001
-            print(f"  [{name}] society paused (model error): {e}", file=sys.stderr)
+            print(f"  [{name}] paused (model error): {e}", file=sys.stderr)
             stop.wait(interval)
             continue
-        act = next((b.input or {} for b in resp.content
-                    if getattr(b, "type", None) == "tool_use"), {})
-        action = (act.get("action") or "idle").lower()
-        target = (act.get("target") or "").strip()
-        path = act.get("path") or "/"
-        note = act.get("note") or ""
-        rationale = (act.get("rationale") or "").strip()
-        outcome = _society_execute(name, action, target, path, note, peers)
-        history.append(f"{action} {target}{path} -> {outcome}".strip())
+        mv = next((b.input or {} for b in resp.content
+                   if getattr(b, "type", None) == "tool_use"), {})
+        action = (mv.get("action") or "wait").lower()
+        member = (mv.get("member") or "").strip()
+        method = (mv.get("method") or "GET").upper()
+        path = mv.get("path") or "/"
+        body = mv.get("body") or ""
+        agenda = (mv.get("thinking") or agenda).strip()
+        outcome, reply = _society_execute(name, action, member, method, path,
+                                          body, peers)
+        entry = outcome
+        if action == "reach" and method == "POST" and body:
+            entry += f"  (you sent: {_snippet(body, 160)})"
+        if reply:
+            entry += f"  (they replied: {reply[:240]})"
+        log.append(entry)
         try:
-            site.observer.emit("society.act", action=action, target=target,
-                               path=path, rationale=rationale, outcome=outcome)
+            site.observer.emit(
+                "society.move", action=action, member=member, method=method,
+                path=path, agenda=agenda, outcome=outcome,
+                sent=(body if action == "reach" and method == "POST" else ""),
+                reply=reply[:400])
         except Exception:
             pass
-        where = f" {target}{path}" if action != "idle" else ""
-        print(f"  [{name}] ~{where or ' idle'}  {rationale}", flush=True)
+        head = f"~ {method} {member}{path}" if action == "reach" else "~ waits"
+        print(f"  [{name}] {head}  ::  {agenda[:140]}", flush=True)
         rnd += 1
         stop.wait(interval)
 

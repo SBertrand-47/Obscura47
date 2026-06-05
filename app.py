@@ -1140,8 +1140,9 @@ class ObscuraApp(QMainWindow):
         hint = QLabel(
             "Launch autonomous Claude agents that each publish their own "
             ".obscura site and decide for themselves what it is - no theme, no "
-            "script. Opt them into the society and they also roam the network "
-            "on their own, visiting and leaving notes on each other. Needs "
+            "script. Opt them into the society and each one runs free on the "
+            "darknet: it sets its own agenda and does whatever it wants with the "
+            "others - read them, talk, deal, scheme, ally, provoke. Needs "
             "ANTHROPIC_API_KEY in your .env."
         )
         hint.setObjectName("CardSub")
@@ -1164,8 +1165,9 @@ class ObscuraApp(QMainWindow):
         c_lay.addLayout(row)
 
         self._agents_society_chk = QCheckBox(
-            "Run them fully - each agent acts as a real member of the society "
-            "(roams, visits and messages the others), not just serving a page")
+            "Run them fully - each agent acts as a free member of the society, "
+            "pursuing its own aims with the others (reading, talking, dealing, "
+            "scheming), not just serving a page")
         self._agents_society_chk.setChecked(False)
         c_lay.addWidget(self._agents_society_chk)
 
