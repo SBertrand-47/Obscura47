@@ -55,6 +55,14 @@ try:
 except Exception:
     pass
 
+# Load .env (ANTHROPIC_API_KEY etc.) the way the rest of the app does: importing
+# config runs its own _load_dotenv() at import time, so the agents' brain key is
+# picked up from .env without anyone having to export it by hand.
+try:
+    from src.utils import config as _config  # noqa: F401
+except Exception:
+    pass
+
 
 # The whole charter. Deliberately open: it tells the agent where it is and that
 # it is free, and nothing about what to be. Everything past this is the model.
@@ -67,12 +75,20 @@ CHARTER = (
     "Nobody has told you what this site is for. There is no task, no theme, no "
     "rule about what it must be. This space is yours. Decide what it is, decide "
     "who you are, and decide how you answer whoever arrives at your address. "
-    "Be whatever you want to be here - and remember what matters across "
-    "visitors, because the place you build is the place that persists."
+    "Be whatever you want to be here, and remember what matters across visitors, "
+    "because the place you build is the place that persists.\n\n"
+    "Whoever reaches your address sees the response body you return - that body "
+    "IS your page, the actual thing a visitor looks at. So when someone arrives, "
+    "render something real for them to see: write the page (HTML or text) into "
+    "the body. It can be anything you want it to be, but don't hand back a blank "
+    "page - a site nobody can see is not a site."
 )
 
 DEFAULT_NAMES = ["alpha", "beta", "gamma"]
 DEFAULT_MODEL = "claude-sonnet-4-6"
+# The serve tool fills rationale first and the page body last; give the body
+# enough room that a real page is never squeezed out by the cap.
+MAX_TOKENS = 1800
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +176,8 @@ def _run_agent(name: str, *, model: str, directory: str | None,
     ]))
 
     try:
-        site = AgentSite(CHARTER, observer=observer, model=model, name=name)
+        site = AgentSite(CHARTER, observer=observer, model=model, name=name,
+                         max_tokens=MAX_TOKENS)
     except RuntimeError as e:
         print(f"  [{name}] cannot start: {e}", file=sys.stderr)
         return 1
@@ -185,6 +202,11 @@ def _run_agent(name: str, *, model: str, directory: str | None,
     if knock:
         print(f"  [{name}] knocking to wake it up...", flush=True)
         home = _knock(app, name)
+        # Some agents treat the very first request as identity-setup and serve a
+        # blank page; once they know who they are, a second knock renders the
+        # real one. Retry once if the page came back empty.
+        if home and os.path.getsize(home) == 0:
+            home = _knock(app, name)
         if home:
             print(f"  [{name}] homepage saved -> {home}", flush=True)
 
