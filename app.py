@@ -1176,7 +1176,9 @@ class ObscuraApp(QMainWindow):
         self._agents_launch_btn = QPushButton("\U0001F680  Publish agent websites")
         self._agents_launch_btn.setObjectName("Primary")
         self._agents_launch_btn.setCursor(Qt.PointingHandCursor)
-        self._agents_launch_btn.clicked.connect(self._launch_agents)
+        self._agents_launch_btn.clicked.connect(
+            lambda: self._launch_agents(self._agents_count.value(),
+                                        self._agents_society_chk.isChecked()))
         btn_row.addWidget(self._agents_launch_btn)
 
         self._agents_stop_btn = QPushButton("⏹  Stop agents")
@@ -1204,12 +1206,12 @@ class ObscuraApp(QMainWindow):
         lay.addStretch(1)
         return scroll
 
-    def _launch_agents(self):
+    def _launch_agents(self, count: int = 3, society: bool = False):
         if self._agents_proc is not None and self._agents_proc.poll() is None:
             self._append_agent_out("  Agents are already running. Stop them first.")
             return
-        count = int(self._agents_count.value())
-        society = self._agents_society_chk.isChecked()
+        count = int(count)
+        society = bool(society)
         script = os.path.join(os.path.dirname(_APP_SCRIPT), "launch_agents.py")
         argv = [_PYTHON_EXEC, script, "--count", str(count)]
         if society:
@@ -2177,6 +2179,7 @@ class Backend(QObject):
     settingsChanged = Signal()  # autostart / start-minimized changed
     logLine = Signal(str)       # one formatted activity-log line
     diagnosingChanged = Signal()  # a diagnostic started or finished
+    agentLine = Signal(str)     # a line of output from the agent fleet
 
     def __init__(self, logic: "ObscuraApp"):
         super().__init__()
@@ -2193,6 +2196,8 @@ class Backend(QObject):
 
         # Forward the logic engine's log stream into the QML activity page.
         logic._signals.log.connect(self._forward_log)
+        # Forward the agent fleet's output into the QML Agents page.
+        logic._signals.agent_out.connect(self.agentLine)
         # Surface diagnostic in-flight state so the QML shell can show a sign.
         logic._signals.diagnosing.connect(self._on_diagnosing)
         self.logLine.emit(self._stamp(
@@ -2263,6 +2268,14 @@ class Backend(QObject):
     def quickStart(self):      self._logic._show_quick_start()
     @Slot()
     def requestExit(self):     self._logic._request_exit_status()
+
+    # ── agent fleet slots ─────────────────────────────────────────────
+    @Slot(int, bool)
+    def launchAgents(self, count: int, society: bool):
+        self._logic._launch_agents(int(count), bool(society))
+    @Slot()
+    def stopAgents(self):
+        self._logic._stop_agents()
 
     # ── settings slots (handled here to stay independent of the hidden
     #    QWidgets checkboxes) ───────────────────────────────────────────
