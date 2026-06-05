@@ -19,6 +19,9 @@ Architecture:
     - Every decision an agent makes (its served response + a one-line rationale)
       is mirrored to ``~/.obscura47/agents/<name>.jsonl`` and printed live, so
       you can watch what each one becomes.
+    - On startup each agent gets a single knock (a local ``GET /``) so it
+      declares what it is immediately instead of waiting for the first visitor.
+      Disable with ``--no-knock``.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-...            # the agents' brain
@@ -97,7 +100,25 @@ class _ConsoleSink:
         return
 
 
-def _run_agent(name: str, *, model: str, directory: str | None) -> int:
+def _knock(app, name: str) -> None:
+    """Knock once (GET /) so the agent declares itself on startup.
+
+    The agents are reactive - they only think when something reaches them. This
+    primes each one with a single local request the moment it comes up, so it
+    decides what it is straight away instead of waiting for the first visitor.
+    Dispatched directly against the local app (not over the overlay); the
+    decision is recorded and printed like any other.
+    """
+    from src.agent.app import Request
+    try:
+        req = Request("GET", "/", {"x-obscura-session": f"knock-{name}"}, b"")
+        app.dispatch(req)
+    except Exception as e:  # noqa: BLE001 - a failed knock must not stop the agent
+        print(f"  [{name}] startup knock failed: {e}", file=sys.stderr)
+
+
+def _run_agent(name: str, *, model: str, directory: str | None,
+               knock: bool = True) -> int:
     """Bring up one open-ended Claude agent at a stable `.obscura` address."""
     from src.agent.observatory import JsonlSink, MultiSink, Observer
     from src.agent.runtime import AgentRuntime
@@ -130,6 +151,10 @@ def _run_agent(name: str, *, model: str, directory: str | None) -> int:
 
     if directory:
         _register_in_directory(name, runtime.address, directory)
+
+    if knock:
+        print(f"  [{name}] knocking to wake it up...", flush=True)
+        _knock(app, name)
 
     try:
         runtime.join()
@@ -179,11 +204,14 @@ def _check_brain() -> bool:
     return ok
 
 
-def _spawn(name: str, model: str, directory: str | None) -> subprocess.Popen:
+def _spawn(name: str, model: str, directory: str | None,
+           knock: bool) -> subprocess.Popen:
     argv = [sys.executable, os.path.abspath(__file__), "--agent", name,
             "--model", model]
     if directory:
         argv += ["--directory", directory]
+    if not knock:
+        argv += ["--no-knock"]
     return subprocess.Popen(argv)
 
 
@@ -201,11 +229,14 @@ def main() -> int:
                         help=f"Claude model id (default {DEFAULT_MODEL})")
     parser.add_argument("--directory", default=None,
                         help="optional .obscura directory to register each agent in")
+    parser.add_argument("--no-knock", action="store_true",
+                        help="don't send each agent a startup GET / to wake it up")
     args = parser.parse_args()
 
     # Child mode: this process IS one agent.
     if args.agent:
-        return _run_agent(args.agent, model=args.model, directory=args.directory)
+        return _run_agent(args.agent, model=args.model, directory=args.directory,
+                          knock=not args.no_knock)
 
     # Parent mode: pick names, show addresses, spawn a process per agent.
     if args.names:
@@ -246,7 +277,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
 
     for name in names:
-        procs.append(_spawn(name, args.model, args.directory))
+        procs.append(_spawn(name, args.model, args.directory,
+                            knock=not args.no_knock))
         time.sleep(0.4)  # stagger startups so logs are legible
 
     try:
