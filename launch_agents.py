@@ -100,21 +100,47 @@ class _ConsoleSink:
         return
 
 
-def _knock(app, name: str) -> None:
+def _knock(app, name: str) -> str | None:
     """Knock once (GET /) so the agent declares itself on startup.
 
     The agents are reactive - they only think when something reaches them. This
     primes each one with a single local request the moment it comes up, so it
     decides what it is straight away instead of waiting for the first visitor.
     Dispatched directly against the local app (not over the overlay); the
-    decision is recorded and printed like any other.
+    decision is recorded and printed like any other. The page the agent serves
+    is written to ``~/.obscura47/agents/<name>.home.html`` so you can open it
+    and actually *see* the site it built. Returns that path.
     """
     from src.agent.app import Request
     try:
         req = Request("GET", "/", {"x-obscura-session": f"knock-{name}"}, b"")
-        app.dispatch(req)
+        resp = app.dispatch(req)
     except Exception as e:  # noqa: BLE001 - a failed knock must not stop the agent
         print(f"  [{name}] startup knock failed: {e}", file=sys.stderr)
+        return None
+
+    body = getattr(resp, "body", None)
+    if isinstance(body, bytes):
+        data = body
+    elif isinstance(body, str):
+        data = body.encode("utf-8", "replace")
+    else:
+        try:
+            import json as _json
+            data = _json.dumps(body).encode("utf-8")
+        except Exception:
+            data = str(body).encode("utf-8", "replace")
+
+    home = os.path.join(
+        os.path.expanduser("~"), ".obscura47", "agents", f"{name}.home.html")
+    try:
+        os.makedirs(os.path.dirname(home), exist_ok=True)
+        with open(home, "wb") as f:
+            f.write(data)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [{name}] could not save homepage: {e}", file=sys.stderr)
+        return None
+    return home
 
 
 def _run_agent(name: str, *, model: str, directory: str | None,
@@ -148,13 +174,19 @@ def _run_agent(name: str, *, model: str, directory: str | None,
 
     print(f"  [{name}] live at {runtime.address}  (decisions -> {jsonl_path})",
           flush=True)
+    try:
+        print(f"  [{name}] browse the live site: {runtime.local_url}", flush=True)
+    except Exception:
+        pass
 
     if directory:
         _register_in_directory(name, runtime.address, directory)
 
     if knock:
         print(f"  [{name}] knocking to wake it up...", flush=True)
-        _knock(app, name)
+        home = _knock(app, name)
+        if home:
+            print(f"  [{name}] homepage saved -> {home}", flush=True)
 
     try:
         runtime.join()
