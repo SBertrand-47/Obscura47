@@ -44,14 +44,26 @@ class TestRouteBuilding:
 
     def test_build_hs_route_terminates_at_terminal(self):
         terminal = {"host": "10.0.0.9", "port": 5009, "pub": "P9"}
-        peers = [{"host": f"10.0.0.{i}", "port": 5000 + i, "pub": f"P{i}"}
-                 for i in range(5)] + [terminal]
+        # Middles need a ws_port: a frame to a middle hop is sent over its
+        # WebSocket, so a relay without one can never carry the frame.
+        peers = [{"host": f"10.0.0.{i}", "port": 5000 + i, "pub": f"P{i}",
+                  "ws_port": 6000 + i} for i in range(5)] + [terminal]
         route = build_hs_route(peers, terminal, hops=3)
         assert len(route) == 3
         assert route[-1] is terminal
         # Middles must exclude the terminal.
         middle_keys = {(p["host"], p["port"]) for p in route[:-1]}
         assert (terminal["host"], terminal["port"]) not in middle_keys
+
+    def test_build_hs_route_excludes_middles_without_ws_port(self):
+        """A relay that advertises no ws_port can't carry a frame, so it must
+        never be chosen as a middle hop - otherwise the circuit silently
+        breaks. With no usable middles the route collapses to the terminal."""
+        terminal = {"host": "10.0.0.9", "port": 5009, "pub": "P9",
+                    "ws_port": 5010}
+        no_ws = [{"host": f"10.0.0.{i}", "port": 5000 + i, "pub": f"P{i}"}
+                 for i in range(5)]
+        assert build_hs_route(no_ws + [terminal], terminal, hops=3) == [terminal]
 
     def test_build_hs_route_single_hop(self):
         terminal = {"host": "10.0.0.1", "port": 5001, "pub": "P1"}
@@ -60,7 +72,8 @@ class TestRouteBuilding:
 
     def test_build_hs_route_hops_one_returns_terminal_only(self):
         terminal = {"host": "10.0.0.1", "port": 5001, "pub": "P1"}
-        peers = [{"host": "10.0.0.2", "port": 5002, "pub": "P2"}, terminal]
+        peers = [{"host": "10.0.0.2", "port": 5002, "pub": "P2",
+                  "ws_port": 6002}, terminal]
         assert build_hs_route(peers, terminal, hops=1) == [terminal]
 
 

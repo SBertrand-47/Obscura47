@@ -377,7 +377,11 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
     ``terminal`` as the final hop. Middle hops are sampled from
     ``peers`` excluding the terminal (by host:port) and excluding any
     peer that resolves to this machine - inserting ourselves as a middle
-    hop would NAT-loop the circuit back through our own router.
+    hop would NAT-loop the circuit back through our own router. Peers
+    without a ``ws_port`` are also excluded: a frame to a middle hop is
+    delivered over that hop's WebSocket, so a relay that advertises no
+    ws_port can never carry the frame and would silently break the
+    circuit (the same reason such peers are skipped as intro candidates).
     Returns just ``[terminal]`` if no suitable padding relays exist.
     """
     if hops <= 1 or not peers:
@@ -387,6 +391,7 @@ def build_hs_route(peers, terminal: dict, hops: int) -> list[dict]:
     pool = [
         p for p in peers
         if p.get('host') and p.get('port') and p.get('pub')
+        and p.get('ws_port')
         and (p.get('host'), p.get('port')) != t_key
         and p.get('role') in (None, 'node')
         and not is_self_peer(p)
