@@ -62,6 +62,48 @@ _primary_peer: dict | None = None
 _effective_advertised_host: dict[str, str] = {}
 _registration_state_lock = threading.Lock()
 
+# Gateway forward brokering. The node (which owns the GatewayForwarder and the
+# WS transport) registers a provisioner here; the heartbeat - which owns the
+# /register round-trip - calls it with any pending_forwards the registry hands
+# back and stashes the resulting grants as request fields for the next body.
+# This keeps the node -> internet_discovery import direction intact.
+_forward_provisioner = None  # callable(pending_forwards: list) -> granted: list
+_forward_request_fields: dict = {}  # extra /register body fields (want_forward, granted_forwards)
+_forward_lock = threading.Lock()
+
+
+def set_forward_provisioner(fn) -> None:
+    """Register the gateway's provisioner callback (called by the node)."""
+    global _forward_provisioner
+    with _forward_lock:
+        _forward_provisioner = fn
+
+
+def set_forward_request_fields(**fields) -> None:
+    """Merge extra fields (want_forward / granted_forwards) into future /register bodies."""
+    with _forward_lock:
+        _forward_request_fields.update(fields)
+
+
+def _consume_forward_request_fields() -> dict:
+    with _forward_lock:
+        return dict(_forward_request_fields)
+
+
+def _run_forward_provisioner(pending_forwards: list) -> None:
+    """Hand pending forwards to the gateway provisioner and report grants next heartbeat."""
+    with _forward_lock:
+        fn = _forward_provisioner
+    if not fn or not pending_forwards:
+        return
+    try:
+        granted = fn(pending_forwards)
+    except Exception as e:
+        log.warning("Forward provisioner failed: %s", e)
+        return
+    if granted:
+        set_forward_request_fields(granted_forwards=granted)
+
 
 def _pick_local_lan_ip() -> str | None:
     """Return a single private IPv4 suitable for use as advertised_host.
@@ -572,6 +614,11 @@ def _attempt_registration(role: str, port: int, pub: str | None,
         body["ws_tls"] = ws_tls
     if advertised_host:
         body["advertised_host"] = advertised_host
+    # Ride forward-brokering fields (want_forward / granted_forwards) along on
+    # the existing /register round-trip. The registry ignores them unless they
+    # apply (private host for want_forward; primary-of-NAT for granted_forwards).
+    for k, v in _consume_forward_request_fields().items():
+        body[k] = v
 
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -644,6 +691,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         result = _attempt_registration(role, port, pub, priv_key,
                                        ws_port, ws_tls, advertised_host)
         _capture_registration_classification(role, result)
+        if isinstance(result, dict):
+            _run_forward_provisioner(result.get("pending_forwards"))
         return result
     except urllib.error.HTTPError as e:
         if e.code != 409 or advertised_host is not None:

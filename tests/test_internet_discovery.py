@@ -164,3 +164,61 @@ class TestIsSelfPeerSibling:
         monkeypatch.setenv("OBSCURA_ALLOW_LAN_PEERS", "1")
         me = {"host": "203.0.113.10", "port": 5001, "pub": "sibling-pub"}
         assert disc.is_self_peer(me) is True
+
+
+# ── Gateway forward brokering hooks ───────────────────────────────
+
+def _reset_forward_state():
+    disc._forward_provisioner = None
+    disc._forward_request_fields.clear()
+
+
+def test_forward_request_fields_merge_and_consume():
+    _reset_forward_state()
+    try:
+        disc.set_forward_request_fields(want_forward=True)
+        disc.set_forward_request_fields(granted_forwards=[{"sibling_pub": "p", "public_port": 5012}])
+        fields = disc._consume_forward_request_fields()
+        assert fields["want_forward"] is True
+        assert fields["granted_forwards"] == [{"sibling_pub": "p", "public_port": 5012}]
+        # Consume returns a copy - mutating it doesn't corrupt module state.
+        fields["want_forward"] = False
+        assert disc._consume_forward_request_fields()["want_forward"] is True
+    finally:
+        _reset_forward_state()
+
+
+def test_run_forward_provisioner_stashes_grants():
+    _reset_forward_state()
+    try:
+        pending = [{"sibling_pub": "abc", "lan_host": "192.168.1.33", "lan_ws_port": 5002}]
+        disc.set_forward_provisioner(
+            lambda pf: [{"sibling_pub": p["sibling_pub"], "public_port": 5012} for p in pf])
+        disc._run_forward_provisioner(pending)
+        # The grants are queued as request fields for the next heartbeat body.
+        assert disc._consume_forward_request_fields()["granted_forwards"] == [
+            {"sibling_pub": "abc", "public_port": 5012}]
+    finally:
+        _reset_forward_state()
+
+
+def test_run_forward_provisioner_noop_without_provisioner():
+    _reset_forward_state()
+    try:
+        disc._run_forward_provisioner([{"sibling_pub": "abc", "lan_host": "x", "lan_ws_port": 1}])
+        assert "granted_forwards" not in disc._consume_forward_request_fields()
+    finally:
+        _reset_forward_state()
+
+
+def test_run_forward_provisioner_swallows_provisioner_error():
+    _reset_forward_state()
+    try:
+        def _boom(pf):
+            raise RuntimeError("pool down")
+        disc.set_forward_provisioner(_boom)
+        # Must not propagate - a heartbeat should never die on provisioning.
+        disc._run_forward_provisioner([{"sibling_pub": "abc", "lan_host": "x", "lan_ws_port": 1}])
+        assert "granted_forwards" not in disc._consume_forward_request_fields()
+    finally:
+        _reset_forward_state()

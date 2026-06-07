@@ -490,3 +490,137 @@ class TestSlotBinding:
             "role": "proxy", "port": 5001, "advertised_host": "9.9.9.9",
         })
         assert r.status_code == 409, r.text
+
+
+# ── Gateway forward brokering ─────────────────────────────────────
+
+def _register_node_full(client, port, *, src_ip, advertised_host=None,
+                        ws_port=None, **extra):
+    """Full ECDSA register for a node from *src_ip*. Returns (pub, response)."""
+    priv, pub = ecc_generate_keypair()
+    headers = {"X-Forwarded-For": src_ip}
+    body = {"role": "node", "port": port, "pub": pub}
+    if advertised_host is not None:
+        body["advertised_host"] = advertised_host
+    if ws_port is not None:
+        body["ws_port"] = ws_port
+    body.update(extra)
+    r1 = client.post("/register", json=body, headers=headers)
+    assert r1.status_code == 200, r1.text
+    data = r1.json()
+    if data.get("ok"):
+        return pub, data
+    sig = ecdsa_sign(priv, data["challenge"].encode())
+    r2 = client.post("/register/verify",
+                     json={"peer_id": data["peer_id"], "signature": sig},
+                     headers=headers)
+    assert r2.status_code == 200, r2.text
+    return pub, r2.json()
+
+
+def _heartbeat_node(client, port, *, src_ip, pub, advertised_host=None,
+                    ws_port=None, **extra):
+    """Re-register an existing node (same pub) - a known-peer heartbeat."""
+    headers = {"X-Forwarded-For": src_ip}
+    body = {"role": "node", "port": port, "pub": pub}
+    if advertised_host is not None:
+        body["advertised_host"] = advertised_host
+    if ws_port is not None:
+        body["ws_port"] = ws_port
+    body.update(extra)
+    r = client.post("/register", json=body, headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+class TestGatewayForwardBroker:
+    # Use genuinely-public IPs: Python 3.14's ipaddress.is_private flags the
+    # TEST-NET documentation ranges (203.0.113.x etc.), which would misclassify
+    # a gateway as a sibling.
+    NAT = "154.38.172.2"  # shared public IP of gateway + sibling
+    FOREIGN = "8.8.8.8"   # an off-NAT dialer
+
+    def _reset(self):
+        import registry_server as rs
+        rs._pending_forwards.clear()
+        rs._granted_forwards.clear()
+        return rs
+
+    def test_pending_grant_translation_end_to_end(self, client):
+        rs = self._reset()
+        # Gateway: public host (defaults to source_ip) -> classified primary.
+        _gw_pub, gw_resp = _register_node_full(client, 5001, src_ip=self.NAT)
+        assert gw_resp["role_kind"] == "primary"
+        # Sibling: private host + want_forward -> pending recorded, not granted.
+        sib_pub, sib_resp = _register_node_full(
+            client, 5001, src_ip=self.NAT,
+            advertised_host="192.168.1.33", ws_port=5002, want_forward=True)
+        assert sib_resp["role_kind"] == "sibling"
+        assert "granted_forward" not in sib_resp
+        assert (self.NAT, sib_pub) in rs._pending_forwards
+
+        # Off-NAT dialer cannot see the still-private sibling.
+        peers = client.get("/peers", headers={"X-Forwarded-For": self.FOREIGN}).json()
+        assert ("192.168.1.33", 5001) not in {(p["host"], p["port"]) for p in peers}
+
+        # Gateway heartbeat now receives the pending forward.
+        gw_pub = _gw_pub
+        gw_hb = _heartbeat_node(client, 5001, src_ip=self.NAT, pub=gw_pub)
+        pend = gw_hb.get("pending_forwards") or []
+        assert any(p["sibling_pub"] == sib_pub and p["lan_ws_port"] == 5002 for p in pend)
+
+        # Gateway reports the grant; registry stores it.
+        _heartbeat_node(client, 5001, src_ip=self.NAT, pub=gw_pub,
+                        granted_forwards=[{"sibling_pub": sib_pub, "public_port": 5012}])
+        assert rs._granted_forwards.get((self.NAT, sib_pub), {}).get("public_port") == 5012
+
+        # Off-NAT dialer now sees the sibling as a PUBLIC relay at gateway:5012.
+        peers = client.get("/peers", headers={"X-Forwarded-For": self.FOREIGN}).json()
+        sib_view = [p for p in peers if p["pub"] == sib_pub]
+        assert len(sib_view) == 1
+        assert sib_view[0]["host"] == self.NAT
+        assert sib_view[0]["port"] == 5012
+        assert sib_view[0]["ws_port"] == 5012
+
+        # The sibling's own heartbeat learns its granted endpoint.
+        sib_hb = _heartbeat_node(client, 5001, src_ip=self.NAT, pub=sib_pub,
+                                 advertised_host="192.168.1.33", ws_port=5002,
+                                 want_forward=True)
+        assert sib_hb.get("granted_forward") == {"host": self.NAT, "port": 5012}
+
+    def test_non_primary_grant_report_is_ignored(self, client):
+        rs = self._reset()
+        # A peer whose advertised host is NOT the public source IP must not be
+        # able to inject grants (prevents a rogue LAN host hijacking forwards).
+        sib_pub, _ = _register_node_full(
+            client, 5001, src_ip=self.NAT, advertised_host="192.168.1.50",
+            ws_port=5002, want_forward=True)
+        # Same NAT, private host, tries to report a grant for itself.
+        _heartbeat_node(client, 5001, src_ip=self.NAT, pub=sib_pub,
+                        advertised_host="192.168.1.50", ws_port=5002,
+                        granted_forwards=[{"sibling_pub": sib_pub, "public_port": 5099}])
+        assert (self.NAT, sib_pub) not in rs._granted_forwards
+
+    def test_grant_only_for_same_nat(self, client):
+        rs = self._reset()
+        # Sibling behind NAT A wants a forward.
+        sib_pub, _ = _register_node_full(
+            client, 5001, src_ip=self.NAT, advertised_host="192.168.1.33",
+            ws_port=5002, want_forward=True)
+        # A gateway on a DIFFERENT public IP must not be offered NAT A's pending.
+        other_gw_pub, other_resp = _register_node_full(client, 5001, src_ip="9.9.9.9")
+        assert other_resp["role_kind"] == "primary"
+        other_hb = _heartbeat_node(client, 5001, src_ip="9.9.9.9", pub=other_gw_pub)
+        pend_pubs = {p["sibling_pub"] for p in (other_hb.get("pending_forwards") or [])}
+        assert sib_pub not in pend_pubs
+
+    def test_untranslated_peer_unaffected(self, client):
+        self._reset()
+        # A plain public node with no grant passes through get_peers unchanged.
+        pub, _ = _register_node_full(client, 5001, src_ip="9.9.9.9",
+                                     advertised_host="9.9.9.9")
+        peers = client.get("/peers", headers={"X-Forwarded-For": self.FOREIGN}).json()
+        view = [p for p in peers if p["pub"] == pub]
+        assert len(view) == 1
+        assert view[0]["host"] == "9.9.9.9"
+        assert view[0]["port"] == 5001

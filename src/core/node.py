@@ -7,7 +7,10 @@ from src.core.router import Router
 from src.core import mixing
 from src.core.encryptions import onion_decrypt_checked, ecc_load_or_create_keypair, onion_encrypt_for_peer
 from src.core.discover import listen_for_discovery, broadcast_discovery
-from src.core.internet_discovery import start_heartbeat, start_kill_switch_monitor
+from src.core.internet_discovery import (
+    start_heartbeat, start_kill_switch_monitor,
+    set_forward_provisioner, set_forward_request_fields,
+)
 from src.core.ws_transport import WSServer, WSClient
 from src.core.peer_health import start_self_ws_probe
 from src.utils import diag
@@ -17,7 +20,8 @@ from src.utils.config import (
     NODE_MULTICAST_PORT as CFG_NODE_MULTICAST_PORT,
     DISCOVERY_INTERVAL as CFG_DISCOVERY_INTERVAL,
     NODE_KEY_PATH, NODE_WS_PORT,
-    NODE_ADVERTISED_HOST,
+    NODE_ADVERTISED_HOST, NODE_ADVERTISED_WS_PORT, NODE_ADVERTISED_PORT,
+    GATEWAY_FORWARDS, GATEWAY_FORWARD_POOL, REQUEST_GATEWAY_FORWARD,
     WS_TLS_CERT, WS_TLS_KEY, WS_TLS_ACTIVE,
     CHANNEL_QUEUE_MAX, CHANNEL_IDLE_CLOSE_SECONDS, TLS_VERIFY,
 )
@@ -36,6 +40,14 @@ class ObscuraNode:
         self.host = host
         self.port = port
         self.ws_port = NODE_WS_PORT
+        # What we advertise to the registry can differ from what we bind: a
+        # sibling reached through a gateway forward advertises the gateway's
+        # public host plus the forwarded public port, while still binding its
+        # own LAN ports. 0/unset means "advertise the bound port" (the default
+        # for an ordinary public node).
+        self.advertised_port = NODE_ADVERTISED_PORT or self.port
+        self.advertised_ws_port = NODE_ADVERTISED_WS_PORT or self.ws_port
+        self._gateway_forwarder = None
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.running = True
         self._killed = False
@@ -113,9 +125,19 @@ class ObscuraNode:
         # an AttributeError, dropping early traffic on the floor.
         self.router = Router(self, self.peers)
 
-        # Register with internet bootstrap registry (with ws_port and priv_key for auth)
-        start_heartbeat("node", self.port, self.pub_pem,
-                        priv_key=self.priv_key, ws_port=self.ws_port,
+        # Opt in to gateway forward brokering. The registry only acts on this
+        # when we register under a private (LAN) host - i.e. we're a real NAT
+        # sibling - so it's a harmless no-op for a public node. Our gateway then
+        # auto-provisions a public port and the registry advertises us through
+        # it; no per-sibling config needed.
+        if REQUEST_GATEWAY_FORWARD:
+            set_forward_request_fields(want_forward=True)
+
+        # Register with internet bootstrap registry (with ws_port and priv_key
+        # for auth). Advertise the (possibly gateway-forwarded) public ports,
+        # which equal the bound ports unless an override is configured.
+        start_heartbeat("node", self.advertised_port, self.pub_pem,
+                        priv_key=self.priv_key, ws_port=self.advertised_ws_port,
                         ws_tls=self.ws_tls_enabled or None,
                         advertised_host=NODE_ADVERTISED_HOST or None)
 
@@ -130,9 +152,11 @@ class ObscuraNode:
         self.ws_server.start()
 
         # Probe our own WS port from the outside so we notice immediately
-        # if the network/firewall isn't actually letting peers reach us.
+        # if the network/firewall isn't actually letting peers reach us. Probe
+        # the advertised endpoint (the gateway-forwarded port for a sibling),
+        # since that is the path other peers will actually dial.
         start_self_ws_probe(
-            "node", self.ws_port,
+            "node", self.advertised_ws_port,
             advertised_host=NODE_ADVERTISED_HOST or None,
         )
 
@@ -527,6 +551,11 @@ class ObscuraNode:
                 self.ws_server.stop()
             except Exception:
                 pass
+        if getattr(self, '_gateway_forwarder', None):
+            try:
+                self._gateway_forwarder.stop()
+            except Exception:
+                pass
         log.warning("Node %s:%s shut down", self.host, self.port)
 
     def handle_client(self, client_socket):
@@ -578,6 +607,11 @@ class ObscuraNode:
             self.server_socket.close()
         except Exception:
             pass
+        if getattr(self, '_gateway_forwarder', None):
+            try:
+                self._gateway_forwarder.stop()
+            except Exception:
+                pass
         sys.exit(0)
 
     def run(self):
@@ -589,6 +623,40 @@ class ObscuraNode:
         # are disabled) and the cover-traffic emitter (no-op while disabled).
         mixing.SCHEDULER.start()
         mixing.start_cover_traffic(self)
+
+        # Gateway inbound forwarding: relay public ports to sibling LAN
+        # WebSocket ports so NAT siblings become reachable as public relays.
+        # OBSCURA_GATEWAY_FORWARDS = static mappings; OBSCURA_GATEWAY_FORWARD_POOL
+        # = a port range the registry-brokered auto-provisioner allocates from.
+        # No-op (gateway only) unless one of them is configured.
+        if GATEWAY_FORWARDS or GATEWAY_FORWARD_POOL:
+            from src.core.gateway_forward import GatewayForwarder
+            self._gateway_forwarder = GatewayForwarder(
+                GATEWAY_FORWARDS, pool=GATEWAY_FORWARD_POOL)
+            self._gateway_forwarder.start()
+            log.info("Gateway forwarder started (static=%s, pool=%d ports)",
+                     GATEWAY_FORWARDS, len(GATEWAY_FORWARD_POOL))
+
+        # Auto-provision: when the registry hands us pending sibling forwards,
+        # allocate a pool port for each and report the grants back so the
+        # registry advertises those siblings through us.
+        if GATEWAY_FORWARD_POOL:
+            def _provision(pending_forwards):
+                granted = []
+                for pf in pending_forwards:
+                    lan_host = pf.get("lan_host")
+                    lan_ws_port = pf.get("lan_ws_port")
+                    sibling_pub = pf.get("sibling_pub")
+                    if not (lan_host and lan_ws_port and sibling_pub):
+                        continue
+                    public_port = self._gateway_forwarder.add_mapping(lan_host, lan_ws_port)
+                    if public_port:
+                        granted.append({"sibling_pub": sibling_pub,
+                                        "public_port": public_port})
+                        log.info("Gateway forward granted: %s:%s -> public %s",
+                                 lan_host, lan_ws_port, public_port)
+                return granted
+            set_forward_provisioner(_provision)
 
         # Start kill switch monitor
         start_kill_switch_monitor(self._shutdown)
