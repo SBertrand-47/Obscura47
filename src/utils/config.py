@@ -210,6 +210,77 @@ EXIT_WS_PORT = getenv_int("OBSCURA_EXIT_WS_PORT", 6001)
 PROXY_WS_RESPONSE_PORT = getenv_int("OBSCURA_PROXY_WS_RESP_PORT", 9052)
 PREFER_WEBSOCKET = getenv_str("OBSCURA_PREFER_WEBSOCKET", "true").lower() in ("1", "true", "yes")
 
+# ── Gateway port forwarding (NAT-sibling public rendezvous) ────────
+# A "sibling" relay shares a NAT with the gateway that owns the public-IP
+# slot, so it can only register on its LAN address and is unreachable to
+# off-LAN dialers - which makes it useless as a rendezvous/intro point.
+# When set, the GATEWAY opens these inbound public ports and relays each to
+# a sibling's LAN WebSocket port, so the sibling becomes reachable at the
+# shared public IP. Format: comma-separated "listen_port:target_host:target_port".
+#   e.g. OBSCURA_GATEWAY_FORWARDS=5012:192.168.1.33:5002,5013:192.168.1.34:5002
+def _parse_gateway_forwards(raw: str) -> list[tuple[int, str, int]]:
+    out: list[tuple[int, str, int]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split(":")
+        if len(parts) != 3:
+            continue
+        try:
+            listen_port = int(parts[0].strip())
+            target_host = parts[1].strip()
+            target_port = int(parts[2].strip())
+        except ValueError:
+            continue
+        if listen_port and target_host and target_port:
+            out.append((listen_port, target_host, target_port))
+    return out
+
+GATEWAY_FORWARDS = _parse_gateway_forwards(getenv_str("OBSCURA_GATEWAY_FORWARDS", ""))
+
+# OBSCURA_GATEWAY_FORWARD_POOL: a public port RANGE the gateway allocates from
+# when it auto-provisions forwards for siblings (registry-brokered). Forward
+# this range to the gateway machine once; siblings then get ports on demand
+# with no per-sibling config. Format "start-end" (inclusive), e.g. "5012-5040".
+def _parse_port_pool(raw: str) -> list[int]:
+    raw = raw.strip()
+    if not raw:
+        return []
+    if "-" not in raw:
+        try:
+            p = int(raw)
+            return [p] if 1 <= p <= 65535 else []
+        except ValueError:
+            return []
+    lo_s, _, hi_s = raw.partition("-")
+    try:
+        lo, hi = int(lo_s.strip()), int(hi_s.strip())
+    except ValueError:
+        return []
+    if lo > hi or lo < 1 or hi > 65535:
+        return []
+    return list(range(lo, hi + 1))
+
+GATEWAY_FORWARD_POOL = _parse_port_pool(getenv_str("OBSCURA_GATEWAY_FORWARD_POOL", ""))
+
+# A sibling opts in to being auto-forwarded by its gateway. Default on: the
+# registry only acts on it when the node registers under a private (LAN) host
+# (a real sibling), so a public gateway setting it is a harmless no-op.
+REQUEST_GATEWAY_FORWARD = getenv_str(
+    "OBSCURA_REQUEST_GATEWAY_FORWARD", "true").lower() in ("1", "true", "yes", "on")
+
+# A sibling reached via a gateway forward must advertise the gateway's public
+# host plus the FORWARDED public port - not its own LAN bind port. These let
+# the advertised endpoint differ from what the node binds locally (0 = advertise
+# the bound port). The TCP-port override is required when advertising the
+# gateway's public IP: the registry keys peers on advertised_host:port, so the
+# sibling needs a port distinct from the gateway's or its registration is
+# rejected as a slot conflict (HTTP 409). This advertised port is dialing
+# metadata only (data hops use ws_port); it needs no local listener.
+NODE_ADVERTISED_WS_PORT = getenv_int("OBSCURA_NODE_ADVERTISED_WS_PORT", 0)
+NODE_ADVERTISED_PORT = getenv_int("OBSCURA_NODE_ADVERTISED_PORT", 0)
+
 # Registry persistence & auth
 REGISTRY_DB_PATH = getenv_str("OBSCURA_REGISTRY_DB_PATH", "registry.db")
 REGISTRY_ADMIN_KEY = getenv_str("OBSCURA_REGISTRY_ADMIN_KEY", "")

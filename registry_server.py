@@ -193,6 +193,58 @@ def _ws_recently_unreachable(peer_id: str) -> bool:
     return not ok
 
 
+# ── Gateway forward brokering (NAT-sibling public rendezvous) ─────
+# A sibling behind the gateway's NAT can only register on its LAN host, so
+# off-LAN dialers can't use it as a rendezvous/intro point. The registry
+# brokers an inbound forward: a sibling opts in (want_forward), the gateway
+# (the primary for that NAT) allocates a public port and reports it back, and
+# the registry then translates the sibling's address in /peers to the public
+# (gateway_host, granted_port) so dialers see a reachable relay. State is
+# in-memory and self-heals: grants co-expire with peer TTL and a health probe
+# clears any whose public port stops answering (e.g. after a gateway restart).
+# (source_ip, sibling_pub) -> {lan_host, lan_ws_port, lan_tcp_port, ts}
+_pending_forwards: dict[tuple[str, str], dict] = {}
+# (source_ip, sibling_pub) -> {public_host, public_port, ts}
+_granted_forwards: dict[tuple[str, str], dict] = {}
+FORWARD_GRANT_TTL = PEER_TTL * 2
+
+
+def _process_forward_signals(source_ip: str | None, advertised_host: str, *,
+                             pub: str | None, ws_port: int | None,
+                             tcp_port: int | None, want_forward: bool,
+                             granted_forwards: list | None) -> None:
+    """Record a sibling's forward request and accept a gateway's grant report.
+
+    Security: a grant is only honoured when the caller is the primary of this
+    NAT (its advertised host equals the public source IP the registry sees),
+    and a pending is only recorded for a private (LAN) advertised host of that
+    same NAT - so one NAT can never provision forwards for another.
+    """
+    if not source_ip:
+        return
+    if want_forward and pub and _is_private_host(advertised_host):
+        if (source_ip, pub) not in _granted_forwards:
+            _pending_forwards[(source_ip, pub)] = {
+                "lan_host": advertised_host,
+                "lan_ws_port": ws_port,
+                "lan_tcp_port": tcp_port,
+                "ts": time.time(),
+            }
+    grants = granted_forwards
+    if grants and advertised_host == source_ip:
+        for g in grants:
+            spub = g.get("sibling_pub")
+            pport = g.get("public_port")
+            if not spub or not pport:
+                continue
+            _granted_forwards[(source_ip, spub)] = {
+                "public_host": advertised_host,
+                "public_port": int(pport),
+                "ts": time.time(),
+            }
+            _pending_forwards.pop((source_ip, spub), None)
+
+
 # ── Pydantic Models ──────────────────────────────────────────────
 
 class PeerRegistration(BaseModel):
@@ -202,6 +254,9 @@ class PeerRegistration(BaseModel):
     ws_port: int | None = Field(default=None, ge=1, le=65535)
     ws_tls: bool | None = None  # True if ws_port serves wss://
     advertised_host: str | None = None
+    # Gateway forward brokering (optional; older clients omit these).
+    want_forward: bool = False  # sibling opts in to gateway port forwarding
+    granted_forwards: list[dict] | None = None  # gateway reports [{sibling_pub, public_port}]
 
 
 class AuthVerification(BaseModel):
@@ -408,6 +463,16 @@ async def get_peers(role_filter: str | None = None,
     out: list[dict] = []
     for r in rows:
         host, port, role, pub, ws_port, ws_tls, last_seen, source_ip = r
+        # Forwarded-sibling translation: a sibling with a granted gateway
+        # forward is presented at its public (gateway_host, port) so off-LAN
+        # dialers see a reachable relay. Done before NAT scoping below so the
+        # now-public host passes the private-host filter and is served to all.
+        if pub:
+            grant = _granted_forwards.get((source_ip, pub))
+            if grant:
+                host = grant["public_host"]
+                port = grant["public_port"]
+                ws_port = grant["public_port"]
         # NAT-scoped visibility: a peer advertising a private (RFC1918) host is
         # only reachable from inside its own NAT, so serve it only to a
         # requester the registry observed behind that same public IP. Public
@@ -465,7 +530,7 @@ async def get_peer_by_id(peer_id: str) -> dict | None:
 
 
 async def _registration_response(source_ip: str | None, advertised_host: str,
-                                  peer_id: str) -> dict:
+                                  peer_id: str, pub: str | None = None) -> dict:
     """Build a /register response with primary/sibling classification.
 
     A registration is classified ``sibling`` when its advertised host is a
@@ -474,6 +539,10 @@ async def _registration_response(source_ip: str | None, advertised_host: str,
     network. ``primary_peer`` carries that gateway when one is currently
     registered, so the sibling can pin it as a first hop without a separate
     lookup.
+
+    Forward brokering rides along: a sibling learns its ``granted_forward``
+    (informational), and the primary learns the ``pending_forwards`` of its
+    NAT so it can wire them up and report the allocated ports next heartbeat.
     """
     role_kind = "sibling" if _is_private_host(advertised_host) else "primary"
     body: dict = {
@@ -487,6 +556,19 @@ async def _registration_response(source_ip: str | None, advertised_host: str,
         primary = await get_primary_node_for_nat(source_ip)
         if primary:
             body["primary_peer"] = primary
+        if pub and source_ip:
+            grant = _granted_forwards.get((source_ip, pub))
+            if grant:
+                body["granted_forward"] = {
+                    "host": grant["public_host"], "port": grant["public_port"]}
+    elif source_ip:
+        pending = [
+            {"sibling_pub": p, "lan_host": d["lan_host"], "lan_ws_port": d["lan_ws_port"]}
+            for (sip, p), d in _pending_forwards.items()
+            if sip == source_ip and (source_ip, p) not in _granted_forwards
+        ]
+        if pending:
+            body["pending_forwards"] = pending
     return body
 
 
@@ -703,6 +785,38 @@ async def rate_bucket_gc_loop():
             del _rate_buckets[ip]
 
 
+async def forward_grant_health_loop():
+    """Invalidate gateway-forward grants whose public port stops answering.
+
+    A grant points dialers at (gateway_host, public_port). If the gateway
+    restarts it loses its in-memory mappings, so that port goes dead while the
+    registry still translates the sibling to it. Probing the public endpoint
+    and dropping dead/aged grants lets the sibling revert to a NAT-scoped peer;
+    its next want_forward heartbeat re-pends and the gateway re-grants on a
+    fresh port - self-healing within a few heartbeats. Pending entries also
+    age out so a sibling that simply went away doesn't linger.
+    """
+    while True:
+        await asyncio.sleep(WS_PROBE_INTERVAL)
+        now = time.time()
+        # A grant's freshness comes from the gateway re-reporting it each
+        # heartbeat (which refreshes ts in _process_forward_signals). Clear a
+        # grant only when its public port is dead AND it has gone unrefreshed
+        # past the TTL - i.e. the gateway stopped reporting it - so a transient
+        # probe blip on a still-reported grant doesn't kill it.
+        for key, grant in list(_granted_forwards.items()):
+            aged = (now - grant.get("ts", 0)) >= FORWARD_GRANT_TTL
+            if not aged:
+                continue
+            if not await _probe_ws_endpoint(grant["public_host"], grant["public_port"]):
+                _granted_forwards.pop(key, None)
+                print(f"[registry] forward grant cleared (public port dead): "
+                      f"{grant['public_host']}:{grant['public_port']}")
+        for key, pend in list(_pending_forwards.items()):
+            if (now - pend.get("ts", 0)) >= FORWARD_GRANT_TTL:
+                _pending_forwards.pop(key, None)
+
+
 # ── FastAPI App ──────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -712,6 +826,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(stats_loop())
     asyncio.create_task(challenge_cleanup_loop())
     asyncio.create_task(rate_bucket_gc_loop())
+    asyncio.create_task(forward_grant_health_loop())
     print(f"=========================================")
     print(f"  Obscura47 Bootstrap Registry (FastAPI)")
     print(f"  Peer TTL: {PEER_TTL}s")
@@ -895,7 +1010,11 @@ async def register_peer(body: PeerRegistration, request: Request):
                 await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
             await upsert_peer(peer_id, advertised_host, body.port, body.role, body.pub,
                               body.ws_port, body.ws_tls, source_ip=ip)
-            return await _registration_response(ip, advertised_host, peer_id)
+            _process_forward_signals(ip, advertised_host, pub=body.pub,
+                                     ws_port=body.ws_port, tcp_port=body.port,
+                                     want_forward=body.want_forward,
+                                     granted_forwards=body.granted_forwards)
+            return await _registration_response(ip, advertised_host, peer_id, body.pub)
 
         # New peer or pubkey change - issue challenge
         nonce = secrets.token_hex(32)
@@ -908,6 +1027,7 @@ async def register_peer(body: PeerRegistration, request: Request):
                 "pub": body.pub,
                 "ws_port": body.ws_port,
                 "ws_tls": body.ws_tls,
+                "want_forward": body.want_forward,
             },
             "created_at": time.time(),
             "ip": ip,
@@ -932,9 +1052,13 @@ async def register_peer(body: PeerRegistration, request: Request):
         await _verify_ws_reachable(peer_id, advertised_host, body.ws_port)
     await upsert_peer(peer_id, advertised_host, body.port, body.role,
                       ws_port=body.ws_port, ws_tls=body.ws_tls, source_ip=ip)
+    _process_forward_signals(ip, advertised_host, pub=body.pub,
+                             ws_port=body.ws_port, tcp_port=body.port,
+                             want_forward=body.want_forward,
+                             granted_forwards=body.granted_forwards)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
-    return await _registration_response(ip, advertised_host, peer_id)
+    return await _registration_response(ip, advertised_host, peer_id, body.pub)
 
 
 @app.post("/register/verify")
@@ -970,8 +1094,12 @@ async def verify_registration(body: AuthVerification, request: Request):
         await _verify_ws_reachable(body.peer_id, data["host"], int(data["ws_port"]))
     await upsert_peer(body.peer_id, data["host"], data["port"], data["role"],
                        data["pub"], data.get("ws_port"), data.get("ws_tls"), source_ip=ip)
+    _process_forward_signals(ip, data["host"], pub=data.get("pub"),
+                             ws_port=data.get("ws_port"), tcp_port=data["port"],
+                             want_forward=data.get("want_forward", False),
+                             granted_forwards=None)
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
-    return await _registration_response(ip, data["host"], body.peer_id)
+    return await _registration_response(ip, data["host"], body.peer_id, data.get("pub"))
 
 
 # ── Diagnostic event collection ──────────────────────────────────
