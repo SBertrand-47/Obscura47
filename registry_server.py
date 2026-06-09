@@ -206,13 +206,20 @@ def _ws_recently_unreachable(peer_id: str) -> bool:
 _pending_forwards: dict[tuple[str, str], dict] = {}
 # (source_ip, sibling_pub) -> {public_host, public_port, ts}
 _granted_forwards: dict[tuple[str, str], dict] = {}
+# source_ip -> {lan_host, lan_ws_port, lan_tcp_port, pub, ts}. The primary of a
+# NAT reports its own LAN address so same-NAT siblings - which cannot hairpin to
+# the shared public IP - can be served a reachable gateway endpoint in /peers.
+_primary_lan: dict[str, dict] = {}
 FORWARD_GRANT_TTL = PEER_TTL * 2
 
 
 def _process_forward_signals(source_ip: str | None, advertised_host: str, *,
                              pub: str | None, ws_port: int | None,
                              tcp_port: int | None, want_forward: bool,
-                             granted_forwards: list | None) -> None:
+                             granted_forwards: list | None,
+                             lan_host: str | None = None,
+                             lan_ws_port: int | None = None,
+                             lan_tcp_port: int | None = None) -> None:
     """Record a sibling's forward request and accept a gateway's grant report.
 
     Security: a grant is only honoured when the caller is the primary of this
@@ -222,6 +229,18 @@ def _process_forward_signals(source_ip: str | None, advertised_host: str, *,
     """
     if not source_ip:
         return
+    # Primary LAN address: when the primary of this NAT (advertised host == the
+    # public source IP) reports a private LAN host, store it so /peers can serve
+    # that reachable endpoint to same-NAT siblings. Same security basis as the
+    # grant path - only the primary of a NAT can set it for that NAT.
+    if advertised_host == source_ip and lan_host and _is_private_host(lan_host):
+        _primary_lan[source_ip] = {
+            "lan_host": lan_host,
+            "lan_ws_port": lan_ws_port,
+            "lan_tcp_port": lan_tcp_port or tcp_port,
+            "pub": pub,
+            "ts": time.time(),
+        }
     if want_forward and pub and _is_private_host(advertised_host):
         if (source_ip, pub) not in _granted_forwards:
             _pending_forwards[(source_ip, pub)] = {
@@ -257,6 +276,11 @@ class PeerRegistration(BaseModel):
     # Gateway forward brokering (optional; older clients omit these).
     want_forward: bool = False  # sibling opts in to gateway port forwarding
     granted_forwards: list[dict] | None = None  # gateway reports [{sibling_pub, public_port}]
+    # A primary's own LAN address, so same-NAT siblings (which can't hairpin to
+    # the shared public IP) can be served a reachable gateway endpoint in /peers.
+    lan_host: str | None = None
+    lan_ws_port: int | None = Field(default=None, ge=1, le=65535)
+    lan_tcp_port: int | None = Field(default=None, ge=1, le=65535)
 
 
 class AuthVerification(BaseModel):
@@ -473,6 +497,22 @@ async def get_peers(role_filter: str | None = None,
                 host = grant["public_host"]
                 port = grant["public_port"]
                 ws_port = grant["public_port"]
+        # Same-NAT primary translation (inverse of the forwarded-sibling case):
+        # the primary of a NAT is listed under the shared public IP, but a
+        # sibling behind that same IP can't hairpin to it. Serve such a
+        # requester the primary's LAN endpoint instead, so it routes through the
+        # gateway. Gated on requester_ip == source_ip so off-NAT dialers still
+        # get the public address. The rewritten (private) host then rides the
+        # source_ip == requester_ip branch of the NAT-scoping filter below.
+        if (requester_ip is not None and host == source_ip
+                and source_ip == requester_ip):
+            plan = _primary_lan.get(source_ip)
+            if plan and (time.time() - plan["ts"]) < FORWARD_GRANT_TTL:
+                host = plan["lan_host"]
+                if plan.get("lan_tcp_port"):
+                    port = plan["lan_tcp_port"]
+                if plan.get("lan_ws_port"):
+                    ws_port = plan["lan_ws_port"]
         # NAT-scoped visibility: a peer advertising a private (RFC1918) host is
         # only reachable from inside its own NAT, so serve it only to a
         # requester the registry observed behind that same public IP. Public
@@ -594,6 +634,15 @@ async def get_primary_node_for_nat(source_ip: str | None) -> dict | None:
     if not row:
         return None
     host, port, pub, ws_port, ws_tls = row
+    # Same-NAT siblings can't hairpin to the primary's public IP, so hand back
+    # its LAN endpoint when the primary has reported one. Off-NAT callers never
+    # reach this function with a matching source_ip, so this only ever serves
+    # genuine same-NAT siblings.
+    plan = _primary_lan.get(source_ip)
+    if plan and (time.time() - plan["ts"]) < FORWARD_GRANT_TTL:
+        host = plan["lan_host"]
+        port = plan.get("lan_tcp_port") or port
+        ws_port = plan.get("lan_ws_port") or ws_port
     return {
         "host": host, "port": port, "pub": pub,
         "ws_port": ws_port,
@@ -1013,7 +1062,10 @@ async def register_peer(body: PeerRegistration, request: Request):
             _process_forward_signals(ip, advertised_host, pub=body.pub,
                                      ws_port=body.ws_port, tcp_port=body.port,
                                      want_forward=body.want_forward,
-                                     granted_forwards=body.granted_forwards)
+                                     granted_forwards=body.granted_forwards,
+                                     lan_host=body.lan_host,
+                                     lan_ws_port=body.lan_ws_port,
+                                     lan_tcp_port=body.lan_tcp_port)
             return await _registration_response(ip, advertised_host, peer_id, body.pub)
 
         # New peer or pubkey change - issue challenge
@@ -1028,6 +1080,9 @@ async def register_peer(body: PeerRegistration, request: Request):
                 "ws_port": body.ws_port,
                 "ws_tls": body.ws_tls,
                 "want_forward": body.want_forward,
+                "lan_host": body.lan_host,
+                "lan_ws_port": body.lan_ws_port,
+                "lan_tcp_port": body.lan_tcp_port,
             },
             "created_at": time.time(),
             "ip": ip,
@@ -1055,7 +1110,10 @@ async def register_peer(body: PeerRegistration, request: Request):
     _process_forward_signals(ip, advertised_host, pub=body.pub,
                              ws_port=body.ws_port, tcp_port=body.port,
                              want_forward=body.want_forward,
-                             granted_forwards=body.granted_forwards)
+                             granted_forwards=body.granted_forwards,
+                             lan_host=body.lan_host,
+                             lan_ws_port=body.lan_ws_port,
+                             lan_tcp_port=body.lan_tcp_port)
     if is_new:
         print(f"[registry] + New {body.role} at {peer_id} (no auth)")
     return await _registration_response(ip, advertised_host, peer_id, body.pub)
@@ -1097,7 +1155,10 @@ async def verify_registration(body: AuthVerification, request: Request):
     _process_forward_signals(ip, data["host"], pub=data.get("pub"),
                              ws_port=data.get("ws_port"), tcp_port=data["port"],
                              want_forward=data.get("want_forward", False),
-                             granted_forwards=None)
+                             granted_forwards=None,
+                             lan_host=data.get("lan_host"),
+                             lan_ws_port=data.get("lan_ws_port"),
+                             lan_tcp_port=data.get("lan_tcp_port"))
     print(f"[registry] + Verified {data['role']} at {body.peer_id}")
     return await _registration_response(ip, data["host"], body.peer_id, data.get("pub"))
 

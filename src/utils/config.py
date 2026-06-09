@@ -68,6 +68,20 @@ DISCOVERY_INTERVAL = getenv_int("OBSCURA_DISCOVERY_INTERVAL", 10)
 # 3 matches a standard Tor-style guard + middle + terminal circuit.
 HS_CIRCUIT_HOPS = getenv_int("OBSCURA_HS_CIRCUIT_HOPS", 3)
 
+# Same-NAT reachability to the gateway/primary. An internal sibling shares the
+# gateway's public IP and cannot hairpin to it, so it must reach the primary on
+# the LAN. The primary registers only its public host, so left alone every
+# circuit through the gateway dies from this side. When OBSCURA_PRIMARY_LAN_HOST
+# is set, the node rewrites the primary's public host (any peer advertised under
+# our own public IP) to this LAN address in its local peer view, so routing goes
+# through the gateway as intended. OBSCURA_PRIMARY_LAN_WS_PORT optionally pins
+# the gateway's LAN WebSocket port (the primary often suppresses ws_port because
+# its *public* WS self-probe hairpins and fails). This is the local bridge that
+# works without redeploying the registry; the registry-side propagation makes it
+# automatic for every sibling.
+PRIMARY_LAN_HOST = getenv_str("OBSCURA_PRIMARY_LAN_HOST", "")
+PRIMARY_LAN_WS_PORT = getenv_int("OBSCURA_PRIMARY_LAN_WS_PORT", 0)
+
 # Discovery/peer management
 PEER_EXPIRY_SECONDS = getenv_int("OBSCURA_PEER_EXPIRY_SECONDS", 30)
 
