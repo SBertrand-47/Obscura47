@@ -596,7 +596,8 @@ def _capture_registration_classification(role: str, result: dict | None) -> None
 
 def _attempt_registration(role: str, port: int, pub: str | None,
                           priv_key, ws_port: int | None, ws_tls: bool | None,
-                          advertised_host: str | None) -> dict | None:
+                          advertised_host: str | None,
+                          lan_ws_port: int | None = None) -> dict | None:
     """One round-trip to /register (+ /register/verify when challenged).
 
     Returns the parsed response dict on success, ``None`` on transport
@@ -614,6 +615,19 @@ def _attempt_registration(role: str, port: int, pub: str | None,
         body["ws_tls"] = ws_tls
     if advertised_host:
         body["advertised_host"] = advertised_host
+    # Advertise our LAN address so the registry can hand it to same-NAT siblings
+    # that classify us as their primary. A sibling cannot hairpin to our shared
+    # public IP, so it needs the LAN host/ws_port to route through us as their
+    # gateway. The registry stores this only when we register as a primary
+    # (public host); siblings already advertise their LAN host directly. We send
+    # the *real* ws_port here even when the public-ws self-probe suppressed
+    # ws_port in the heartbeat, because the LAN ws endpoint is reachable.
+    lan_host = _pick_local_lan_ip()
+    if lan_host:
+        body["lan_host"] = lan_host
+        body["lan_tcp_port"] = port
+        if lan_ws_port:
+            body["lan_ws_port"] = lan_ws_port
     # Ride forward-brokering fields (want_forward / granted_forwards) along on
     # the existing /register round-trip. The registry ignores them unless they
     # apply (private host for want_forward; primary-of-NAT for granted_forwards).
@@ -671,7 +685,8 @@ def _attempt_registration(role: str, port: int, pub: str | None,
 def register_with_registry(role: str, port: int, pub: str | None = None,
                            priv_key=None, ws_port: int | None = None,
                            ws_tls: bool | None = None,
-                           advertised_host: str | None = None):
+                           advertised_host: str | None = None,
+                           lan_ws_port: int | None = None):
     """
     Register this node with the bootstrap registry.
     If pub + priv_key are provided, performs ECDSA challenge-response auth.
@@ -689,7 +704,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
 
     try:
         result = _attempt_registration(role, port, pub, priv_key,
-                                       ws_port, ws_tls, advertised_host)
+                                       ws_port, ws_tls, advertised_host,
+                                       lan_ws_port=lan_ws_port)
         _capture_registration_classification(role, result)
         if isinstance(result, dict):
             _run_forward_provisioner(result.get("pending_forwards"))
@@ -708,7 +724,8 @@ def register_with_registry(role: str, port: int, pub: str | None = None,
         log.info(f"Public-slot conflict on register; retrying as sibling under LAN {lan_ip}")
         try:
             result = _attempt_registration(role, port, pub, priv_key,
-                                           ws_port, ws_tls, lan_ip)
+                                           ws_port, ws_tls, lan_ip,
+                                           lan_ws_port=lan_ws_port)
         except Exception as e2:
             log.error(f"Sibling fallback registration failed: {e2}")
             return None
@@ -766,7 +783,8 @@ def heartbeat_loop(role: str, port: int, pub: str | None = None,
         result = register_with_registry(role, port, pub, priv_key=priv_key,
                                         ws_port=effective_ws_port,
                                         ws_tls=effective_ws_tls,
-                                        advertised_host=advertised_host)
+                                        advertised_host=advertised_host,
+                                        lan_ws_port=ws_port)
         # Capture the peer_id assigned by the registry - the deregister flow
         # needs it, and the registry constructs it from advertised_host+port
         # which we don't always know in advance (it may rewrite our host).
@@ -890,6 +908,48 @@ def _deregister_all_on_exit():
             log.warning(f"atexit deregister failed for {role}: {e}")
 
 
+_primary_lan_override_logged = False
+
+
+def _apply_primary_lan_override(peers: List[Dict]) -> List[Dict]:
+    """Rewrite the NAT primary's public host to its LAN address for this sibling.
+
+    A same-NAT sibling is handed the gateway/primary under the shared public IP
+    - the only address the primary registers - but it cannot hairpin to that
+    public IP, so every circuit routed through the gateway dies from this side.
+    When ``OBSCURA_PRIMARY_LAN_HOST`` is configured, rewrite any peer advertised
+    under our own public IP (i.e. the primary of our NAT) to the reachable LAN
+    address, optionally pinning the gateway's LAN ws_port, so routing goes
+    through the gateway as intended.
+
+    Local bridge until the registry propagates the primary's LAN address to
+    same-NAT siblings automatically; harmless no-op when the env is unset.
+    """
+    from src.utils.config import PRIMARY_LAN_HOST, PRIMARY_LAN_WS_PORT
+    lan_host = (PRIMARY_LAN_HOST or "").strip()
+    if not lan_host:
+        return peers
+    # The override keys on our public IP (the gateway's shared IP), so resolve
+    # it eagerly via /whoami when registration hasn't cached it yet. Agents build
+    # circuits at startup, before the heartbeat sets _my_public_ip, so without
+    # this the rewrite silently no-ops on the very fetches that matter.
+    pub_ip = _my_public_ip or learn_public_ip()
+    if not pub_ip:
+        return peers
+    global _primary_lan_override_logged
+    for p in peers:
+        if p.get("host") == pub_ip:
+            p["host"] = lan_host
+            if PRIMARY_LAN_WS_PORT:
+                p["ws_port"] = PRIMARY_LAN_WS_PORT
+            if not _primary_lan_override_logged:
+                log.info("Primary LAN override: gateway %s -> %s%s for same-NAT "
+                         "routing", pub_ip, lan_host,
+                         f":{PRIMARY_LAN_WS_PORT}(ws)" if PRIMARY_LAN_WS_PORT else "")
+                _primary_lan_override_logged = True
+    return peers
+
+
 def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
     """Fetch the full peer list from the bootstrap registry."""
     url = f"{REGISTRY_URL}/peers"
@@ -899,7 +959,9 @@ def fetch_peers_from_registry(role_filter: str | None = None) -> List[Dict]:
     try:
         with urllib.request.urlopen(req, timeout=5, context=registry_ssl_ctx()) as resp:
             peers = json.loads(resp.read())
-            return peers if isinstance(peers, list) else []
+            if not isinstance(peers, list):
+                return []
+            return _apply_primary_lan_override(peers)
     except Exception as e:
         log.error(f"Failed to fetch peers from registry: {e}")
         return []
