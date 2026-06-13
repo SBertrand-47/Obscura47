@@ -58,10 +58,11 @@ def risk_matrix(
 
 def render_text(matrix: dict[str, Any]) -> str:
     sizes = matrix["repertoire_sizes"]
+    corner = "defender \\ techniques"  # keep the backslash out of the f-string (Python 3.11)
     lines = [
         f"Risk surface: breaches by defender x attacker repertoire  "
         f"(rounds={matrix['rounds']})",
-        "  " + f"{'defender \\ techniques':<24}"
+        "  " + f"{corner:<24}"
         + "".join(f"{k:>5}" for k in sizes),
     ]
     for row in matrix["rows"]:

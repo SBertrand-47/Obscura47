@@ -7,6 +7,12 @@ import pytest
 pytest.importorskip("PIL")
 pytest.importorskip("pystray")
 
+import os
+import sys
+
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    pytest.skip("tray app needs an X display (headless CI)", allow_module_level=True)
+
 import tray_app
 
 
