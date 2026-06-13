@@ -136,8 +136,10 @@ class _FakeProc:
 
 
 def test_try_open_firewall_success(monkeypatch):
+    import os
     import shutil
     monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)  # simulate root: exercise the command path, not the privilege gate
     monkeypatch.setattr(shutil, "which", _which_only("ufw"))
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(0))
     ok, msg = ph._try_open_firewall(9001)
@@ -146,8 +148,10 @@ def test_try_open_firewall_success(monkeypatch):
 
 
 def test_try_open_firewall_reports_command_failure(monkeypatch):
+    import os
     import shutil
     monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 0)  # simulate root: exercise the command path, not the privilege gate
     monkeypatch.setattr(shutil, "which", _which_only("ufw"))
     monkeypatch.setattr(
         subprocess, "run", lambda *a, **k: _FakeProc(1, stderr="permission denied"))
