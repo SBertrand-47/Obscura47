@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
+
+# pystray's Linux backend connects to an X display at import time, so guard
+# before importing it: skip the whole module on a headless Linux box (CI),
+# where DISPLAY is unset or empty. macOS/local runs use a non-X backend.
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    pytest.skip("tray app needs an X display (headless CI)", allow_module_level=True)
 
 pytest.importorskip("PIL")
 pytest.importorskip("pystray")
