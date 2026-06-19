@@ -1185,7 +1185,9 @@ class ObscuraApp(QMainWindow):
         self._agents_stop_btn.setObjectName("Action")
         self._agents_stop_btn.setCursor(Qt.PointingHandCursor)
         self._agents_stop_btn.clicked.connect(self._stop_agents)
-        self._agents_stop_btn.setEnabled(False)
+        # Always enabled: it both stops the fleet this window launched and
+        # cleans up any agents left running by a previous (e.g. crashed) session.
+        self._agents_stop_btn.setEnabled(True)
         btn_row.addWidget(self._agents_stop_btn)
         btn_row.addStretch(1)
         c_lay.addLayout(btn_row)
@@ -1217,6 +1219,7 @@ class ObscuraApp(QMainWindow):
         if society:
             argv.append("--society")
         self._agents_out.clear()
+        self._agents_brain_warned = False
         self._append_agent_out(
             f"Launching {count} agent(s)"
             + (" in society mode..." if society else "...")
@@ -1250,30 +1253,91 @@ class ObscuraApp(QMainWindow):
 
     def _stop_agents(self):
         proc = self._agents_proc
-        if proc is None:
-            return
-        self._append_agent_out("  Stopping agents...")
-        try:
-            if platform.system() == "Windows":
-                proc.terminate()
-            else:
-                proc.send_signal(signal.SIGINT)
-        except Exception:
+        if proc is not None and proc.poll() is None:
+            # Normal path: stop the fleet this window launched. Its parent
+            # withdraws every agent's descriptor and reaps the child processes.
+            self._append_agent_out("  Stopping agents...")
             try:
-                proc.terminate()
+                if platform.system() == "Windows":
+                    proc.terminate()
+                else:
+                    proc.send_signal(signal.SIGINT)
             except Exception:
-                pass
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            self._agents_proc = None
+            self._agents_launch_btn.setEnabled(True)
+            return
+        # Nothing tracked here: clean up agents left running by a previous
+        # session (e.g. orphaned if the GUI was killed or crashed mid-run).
+        strays = self._kill_stray_agents()
+        if strays:
+            self._append_agent_out(
+                f"  Stopped {strays} stray agent process(es) from a previous session.")
+        else:
+            self._append_agent_out("  No agents are running.")
         self._agents_launch_btn.setEnabled(True)
-        self._agents_stop_btn.setEnabled(False)
+
+    def _kill_stray_agents(self) -> int:
+        """SIGINT any launch_agents.py processes this window isn't tracking.
+
+        Covers agents orphaned by a previous crash/quit. POSIX only (uses
+        pgrep); on Windows there is no untracked-cleanup, so it returns 0.
+        """
+        if platform.system() == "Windows":
+            return 0
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "launch_agents.py"],
+                capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            return 0
+        killed = 0
+        for tok in out.split():
+            try:
+                pid = int(tok)
+            except ValueError:
+                continue
+            if pid == os.getpid():
+                continue
+            # Only signal real Python processes running the launcher - never an
+            # editor or shell that merely has the path on its command line.
+            try:
+                cmd = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=5).stdout.lower()
+            except Exception:
+                continue
+            if "python" not in cmd or "launch_agents.py" not in cmd:
+                continue
+            try:
+                os.kill(pid, signal.SIGINT)
+                killed += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+        return killed
 
     def _append_agent_out(self, line: str):
         if not hasattr(self, "_agents_out"):
             return
         self._agents_out.append(line)
+        # The launcher prints "... brain is unusable ...: <reason>" when the
+        # model API rejects the key (no credit, revoked, etc.). Surface it as a
+        # popup so the user sees why nothing started, not just a log line.
+        if "brain is unusable" in line and not getattr(self, "_agents_brain_warned", False):
+            self._agents_brain_warned = True
+            reason = line.split("): ", 1)[-1].strip() or line.strip()
+            QMessageBox.warning(
+                self, "Can't start the agents",
+                reason + "\n\nThe agents need a working Anthropic API key with "
+                "credit. Add credits at console.anthropic.com (Plans & Billing), "
+                "or set a funded ANTHROPIC_API_KEY in your .env, then try again.")
         if "[agent fleet stopped]" in line:
             self._agents_launch_btn.setEnabled(True)
-            self._agents_stop_btn.setEnabled(False)
             self._agents_proc = None
+            # Stop stays enabled so stray agents can always be cleaned up.
 
     # ── Activity page ─────────────────────────────────────────────
 
