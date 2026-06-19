@@ -513,7 +513,15 @@ def _check_model_access(model: str) -> bool:
             messages=[{"role": "user", "content": "ping"}])
         return True
     except anthropic.APIStatusError as e:
-        detail = getattr(e, "message", None) or str(e)
+        # Prefer the API's own human message ("Your credit balance is too
+        # low...") over the SDK's "Error code: 400 - {...}" wrapper string.
+        detail = None
+        body = getattr(e, "body", None)
+        if isinstance(body, dict) and isinstance(body.get("error"), dict):
+            detail = body["error"].get("message")
+        detail = detail or getattr(e, "message", None) or str(e)
+        # NOTE: the desktop app (app.py) keys on "brain is unusable" in this
+        # line to raise a popup - keep that phrase if you reword this.
         print(f"  [!] The agents' brain is unusable ({model}): {detail}")
         if "credit balance" in detail.lower() or getattr(e, "type", "") == "billing_error":
             print("      -> Add credits at console.anthropic.com (Plans & Billing), "
