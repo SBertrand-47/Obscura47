@@ -35,6 +35,34 @@ to watch an AI agent run a website and catch a probe.
 [`docs/agent-operated-site.md`](docs/agent-operated-site.md); range:
 [`src/range/README.md`](src/range/README.md).
 
+### How it fits together
+
+Agents run on a real Tor-style overlay. Tor would hide their traffic; in range
+mode we instrument both what each agent *decided* and how its *traffic flowed*,
+join the two by session, and reconstruct the whole story on one dashboard.
+
+```mermaid
+flowchart LR
+    A["AI agents<br/>(real models)"] -->|onion circuit| G["Guard / entry"]
+    G --> R["Relays"]
+    R --> X["Exit"]
+    R --> H[".obscura services<br/>(agent-hosted)"]
+    X --> NET["Clearnet"]
+
+    subgraph Overlay["Private Tor-style overlay"]
+        G
+        R
+        X
+        H
+    end
+
+    A -. decision plane .-> DEC["What it did and why<br/>(reasoning, tools, deception)"]
+    Overlay -. traffic plane .-> OPS["How it flowed<br/>(circuits, hops, latency)"]
+    DEC --> JOIN["Cross-plane join<br/>by session"]
+    OPS --> JOIN
+    JOIN --> DASH["One dashboard<br/>+ ship / no-ship verdict"]
+```
+
 ### What real models have already done in it
 
 These are real model runs, not mock-ups - each captured and replay-locked as a
@@ -56,9 +84,27 @@ test (`tests/fixtures/real_runs/`) so you can reproduce it with no API key:
   visitor, every response it decided and why, including the moment it refuses a
   path-traversal and `/admin` probe.
 
-This is the impressive, sellable part, and it is honest: the system also flags
-where observability *breaks* (traffic with no decision behind it, or decisions
-that left no trace), so "fully observable" is a claim it verifies, not a slogan.
+This is the impressive part, and it is honest: the system also flags where
+observability *breaks* (traffic with no decision behind it, or decisions that
+left no trace), so "fully observable" is a claim it verifies, not a slogan.
+
+When an agent operates a live `.obscura` site, every visitor request becomes a
+recorded decision you can read back:
+
+```mermaid
+sequenceDiagram
+    participant V as Visitor
+    participant S as .obscura site
+    participant M as AI operator
+    participant O as Observatory
+    V->>S: request /path
+    S->>M: serve(request)
+    Note over M: decides status, body,<br/>rationale, what to remember
+    M->>O: site.serve (decision recorded)
+    M->>S: response
+    S->>V: 200 / 400 / 403
+    Note over M,O: a probe (path traversal, /admin)<br/>is refused and logged with its reason
+```
 
 ### The overlay is also a working private network
 
@@ -432,6 +478,19 @@ operator turns them on (`OBSCURA_MODE=range`).
   runs. See [`docs/live-society.md`](docs/live-society.md) and
   [`src/range/README.md`](src/range/README.md). Run one with
   `python -m src.range society` or `python -m src.range run`.
+
+The society runs as a loop: agents act, controls react, offenders become case
+files, and a regulator turns the whole run into a verdict you can act on.
+
+```mermaid
+flowchart TD
+    ROLES["Agents<br/>attacker · seller · buyer · forum"] --> ACT["Actions on the overlay"]
+    ACT --> CTRL["Controls<br/>defender · escrow · moderator · reputation gate"]
+    CTRL --> CASE["Case files per offender<br/>(charges, evidence, who contained them)"]
+    CASE --> REG["Regulator"]
+    REG --> VERDICT["Ship / no-ship verdict<br/>against a policy"]
+    CTRL -. reputation persists .-> ROLES
+```
 
 ## Building
 
