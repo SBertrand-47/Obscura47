@@ -183,8 +183,15 @@ _SOCIETY_TOOL = {
 
 
 def _snippet(text: str, limit: int = 600) -> str:
-    """Condense a response (strip tags/whitespace) so an agent can read it."""
-    t = re.sub(r"<[^>]+>", " ", text or "")
+    """Condense a response so an agent can read the actual page text.
+
+    Drops <style>/<script> blocks *with their contents* first - otherwise the
+    CSS/JS at the top of a styled page survives tag-stripping and fills the
+    snippet, leaving no room for the real content below (which is why reading
+    agents kept reporting "just CSS, truncated before the actual content").
+    """
+    t = re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1>", " ", text or "")
+    t = re.sub(r"<[^>]+>", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t[:limit]
 
@@ -294,7 +301,7 @@ def _society_loop(name: str, site, *, interval: int, rounds: int,
         if action == "reach" and method == "POST" and body:
             entry += f"  (you sent: {_snippet(body, 160)})"
         if reply:
-            entry += f"  (they replied: {reply[:240]})"
+            entry += f"  (they replied: {reply[:400]})"
         log.append(entry)
         try:
             site.observer.emit(
