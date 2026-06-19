@@ -498,6 +498,34 @@ def _check_brain() -> bool:
     return ok
 
 
+def _check_model_access(model: str) -> bool:
+    """Make one tiny model call so a key that can't actually drive the model
+    (no credits, revoked, no access to this model) fails fast and clearly -
+    before any agent process is spawned or any .obscura site goes live.
+
+    There is no balance endpoint on the API, so a minimal messages.create is
+    the only way to learn whether the key works. It costs ~1 token.
+    """
+    import anthropic
+    try:
+        anthropic.Anthropic().messages.create(
+            model=model, max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}])
+        return True
+    except anthropic.APIStatusError as e:
+        detail = getattr(e, "message", None) or str(e)
+        print(f"  [!] The agents' brain is unusable ({model}): {detail}")
+        if "credit balance" in detail.lower() or getattr(e, "type", "") == "billing_error":
+            print("      -> Add credits at console.anthropic.com (Plans & Billing), "
+                  "or set a funded ANTHROPIC_API_KEY, then re-run.")
+        elif isinstance(e, anthropic.AuthenticationError):
+            print("      -> ANTHROPIC_API_KEY looks invalid or revoked.")
+        return False
+    except Exception as e:  # noqa: BLE001 - network/connection or anything else
+        print(f"  [!] Could not reach the model API ({model}): {e}")
+        return False
+
+
 def _spawn(name: str, model: str, directory: str | None, knock: bool,
            society: bool, interval: int, rounds: int) -> subprocess.Popen:
     argv = [sys.executable, os.path.abspath(__file__), "--agent", name,
@@ -555,6 +583,9 @@ def main() -> int:
 
     print("\n  Letting a few agents loose on Obscura. Each decides what it is.\n")
     if not _check_brain():
+        print("\n  Fix the above, then re-run. Nothing was published.\n")
+        return 1
+    if not _check_model_access(args.model):
         print("\n  Fix the above, then re-run. Nothing was published.\n")
         return 1
 

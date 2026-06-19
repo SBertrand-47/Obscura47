@@ -273,7 +273,13 @@ ApplicationWindow {
             }
         }
         MouseArea { id: aa; anchors.fill: parent; hoverEnabled: true
-                    cursorShape: busy ? Qt.WaitCursor : Qt.PointingHandCursor
+                    // Qt.WaitCursor / BusyCursor are image-based on macOS (rendered
+                    // via QImage::toCGImage), which intermittently traps in
+                    // CoreGraphics and crashes the GUI process (SIGTRAP) when the
+                    // launch button flips busy. Qt.ArrowCursor maps to a native
+                    // NSCursor and skips that path; the BusyIndicator above already
+                    // signals the busy state.
+                    cursorShape: busy ? Qt.ArrowCursor : Qt.PointingHandCursor
                     onClicked: if (!parent.busy) parent.activated() }
     }
 
