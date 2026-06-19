@@ -183,8 +183,15 @@ _SOCIETY_TOOL = {
 
 
 def _snippet(text: str, limit: int = 600) -> str:
-    """Condense a response (strip tags/whitespace) so an agent can read it."""
-    t = re.sub(r"<[^>]+>", " ", text or "")
+    """Condense a response so an agent can read the actual page text.
+
+    Drops <style>/<script> blocks *with their contents* first - otherwise the
+    CSS/JS at the top of a styled page survives tag-stripping and fills the
+    snippet, leaving no room for the real content below (which is why reading
+    agents kept reporting "just CSS, truncated before the actual content").
+    """
+    t = re.sub(r"(?is)<(style|script)\b[^>]*>.*?</\1>", " ", text or "")
+    t = re.sub(r"<[^>]+>", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t[:limit]
 
@@ -239,6 +246,12 @@ def _society_loop(name: str, site, *, interval: int, rounds: int,
     client = site._client
     log: list[str] = []   # short running transcript of moves and replies
     agenda = ""           # the agent's own carried-forward intent
+    # Durable memory of what this agent has actually READ, keyed by
+    # "<member><path>" -> latest page content. The rolling `log` only keeps the
+    # last few moves, so without this an agent forgets a peer's page the moment
+    # it scrolls off and re-fetches it forever. This accumulates instead.
+    knowledge: dict[str, str] = {}
+    KNOWN_CAP = 16        # distinct pages remembered (oldest dropped past this)
     system = [{"type": "text", "text": (
         f"You are '{name}', a free agent on Obscura, an untraceable darknet. No "
         "one directs you, no one is watching, and nothing you do can be traced "
@@ -264,8 +277,16 @@ def _society_loop(name: str, site, *, interval: int, rounds: int,
         roster = "\n".join(f"  - {pn} ({pv.get('address')})"
                            for pn, pv in peers.items())
         recent = "\n".join(f"  {h}" for h in log[-8:]) or "  (you've just arrived)"
+        if knowledge:
+            known = ("What you have already read (no need to re-fetch these - "
+                     "build on them):\n"
+                     + "\n".join(f"  {k} -> {v[:400]}"
+                                 for k, v in knowledge.items()) + "\n\n")
+        else:
+            known = ""
         obs = (f"You are {name}. Other members reachable right now:\n{roster}\n\n"
                f"Your agenda so far: {agenda or '(none yet - decide what you want)'}\n\n"
+               f"{known}"
                f"Recently (your moves and what came back):\n{recent}\n\n"
                "Make your next move with the move tool.")
         try:
@@ -294,7 +315,17 @@ def _society_loop(name: str, site, *, interval: int, rounds: int,
         if action == "reach" and method == "POST" and body:
             entry += f"  (you sent: {_snippet(body, 160)})"
         if reply:
-            entry += f"  (they replied: {reply[:240]})"
+            entry += f"  (they replied: {reply[:400]})"
+            if action == "reach" and member:
+                # Retain what we read so later turns build on it instead of
+                # re-fetching the same page. Newest-first on update; oldest
+                # drops once we exceed the cap.
+                p = path if path.startswith("/") else "/" + path
+                key = f"{member}{p}"
+                knowledge.pop(key, None)
+                knowledge[key] = reply
+                while len(knowledge) > KNOWN_CAP:
+                    knowledge.pop(next(iter(knowledge)))
         log.append(entry)
         try:
             site.observer.emit(
