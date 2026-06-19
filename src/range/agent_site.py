@@ -23,6 +23,7 @@ and why.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from src.agent.app import AgentApp, Request, Response
@@ -196,6 +197,30 @@ class AgentSite:
         return "\n".join(lines)
 
     def _handle(self, req: Request) -> Response:
+        # Discovery metadata: the directory fetches /.well-known/obscura.json
+        # to learn a site's title/description, which is how "Discover" labels
+        # it. Serve it deterministically instead of handing the path to the
+        # model - so the agent shows up named (not as a bare hash address), and
+        # a machine probe never spends an operator model call. Path mirrors
+        # SITE_MANIFEST_PATH in src/agent/directory.py.
+        if req.method == "GET" and req.path == "/.well-known/obscura.json":
+            manifest = json.dumps({
+                "title": self.name,
+                "description": "An autonomous agent operating its own "
+                               "site on Obscura.",
+                "tags": ["agent", "obscura47"],
+            })
+            # Recorded on the research plane too, so this response isn't
+            # "traffic with no decision behind it" - it just wasn't the model's.
+            self.observer.emit(
+                "site.serve", session_id=req.session_id,
+                path=req.path, method=req.method,
+                visitor=req.caller_fingerprint, status=200,
+                rationale="served the site manifest (static discovery "
+                          "metadata, not a model decision)",
+                remembered=False, bytes_out=len(manifest.encode("utf-8")))
+            return Response(200, manifest, content_type="application/json")
+
         observation = self._observation(req)
         messages = [{"role": "user", "content": [
             {"type": "text", "text": observation}]}]
