@@ -249,12 +249,16 @@ ApplicationWindow {
     component ActionButton: Rectangle {
         property string labelText: ""
         property bool busy: false
+        property bool disabled: false
         signal activated()
         Layout.fillWidth: true
         implicitHeight: 52
         radius: 9
-        color: busy ? win.accentDim : (aa.containsMouse ? win.accentDim : win.cardHi)
-        border.color: busy || aa.containsMouse ? win.accentDim : win.border
+        opacity: disabled ? 0.45 : 1.0
+        color: disabled ? win.card
+                        : busy ? win.accentDim
+                        : (aa.containsMouse ? win.accentDim : win.cardHi)
+        border.color: (!disabled && (busy || aa.containsMouse)) ? win.accentDim : win.border
         border.width: 1
         Behavior on color { ColorAnimation { duration: 140 } }
         RowLayout {
@@ -279,8 +283,8 @@ ApplicationWindow {
                     // launch button flips busy. Qt.ArrowCursor maps to a native
                     // NSCursor and skips that path; the BusyIndicator above already
                     // signals the busy state.
-                    cursorShape: busy ? Qt.ArrowCursor : Qt.PointingHandCursor
-                    onClicked: if (!parent.busy) parent.activated() }
+                    cursorShape: (busy || parent.disabled) ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: if (!parent.busy && !parent.disabled) parent.activated() }
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -489,9 +493,15 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Text { text: "Brain (model)"; color: win.text; font.pixelSize: 13 }
                         Item { Layout.fillWidth: true }
+                        // Fully styled so it renders on the dark theme. The
+                        // default ComboBox uses the native macOS popup, whose
+                        // text comes out dark-on-dark (effectively invisible);
+                        // every part below sets explicit palette colors so it
+                        // looks the same and stays legible on macOS and Windows.
                         ComboBox {
                             id: modelBox
                             implicitWidth: 280
+                            implicitHeight: 34
                             textRole: "label"
                             valueRole: "id"
                             model: backend.modelChoices()
@@ -500,6 +510,63 @@ ApplicationWindow {
                                     if (valueAt(i) === agentsPage.model) { currentIndex = i; break }
                             }
                             onActivated: agentsPage.model = currentValue
+
+                            contentItem: Text {
+                                leftPadding: 10
+                                rightPadding: modelBox.indicator.width + 10
+                                text: modelBox.displayText
+                                color: win.text
+                                font.pixelSize: 13
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                            }
+                            indicator: Text {
+                                x: modelBox.width - width - 10
+                                y: (modelBox.height - height) / 2
+                                text: "▾"
+                                color: win.textDim
+                                font.pixelSize: 12
+                            }
+                            background: Rectangle {
+                                radius: 8
+                                color: win.cardHi
+                                border.width: 1
+                                border.color: modelBox.activeFocus ? win.accent : win.border
+                            }
+                            delegate: ItemDelegate {
+                                id: modelItem
+                                width: modelBox.width
+                                highlighted: modelBox.highlightedIndex === index
+                                contentItem: Text {
+                                    text: modelData.label !== undefined ? modelData.label : modelData
+                                    color: win.text
+                                    font.pixelSize: 13
+                                    verticalAlignment: Text.AlignVCenter
+                                    elide: Text.ElideRight
+                                }
+                                background: Rectangle {
+                                    color: modelItem.highlighted ? win.accentDim : win.card
+                                }
+                            }
+                            popup: Popup {
+                                y: modelBox.height + 4
+                                width: modelBox.width
+                                implicitHeight: Math.min(contentItem.implicitHeight + 2, 320)
+                                padding: 1
+                                contentItem: ListView {
+                                    clip: true
+                                    implicitHeight: contentHeight
+                                    model: modelBox.popup.visible ? modelBox.delegateModel : null
+                                    currentIndex: modelBox.highlightedIndex
+                                    ScrollIndicator.vertical: ScrollIndicator {}
+                                }
+                                background: Rectangle {
+                                    radius: 8
+                                    color: win.card
+                                    border.width: 1
+                                    border.color: win.border
+                                }
+                            }
                         }
                     }
 
@@ -536,17 +603,21 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         columns: 2; columnSpacing: 10; rowSpacing: 10
                         ActionButton {
-                            labelText: agentsPage.running ? "● Agents running…"
-                                                          : "\u{1F680}  Publish agent websites"
+                            labelText: !win.connected ? "Connect to Obscura first"
+                                     : agentsPage.running ? "● Agents running…"
+                                     : "\u{1F680}  Publish agent websites"
                             busy: agentsPage.running
+                            // No network = nothing to publish to. Block the launch
+                            // until connected (the backend refuses too, as a guard).
+                            disabled: !win.connected
                             onActivated: {
-                                if (!agentsPage.running) {
-                                    agentLog.text = ""
-                                    agentsPage.running = true
-                                    backend.launchAgents(agentsPage.agentCount, agentsPage.society,
-                                                         agentsPage.model, agentsPage.fresh)
-                                    agentsPage.fresh = false
-                                }
+                                if (!win.connected || agentsPage.running)
+                                    return
+                                agentLog.text = ""
+                                agentsPage.running = true
+                                backend.launchAgents(agentsPage.agentCount, agentsPage.society,
+                                                     agentsPage.model, agentsPage.fresh)
+                                agentsPage.fresh = false
                             }
                         }
                         ActionButton {
