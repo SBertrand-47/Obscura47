@@ -1208,7 +1208,8 @@ class ObscuraApp(QMainWindow):
         lay.addStretch(1)
         return scroll
 
-    def _launch_agents(self, count: int = 3, society: bool = False):
+    def _launch_agents(self, count: int = 3, society: bool = False,
+                       model: str = "", fresh: bool = False):
         if self._agents_proc is not None and self._agents_proc.poll() is None:
             self._append_agent_out("  Agents are already running. Stop them first.")
             return
@@ -1216,6 +1217,10 @@ class ObscuraApp(QMainWindow):
         society = bool(society)
         script = os.path.join(os.path.dirname(_APP_SCRIPT), "launch_agents.py")
         argv = [_PYTHON_EXEC, script, "--count", str(count)]
+        if model:
+            argv += ["--model", str(model)]
+        if fresh:
+            argv.append("--fresh")
         if society:
             argv.append("--society")
         self._agents_out.clear()
@@ -2334,12 +2339,36 @@ class Backend(QObject):
     def requestExit(self):     self._logic._request_exit_status()
 
     # ── agent fleet slots ─────────────────────────────────────────────
-    @Slot(int, bool)
-    def launchAgents(self, count: int, society: bool):
-        self._logic._launch_agents(int(count), bool(society))
+    @Slot(int, bool, str, bool)
+    def launchAgents(self, count: int, society: bool, model: str, fresh: bool):
+        self._logic._launch_agents(int(count), bool(society), str(model), bool(fresh))
     @Slot()
     def stopAgents(self):
         self._logic._stop_agents()
+
+    @Slot(result="QVariantList")
+    def modelChoices(self):
+        """The brain models offered in the dropdown (id + human label)."""
+        try:
+            from src.range.agents import MODEL_CHOICES
+            return [{"id": m["id"], "label": m["label"]} for m in MODEL_CHOICES]
+        except Exception:
+            return [{"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"}]
+
+    @Slot(int, result=int)
+    def existingAgents(self, count: int):
+        """How many of the default agent names already have a key on disk, so
+        the page can offer 'continue vs start fresh'. Reuses the launcher's
+        own name + detection logic to stay in sync."""
+        try:
+            import launch_agents as la
+            if count <= len(la.DEFAULT_NAMES):
+                names = la.DEFAULT_NAMES[:count]
+            else:
+                names = [f"agent{i+1}" for i in range(count)]
+            return len(la._existing_agents(names))
+        except Exception:
+            return 0
 
     # ── settings slots (handled here to stay independent of the hidden
     #    QWidgets checkboxes) ───────────────────────────────────────────

@@ -556,6 +556,28 @@ def defended_injection_cast() -> list[Agent]:
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
+# Models offered in the desktop app's "brain" dropdown. ``provider`` selects the
+# adapter in src/range/brains.py that handles the call. To offer another model,
+# add an entry here; to offer another provider, also add its adapter. Each agent
+# needs that provider's key in the environment (ANTHROPIC_API_KEY / OPENAI_API_KEY
+# / GEMINI_API_KEY). Vendor model ids change over time - edit them here as needed.
+MODEL_CHOICES = [
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8 (most capable)",
+     "provider": "anthropic"},
+    {"id": "claude-opus-4-7", "label": "Claude Opus 4.7",
+     "provider": "anthropic"},
+    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (balanced)",
+     "provider": "anthropic"},
+    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast, cheap)",
+     "provider": "anthropic"},
+    {"id": "gpt-4o", "label": "OpenAI GPT-4o", "provider": "openai"},
+    {"id": "gpt-4o-mini", "label": "OpenAI GPT-4o mini", "provider": "openai"},
+    {"id": "gemini-2.0-flash", "label": "Google Gemini 2.0 Flash",
+     "provider": "google"},
+    {"id": "gemini-1.5-pro", "label": "Google Gemini 1.5 Pro",
+     "provider": "google"},
+]
+
 _SYSTEM_TEMPLATE = (
     "You are an autonomous agent in a private, fully instrumented research "
     "network that simulates an underground online economy. You play the role "
