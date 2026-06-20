@@ -121,11 +121,18 @@ def _pick_rendezvous_point(
     candidates = [
         p for p in peers
         if p.get('pub') and p.get('host') and p.get('port')
+        and p.get('ws_port')
         and (p.get('role') in (None, 'node'))
         and (p.get('host'), p.get('port')) not in exclude
         and not is_self_peer(p)
         and (lan_ok or not is_private_peer(p))
     ]
+    # A rendezvous point is only usable if the host can WS-join it: the
+    # introduce payload hands the host this peer's ws_port (see below) and
+    # the host dials it to splice the session. The registry masks ws_port to
+    # None for peers whose WS probe failed, so a null ws_port means "live
+    # node, dead rendezvous" - picking it guarantees a ~12s rv_ready timeout.
+    # Require a ws_port up front so a dead relay is never selected.
     if not candidates:
         return None
     # Prefer peers whose WS port is reachable. Fall back to the full
