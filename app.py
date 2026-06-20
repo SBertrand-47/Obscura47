@@ -854,6 +854,14 @@ class ObscuraApp(QMainWindow):
         self._connected = False
         self._banner_green = False
 
+        # Inbound reachability of our own node, used to gate the "Primary
+        # public node" label so it cannot claim public status while the port
+        # is firewalled. Tri-state: True reachable, False confirmed blocked,
+        # None not yet confirmed. Refreshed off the UI thread by _poll.
+        self._inbound_reachable: bool | None = None
+        self._inbound_checked_at: float = 0.0
+        self._inbound_probing = False
+
         # ── Cross-thread signalling ────────────────────────────────
         self._signals = _Worker()
         self._signals.log.connect(self._append_log)
@@ -1212,6 +1220,17 @@ class ObscuraApp(QMainWindow):
                        model: str = "", fresh: bool = False):
         if self._agents_proc is not None and self._agents_proc.poll() is None:
             self._append_agent_out("  Agents are already running. Stop them first.")
+            return
+        if not self._connected:
+            # Agents publish .obscura sites onto the overlay and establish intro
+            # circuits through it; with no connection there is nothing to publish
+            # to, so refuse rather than spawn a fleet that can only fail. Emit via
+            # the signal so the message reaches the QML log, and emit the stop
+            # sentinel so the QML launch button resets out of its busy state.
+            self._signals.agent_out.emit(
+                "  Not connected to Obscura. Press Connect first - agents have "
+                "no network to publish their sites to until you are connected.")
+            self._signals.agent_out.emit("  [agent fleet stopped]")
             return
         count = int(count)
         society = bool(society)
@@ -2144,19 +2163,30 @@ class ObscuraApp(QMainWindow):
                 lbl.setText(f"{DOT} Stopped")
                 lbl.setStyleSheet(f"color: {TEXT_DIM}; font-size: 12px;")
 
-        # Role indicator: primary public node vs internal sibling. Reads the
-        # classification the registry returned at registration time; while
-        # we're not connected, fall back to a neutral placeholder.
+        # Role indicator: primary public node vs internal sibling. The registry
+        # classifies us "primary" simply for being the first node on our public
+        # IP - it does NOT prove the world can open our port. So for a primary we
+        # gate the green "public" claim on a real inbound reachability probe and
+        # otherwise say so plainly, instead of reporting a firewalled black hole
+        # as healthy.
         try:
             from src.core.internet_discovery import get_role_kind, get_primary_peer
             kind = get_role_kind("node")
             primary = get_primary_peer()
         except Exception:
             kind, primary = None, None
+        self._maybe_probe_inbound(kind)
         if not self._running.get("node", False):
             self._set_role("Detecting…", TEXT_DIM)
         elif kind == "primary":
-            self._set_role("Primary public node", GREEN)
+            if self._inbound_reachable is True:
+                self._set_role("Primary public node", GREEN)
+            elif self._inbound_reachable is False:
+                self._set_role("Primary node - inbound port blocked", RED)
+            elif self._inbound_checked_at:
+                self._set_role("Primary node - reachability unconfirmed", YELLOW)
+            else:
+                self._set_role("Primary node - checking reachability…", TEXT_DIM)
         elif kind == "sibling":
             if primary and primary.get("host"):
                 gw = f"{primary['host']}:{primary.get('port', '?')}"
@@ -2193,6 +2223,63 @@ class ObscuraApp(QMainWindow):
     def _set_role(self, text: str, color: str):
         self._role_label.setText(text)
         self._role_label.setStyleSheet(f"color: {color}; font-size: 12px;")
+
+    # ── Inbound reachability self-check (gates the "public node" label) ──
+
+    def _maybe_probe_inbound(self, kind: str | None) -> None:
+        """Kick off a throttled, off-thread check of whether our own node is
+        actually reachable from the public internet. Only meaningful for a
+        primary (a sibling is reached via its gateway, not directly)."""
+        if kind != "primary" or not self._running.get("node", False):
+            self._inbound_reachable = None
+            self._inbound_checked_at = 0.0
+            return
+        now = time.time()
+        if self._inbound_probing or (now - self._inbound_checked_at) < 30:
+            return
+        self._inbound_probing = True
+        threading.Thread(target=self._probe_inbound_worker, daemon=True).start()
+
+    def _probe_inbound_worker(self) -> None:
+        verdict: bool | None = None
+        try:
+            verdict = self._compute_inbound_reachable()
+        except Exception:
+            verdict = None
+        finally:
+            self._inbound_reachable = verdict
+            self._inbound_checked_at = time.time()
+            self._inbound_probing = False
+
+    @staticmethod
+    def _compute_inbound_reachable() -> bool | None:
+        """True if our node is reachable from outside, False if confirmed
+        blocked, None if it cannot be determined from here. Runs on a worker
+        thread (it does network I/O)."""
+        from src.core import internet_discovery, peer_health
+        from src.utils.config import NODE_LISTEN_PORT, NODE_WS_PORT
+        host = internet_discovery.learn_public_ip()
+        if not host:
+            return None
+        # Authoritative: the registry probes every advertised ws_port from its
+        # own vantage and masks it out of /peers when the probe fails. If our
+        # entry still carries ws_port the network can dial us; if masked it
+        # cannot. This is a true "reachable from obscura" verdict.
+        masked = peer_health._registry_ws_masked("node", host, NODE_WS_PORT)
+        if masked is True:
+            return False
+        if masked is False:
+            return True
+        # Registry verdict unavailable (e.g. it rewrites our entry to a LAN
+        # address for same-NAT callers, hiding our public row from our own
+        # query). A direct hit on our public endpoint positively proves the
+        # port is open; a miss is inconclusive (some routers block self-
+        # connections), so report None rather than a false "blocked".
+        for port in (NODE_WS_PORT, NODE_LISTEN_PORT):
+            ok, _ = peer_health.probe_tcp(host, int(port), timeout=3.0)
+            if ok:
+                return True
+        return None
 
     def _set_status(self, color: str, text: str, detail: str):
         self._banner_dot.setStyleSheet(f"color: {color}; font-size: 16px;")
@@ -2424,12 +2511,45 @@ class Backend(QObject):
             self.changed.emit()
 
 
+def _apply_qml_theme(app: "QApplication") -> None:
+    """Force a non-native Qt Quick Controls style with a dark palette.
+
+    The default style on macOS (and Windows) is the *native* one, which
+    ignores control customization - a ComboBox's contentItem/popup/delegate
+    colors are silently dropped, so the model dropdown rendered dark-on-dark
+    and was effectively invisible on macOS (and looked different again on
+    Windows). Fusion is non-native: it honors customization and renders the
+    same on every platform. The dark palette keeps the controls we don't fully
+    restyle (SpinBox, Switch, ScrollBar) legible on the dark theme.
+    """
+    from PySide6.QtGui import QColor, QPalette
+    from PySide6.QtQuickControls2 import QQuickStyle
+
+    QQuickStyle.setStyle("Fusion")
+    pal = QPalette()
+    pal.setColor(QPalette.Window, QColor("#161b22"))
+    pal.setColor(QPalette.WindowText, QColor("#c9d1d9"))
+    pal.setColor(QPalette.Base, QColor("#1c2333"))
+    pal.setColor(QPalette.AlternateBase, QColor("#161b22"))
+    pal.setColor(QPalette.Text, QColor("#c9d1d9"))
+    pal.setColor(QPalette.Button, QColor("#1c2333"))
+    pal.setColor(QPalette.ButtonText, QColor("#c9d1d9"))
+    pal.setColor(QPalette.Highlight, QColor("#1f6feb"))
+    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.PlaceholderText, QColor("#8b949e"))
+    pal.setColor(QPalette.Disabled, QPalette.Text, QColor("#6e7681"))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#6e7681"))
+    app.setPalette(pal)
+
+
 def _run_qml(app: "QApplication", background: bool) -> int:
     """Launch the QML shell backed by a headless ObscuraApp. Returns exit code.
 
     Raises if the QML fails to load so the caller can fall back to classic.
     """
     from PySide6.QtQml import QQmlApplicationEngine
+
+    _apply_qml_theme(app)
 
     logic = ObscuraApp(background=False, headless=True)  # hidden logic engine
     backend = Backend(logic)
