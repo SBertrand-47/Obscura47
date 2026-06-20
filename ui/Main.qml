@@ -436,10 +436,15 @@ ApplicationWindow {
         id: agentsPage
         property int agentCount: 3
         property bool society: false
+        property string model: "claude-sonnet-4-6"
+        property bool fresh: false
+        property int priorAgents: 0
         property bool running: false
         contentHeight: agCol.implicitHeight + 48
         clip: true
         ScrollBar.vertical: ScrollBar {}
+        Component.onCompleted: priorAgents = backend.existingAgents(agentCount)
+        onAgentCountChanged: priorAgents = backend.existingAgents(agentCount)
         ColumnLayout {
             id: agCol
             x: 28; y: 24; width: parent.width - 56
@@ -482,6 +487,39 @@ ApplicationWindow {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        Text { text: "Brain (model)"; color: win.text; font.pixelSize: 13 }
+                        Item { Layout.fillWidth: true }
+                        ComboBox {
+                            id: modelBox
+                            implicitWidth: 280
+                            textRole: "label"
+                            valueRole: "id"
+                            model: backend.modelChoices()
+                            Component.onCompleted: {
+                                for (var i = 0; i < count; i++)
+                                    if (valueAt(i) === agentsPage.model) { currentIndex = i; break }
+                            }
+                            onActivated: agentsPage.model = currentValue
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: agentsPage.priorAgents > 0
+                        spacing: 12
+                        Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
+                               text: agentsPage.priorAgents + " agent(s) already exist. Start fresh "
+                                     + "gives them new .obscura addresses (old keys and decisions "
+                                     + "archived); off = continue at the same addresses."
+                               color: win.text; font.pixelSize: 13 }
+                        Switch {
+                            checked: agentsPage.fresh
+                            onToggled: agentsPage.fresh = checked
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
                         spacing: 12
                         Text { Layout.fillWidth: true; wrapMode: Text.WordWrap
                                text: "Run them fully - each agent acts as a free member of the society, "
@@ -505,7 +543,9 @@ ApplicationWindow {
                                 if (!agentsPage.running) {
                                     agentLog.text = ""
                                     agentsPage.running = true
-                                    backend.launchAgents(agentsPage.agentCount, agentsPage.society)
+                                    backend.launchAgents(agentsPage.agentCount, agentsPage.society,
+                                                         agentsPage.model, agentsPage.fresh)
+                                    agentsPage.fresh = false
                                 }
                             }
                         }
