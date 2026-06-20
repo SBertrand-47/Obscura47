@@ -382,6 +382,13 @@ def _has_distinct_rendezvous_point(
     for p in peers:
         if p.get("role") not in (None, "node"):
             continue
+        if not p.get("ws_port"):
+            # Mirror _pick_rendezvous_point: a rendezvous point must be
+            # WS-dialable. The registry masks ws_port to None for peers
+            # whose WS probe failed, so a null ws_port is a live node that
+            # cannot splice an rv session. Counting it here would flash
+            # this step green while every real dial times out on it.
+            continue
         if (p.get("host"), p.get("port")) in intro_keys:
             continue
         if is_self_peer(p):
